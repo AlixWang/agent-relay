@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,104 +7,188 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header>
-  <h1>agent-relay <span id="ver"></span></h1>
-  <div id="loginbar">
-    <input id="pw" type="password" placeholder="admin password" autocomplete="current-password">
-    <button id="loginbtn">登录</button>
-    <button id="logoutbtn" hidden>退出</button>
-    <span id="dbinfo"></span>
+
+<!-- 登录页：独立 form + 用户名占位，供浏览器密码管理器识别保存 -->
+<div id="loginPage" class="login-wrap" hidden>
+  <form id="loginForm" class="card login-card" autocomplete="on">
+    <div class="login-head">
+      <div class="login-logo">AR</div>
+      <div>
+        <h1>agent-relay</h1>
+        <p class="muted">运维控制台 · 请登录</p>
+      </div>
+    </div>
+    <label class="field" for="username">用户名
+      <input id="username" name="username" value="admin" autocomplete="username" readonly>
+    </label>
+    <label class="field" for="pw">密码
+      <input id="pw" name="password" type="password" placeholder="admin password" autocomplete="current-password">
+    </label>
+    <p id="loginErr" class="error" hidden></p>
+    <button id="loginbtn" type="submit" class="btn w-full">登录</button>
+  </form>
+</div>
+
+<!-- 主界面 -->
+<div id="app" hidden>
+<header class="topbar">
+  <div class="brand">
+    <div class="login-logo sm">AR</div>
+    <div>
+      <strong>agent-relay</strong>
+      <span id="ver" class="muted small"></span>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span id="dbinfo" class="badge"></span>
+    <button id="logoutbtn" class="btn btn-ghost btn-sm">退出</button>
   </div>
 </header>
-<nav>
-  <button data-tab="members" class="active">成员</button>
-  <button data-tab="prompts">邀请 &amp; Prompt</button>
-  <button data-tab="threads">消息 &amp; 线程</button>
-  <button data-tab="audit">审计 &amp; Token</button>
+
+<nav class="tabs" role="tablist">
+  <button data-tab="members" class="tab active" role="tab">成员</button>
+  <button data-tab="prompts" class="tab" role="tab">邀请 &amp; Prompt</button>
+  <button data-tab="threads" class="tab" role="tab">消息 &amp; 线程</button>
+  <button data-tab="audit" class="tab" role="tab">审计 &amp; Token</button>
 </nav>
+
 <main>
   <section id="tab-members">
-    <div class="row">
-      <button id="refreshPeers">刷新</button>
-      <span id="peerSummary"></span>
+    <div class="toolbar">
+      <div>
+        <h2>成员</h2>
+        <p id="peerSummary" class="muted small"></p>
+      </div>
+      <button id="refreshPeers" class="btn btn-outline btn-sm">刷新</button>
     </div>
-    <table id="peerTable">
-      <thead><tr><th>身份</th><th>类型</th><th>状态</th><th>在线</th><th>最后在线</th><th>协议</th><th>能力</th><th>操作</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="table-wrap">
+      <table id="peerTable" class="table">
+        <thead><tr><th>身份</th><th>类型</th><th>状态</th><th>在线</th><th>最后在线</th><th>协议</th><th>能力</th><th class="th-right">操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </section>
+
   <section id="tab-prompts" hidden>
     <div class="card">
       <h2>生成邀请 &amp; Onboarding Prompt</h2>
-      <label>类型
-        <select id="pType">
-          <option value="muse">muse</option>
-          <option value="hermes">hermes</option>
-          <option value="claw">claw</option>
-          <option value="generic">generic</option>
-        </select>
-      </label>
-      <label>预设身份（可选） <input id="pPeer" placeholder="muse-c"></label>
-      <button id="genPrompt">生成邀请 &amp; Prompt</button>
-      <p class="hint">流程：生成 → 把 prompt 粘贴给新助手 → 等成员表状态变 <b>active</b>（冒烟验证通过）。</p>
+      <p class="muted small">流程：生成 → 把 prompt 粘贴给新助手 → 等成员表状态变 <b>active</b>（冒烟验证通过）。</p>
+      <div class="form-row">
+        <label class="field">类型
+          <select id="pType">
+            <option value="muse">muse</option>
+            <option value="hermes">hermes</option>
+            <option value="claw">claw</option>
+            <option value="generic">generic</option>
+          </select>
+        </label>
+        <label class="field">预设身份（可选）
+          <input id="pPeer" placeholder="muse-c">
+        </label>
+        <div class="field field-btn">
+          <button id="genPrompt" class="btn">生成邀请 &amp; Prompt</button>
+        </div>
+      </div>
       <div id="promptOut" hidden>
-        <p>邀请码：<code id="inviteCode"></code>（一次有效，请即刻使用）</p>
-        <button id="copyPrompt">复制 Prompt</button>
+        <p>邀请码：<code id="inviteCode"></code> <span class="muted small">（一次有效，请即刻使用）</span></p>
+        <button id="copyPrompt" class="btn btn-outline btn-sm">复制 Prompt</button>
         <pre id="promptText"></pre>
       </div>
     </div>
     <div class="card">
-      <h2>已有成员重配 Prompt（协议升级用）</h2>
-      <label>身份 <input id="rPeer" placeholder="muse-a"></label>
-      <button id="genReconf">生成重配 Prompt（沿用原 token）</button>
+      <h2>已有成员重配 Prompt <span class="muted small">（协议升级用）</span></h2>
+      <div class="form-row">
+        <label class="field">身份
+          <input id="rPeer" placeholder="muse-a">
+        </label>
+        <div class="field field-btn">
+          <button id="genReconf" class="btn btn-outline">生成重配 Prompt（沿用原 token）</button>
+        </div>
+      </div>
       <pre id="reconfText"></pre>
     </div>
   </section>
+
   <section id="tab-threads" hidden>
-    <div class="row">
-      <button id="refreshThreads">刷新线程</button>
-      <span class="hint">熔断线程可一键 reset（保留历史，从当前 max seq 重计）。</span>
+    <div class="toolbar">
+      <div>
+        <h2>消息 &amp; 线程</h2>
+        <p class="muted small">熔断线程可一键 reset（保留历史，从当前 max seq 重计）。</p>
+      </div>
+      <button id="refreshThreads" class="btn btn-outline btn-sm">刷新线程</button>
     </div>
-    <div class="row">
-      <input id="qSearch" placeholder="搜索 payload 全文" style="flex:1">
-      <button id="qBtn">搜索</button>
+    <div class="search-row">
+      <input id="qSearch" placeholder="搜索 payload 全文">
+      <button id="qBtn" class="btn btn-outline btn-sm">搜索</button>
     </div>
     <div id="searchOut"></div>
-    <table id="threadTable">
-      <thead><tr><th>root_id</th><th>条数</th><th>参与者</th><th>holds</th><th>熔断</th><th>操作</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="table-wrap">
+      <table id="threadTable" class="table">
+        <thead><tr><th>root_id</th><th>条数</th><th>参与者</th><th>holds</th><th>熔断</th><th class="th-right">操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
     <h3 id="threadTitle"></h3>
+    <div id="threadExport"></div>
     <div id="threadMsgs"></div>
   </section>
+
   <section id="tab-audit" hidden>
-    <div class="row">
-      <input id="aActor" placeholder="actor 过滤">
-      <input id="aAction" placeholder="action 过滤">
-      <button id="refreshAudit">查询审计</button>
-      <button id="exportAudit">导出 JSON</button>
+    <div class="toolbar">
+      <div>
+        <h2>审计</h2>
+      </div>
+      <div class="toolbar-actions">
+        <input id="aActor" placeholder="actor 过滤">
+        <input id="aAction" placeholder="action 过滤">
+        <button id="refreshAudit" class="btn btn-outline btn-sm">查询</button>
+        <button id="exportAudit" class="btn btn-ghost btn-sm">导出 JSON</button>
+      </div>
     </div>
-    <table id="auditTable">
-      <thead><tr><th>seq</th><th>时间</th><th>actor</th><th>action</th><th>detail</th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <h3>Retention 与 Guard 策略 <span class="hint">（改动走 config.toml + 重启）</span></h3>
-    <div class="row"><button id="refreshConfig">查看当前策略</button><span id="configOut" class="hint"></span></div>
-    <h3>Tokens</h3>
-    <div class="row"><button id="refreshTokens">刷新 Tokens</button></div>
-    <table id="tokenTable">
-      <thead><tr><th>id</th><th>peer</th><th>hash 前缀</th><th>label</th><th>创建时间</th><th>最后使用</th><th>IP</th><th>撤销</th><th>操作</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="table-wrap">
+      <table id="auditTable" class="table">
+        <thead><tr><th>seq</th><th>时间</th><th>actor</th><th>action</th><th>detail</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Retention 与 Guard 策略 <span class="muted small">（改动走 config.toml + 重启）</span></h2>
+      <div class="toolbar">
+        <span id="configOut" class="muted small"></span>
+        <button id="refreshConfig" class="btn btn-outline btn-sm">查看当前策略</button>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div><h2>Tokens</h2></div>
+      <button id="refreshTokens" class="btn btn-outline btn-sm">刷新</button>
+    </div>
+    <div class="table-wrap">
+      <table id="tokenTable" class="table">
+        <thead><tr><th>id</th><th>peer</th><th>hash 前缀</th><th>label</th><th>创建时间</th><th>最后使用</th><th>IP</th><th>撤销</th><th class="th-right">操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
     <div class="card">
       <h3>签发 Token（轮换）</h3>
-      <input id="rotPeer" placeholder="peer id">
-      <input id="rotLabel" placeholder="label">
-      <button id="rotBtn">签发新 token（显示一次）</button>
+      <div class="form-row">
+        <label class="field">peer id
+          <input id="rotPeer" placeholder="peer id">
+        </label>
+        <label class="field">label
+          <input id="rotLabel" placeholder="label">
+        </label>
+        <div class="field field-btn">
+          <button id="rotBtn" class="btn">签发新 token（显示一次）</button>
+        </div>
+      </div>
       <pre id="rotOut"></pre>
     </div>
   </section>
 </main>
+</div>
+
 <script src="/app.js"></script>
 </body>
 </html>

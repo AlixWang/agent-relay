@@ -85,6 +85,10 @@ type Store interface {
 	UpdatePeerCapabilities(id string, protocolVer int, caps string) error
 	TouchPeer(id string, ts int64) error
 	PrunePeers(olderThan int64) (int64, error)
+	// DeletePeer removes the peer row, revokes all its tokens and clears
+	// verify state in one transaction. Message history is intentionally
+	// kept (threads stay readable, sender shown as-is).
+	DeletePeer(id string, ts int64) (tokensRevoked int64, err error)
 	// tokens
 	CreateToken(peerID, hash, label string, ts int64) (int64, error)
 	FindPeerByTokenHash(hash string) (*Peer, *TokenRow, error)
@@ -289,6 +293,32 @@ func (s *sqliteStore) PrunePeers(olderThan int64) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+func (s *sqliteStore) DeletePeer(id string, ts int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE tokens SET revoked_at=? WHERE peer_id=? AND revoked_at=0`, ts, id)
+	if err != nil {
+		return 0, err
+	}
+	revoked, _ := res.RowsAffected()
+	if _, err := tx.Exec(`DELETE FROM verify_state WHERE peer_id=?`, id); err != nil {
+		return 0, err
+	}
+	res, err = tx.Exec(`DELETE FROM peers WHERE id=?`, id)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return 0, fmt.Errorf("unknown peer %q", id)
+	}
+	return revoked, tx.Commit()
 }
 
 // ---- tokens ----

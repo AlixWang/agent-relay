@@ -81,6 +81,7 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("DELETE /admin/invites/{code}", s.requireAdmin(s.handleAdminDeleteInvite))
 	mux.HandleFunc("GET /admin/peers", s.requireAdmin(s.handleAdminListPeers))
 	mux.HandleFunc("PATCH /admin/peers/{id}", s.requireAdmin(s.handleAdminPatchPeer))
+	mux.HandleFunc("DELETE /admin/peers/{id}", s.requireAdmin(s.handleAdminDeletePeer))
 	mux.HandleFunc("GET /admin/tokens", s.requireAdmin(s.handleAdminListTokens))
 	mux.HandleFunc("DELETE /admin/tokens/{id}", s.requireAdmin(s.handleAdminRevokeToken))
 	mux.HandleFunc("POST /admin/tokens/rotate", s.requireAdmin(s.handleAdminRotateToken))
@@ -463,6 +464,10 @@ func (s *Server) handleSmoke(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		// Username is accepted but not verified: single-admin deployment.
+		// It exists so browsers offer to save the credential (the login
+		// form sends username=admin with autocomplete=username).
+		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if !s.readJSON(w, r, &req) {
@@ -606,6 +611,23 @@ func (s *Server) handleAdminListPeers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "peers": views})
+}
+
+func (s *Server) handleAdminDeletePeer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	now := time.Now().Unix()
+	n, err := s.st.DeletePeer(id, now)
+	if err != nil {
+		if strings.Contains(err.Error(), "unknown peer") {
+			writeErr(w, 404, "unknown peer")
+			return
+		}
+		writeErr(w, 500, "delete failed")
+		return
+	}
+	_ = s.st.AppendAudit("admin", "peer.deleted",
+		fmt.Sprintf("peer=%s tokens_revoked=%d", id, n), now)
+	writeJSON(w, 200, map[string]any{"ok": true, "tokens_revoked": n})
 }
 
 func (s *Server) handleAdminPatchPeer(w http.ResponseWriter, r *http.Request) {

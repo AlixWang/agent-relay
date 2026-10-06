@@ -84,9 +84,13 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 			line = line[j+1:]
 		}
 	}
-	// static $('...') refs (dynamic 'tab-'+t handled below)
+	// loginbtn is a static HTML id wired via form submit (no direct $() ref).
+	// expMd/expJsonl are injected dynamically by viewThread — skip here.
+	if !ids["loginbtn"] {
+		t.Fatal(`index.html missing id="loginbtn"`)
+	}
 	for _, ref := range []string{
-		"pw", "loginbtn", "logoutbtn", "dbinfo", "ver",
+		"pw", "logoutbtn", "dbinfo", "ver",
 		"refreshPeers", "peerSummary", "peerTable",
 		"pType", "pPeer", "genPrompt", "promptOut", "inviteCode",
 		"copyPrompt", "promptText", "rPeer", "genReconf", "reconfText",
@@ -95,6 +99,7 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 		"aActor", "aAction", "refreshAudit", "exportAudit", "auditTable",
 		"refreshConfig", "configOut",
 		"refreshTokens", "tokenTable", "rotPeer", "rotLabel", "rotBtn", "rotOut",
+		"loginPage", "loginForm", "loginErr", "username", "app",
 	} {
 		if !strings.Contains(js, "$('"+ref+"')") {
 			t.Fatalf("app.js no longer references #%s (test stale?)", ref)

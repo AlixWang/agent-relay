@@ -430,6 +430,38 @@ func TestClientIPTrustBoundary(t *testing.T) {
 	}
 }
 
+func TestAdminDeletePeer(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "gone", "muse")
+	admin := f.adminLogin(t)
+	// Delete removes peer + revokes tokens, keeps message history.
+	_, _ = f.doAuth(t, "POST", "/messages",
+		map[string]any{"id": "m1", "to": "gone", "from": "gone", "payload": "x"}, f.tok["gone"])
+	c, out := f.doAuth(t, "DELETE", "/admin/peers/gone", nil, admin)
+	if c != 200 {
+		t.Fatalf("delete: %d %+v", c, out)
+	}
+	if p, _ := f.srv.st.GetPeer("gone"); p != nil {
+		t.Fatal("peer row kept")
+	}
+	toks, _ := f.srv.st.ListTokensByPeer("gone")
+	for _, tk := range toks {
+		if tk.RevokedAt == 0 {
+			t.Fatal("token not revoked")
+		}
+	}
+	// Auth with old token now fails.
+	c, _ = f.do(t, "GET", "/peers", nil, f.tok["gone"])
+	if c != 401 {
+		t.Fatalf("deleted peer token should 401, got %d", c)
+	}
+	// Unknown peer → 404.
+	c, _ = f.doAuth(t, "DELETE", "/admin/peers/nobody", nil, admin)
+	if c != 404 {
+		t.Fatalf("unknown peer should 404, got %d", c)
+	}
+}
+
 func TestAdminConfigSnapshot(t *testing.T) {
 	f := newFixture(t)
 	admin := f.adminLogin(t)

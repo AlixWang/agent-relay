@@ -18,74 +18,111 @@ const ago = (ts) => {
   return Math.floor(d / 86400) + 'd 前';
 };
 const fmtTime = (ts) => ts ? new Date(ts * 1000).toLocaleString() : '-';
+const statusBadge = (st) => {
+  const cls = st === 'active' ? 'ok' : (st === 'suspended' || st === 'failed' ? 'bad' : 'warn');
+  return `<span class="badge ${cls}">${esc(st)}</span>`;
+};
 const caps = (c) => {
-  if (!c || typeof c !== 'object') return '<span class="hint">-</span>';
+  if (!c || typeof c !== 'object') return '<span class="muted small">—</span>';
   const keys = Object.keys(c).filter((k) => c[k]);
-  if (!keys.length) return '<span class="hint">-</span>';
+  if (!keys.length) return '<span class="muted small">—</span>';
   return keys.map((k) => `<span class="badge">${esc(k)}</span>`).join('');
 };
 
-document.querySelectorAll('nav button').forEach((b) => {
+/* ---------- 登录页 / 主界面切换 ---------- */
+function showLogin(msg) {
+  $('app').hidden = true;
+  $('loginPage').hidden = false;
+  if (msg) {
+    $('loginErr').textContent = msg;
+    $('loginErr').hidden = false;
+  } else {
+    $('loginErr').hidden = true;
+  }
+}
+function showApp() {
+  $('loginPage').hidden = true;
+  $('app').hidden = false;
+}
+
+document.querySelectorAll('.tab').forEach((b) => {
   b.onclick = () => {
-    document.querySelectorAll('nav button').forEach((x) => x.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
     b.classList.add('active');
     ['members', 'prompts', 'threads', 'audit'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
   };
 });
 
-$('loginbtn').onclick = async () => {
+// username 仅供浏览器密码管理器保存凭证占位，服务端只校验密码。
+$('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
   try {
-    await api('/admin/login', { method: 'POST', body: JSON.stringify({ password: $('pw').value }) });
+    await api('/admin/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: $('username').value, password: $('pw').value }),
+    });
     $('pw').value = '';
-    $('loginbtn').hidden = true; $('logoutbtn').hidden = false;
+    showApp();
     refreshAll();
-  } catch (e) { alert('登录失败: ' + e.message); }
-};
+  } catch (err) {
+    showLogin('登录失败：' + err.message);
+  }
+});
 $('logoutbtn').onclick = async () => {
   await api('/admin/logout', { method: 'POST' }).catch(() => {});
-  $('loginbtn').hidden = false; $('logoutbtn').hidden = true;
+  showLogin();
 };
 
 async function refreshStats() {
   try {
     const s = await api('/admin/stats');
-    $('ver').textContent = `v2 · protocol ${s.protocol} · db ${(s.db_bytes / 1024).toFixed(0)} KiB · max_seq ${s.max_seq}`;
-    $('dbinfo').textContent = `peers ${s.peers_online}/${s.peers_total}`;
-    $('loginbtn').hidden = true; $('logoutbtn').hidden = false;
-  } catch { /* 未登录 */ }
+    $('ver').textContent = `v2 · protocol ${s.protocol} · ${(s.db_bytes / 1024).toFixed(0)} KiB · seq ${s.max_seq}`;
+    $('dbinfo').textContent = `在线 ${s.peers_online}/${s.peers_total}`;
+    showApp();
+    return true;
+  } catch {
+    showLogin();
+    return false;
+  }
 }
 
 async function refreshPeers() {
-  await refreshStats();
+  const ok = await refreshStats();
+  if (!ok) { $('peerSummary').textContent = '需先登录'; return; }
   let peers = [];
   try {
     const r = await api('/admin/peers');
     peers = r.peers || [];
-  } catch (e) { $('peerSummary').textContent = '需先登录'; return; }
+  } catch (e) { $('peerSummary').textContent = '加载失败：' + e.message; return; }
   $('peerSummary').textContent = `共 ${peers.length} 个身份`;
   const tb = $('peerTable').querySelector('tbody');
   tb.innerHTML = peers.map((p) => `<tr>
-    <td><b>${esc(p.id)}</b><br><span class="hint">${esc(p.display_name || '')}</span></td>
+    <td><span class="id-cell">${esc(p.id)}</span>${p.display_name ? `<span class="sub">${esc(p.display_name)}</span>` : ''}</td>
     <td><span class="badge">${esc(p.agent_type || '')}</span></td>
-    <td class="st-${esc(p.status)}">${esc(p.status)}</td>
-    <td><span class="dot ${p.online ? 'on' : 'off'}"></span> ${p.online ? '在线' : '离线' + (p.offline_secs ? ' ' + Math.floor(p.offline_secs / 60) + 'm' : '')}</td>
+    <td>${statusBadge(p.status)}</td>
+    <td><span class="dot ${p.online ? 'on' : 'off'}"></span>${p.online ? '在线' : '离线' + (p.offline_secs ? ' ' + Math.floor(p.offline_secs / 60) + 'm' : '')}</td>
     <td>${esc(ago(p.last_seen))}</td>
     <td>v${p.protocol_version ?? '?'}</td>
     <td>${caps(p.capabilities)}</td>
-    <td>
-      <button class="ghost" data-act="suspend" data-id="${esc(p.id)}">${p.status === 'suspended' ? '解封' : '停用'}</button>
-      <button class="ghost" data-act="activate" data-id="${esc(p.id)}">激活</button>
+    <td class="td-actions">
+      <button class="btn btn-ghost btn-sm" data-act="suspend" data-id="${esc(p.id)}">${p.status === 'suspended' ? '解封' : '停用'}</button>
+      <button class="btn btn-ghost btn-sm" data-act="activate" data-id="${esc(p.id)}">激活</button>
+      <button class="btn btn-ghost btn-sm" data-act="del" data-id="${esc(p.id)}">删除</button>
     </td></tr>`).join('');
   tb.querySelectorAll('button').forEach((b) => {
     b.onclick = async () => {
-      const status = b.dataset.act === 'suspend'
-        ? 'suspended'
-        : (b.dataset.act === 'activate' ? 'active' : null);
-      if (!status) return;
+      const id = b.dataset.id;
+      if (b.dataset.act === 'del') {
+        if (!confirm(`删除成员 ${id}？\n其名下 token 将全部撤销，消息历史保留。`)) return;
+        await api('/admin/peers/' + encodeURIComponent(id), { method: 'DELETE' }).catch((e) => alert(e.message));
+        refreshPeers();
+        return;
+      }
+      const status = b.dataset.act === 'suspend' ? 'suspended' : 'active';
       // suspended 再点 suspend 切回 active 做 toggle
-      const cur = peers.find((x) => x.id === b.dataset.id);
+      const cur = peers.find((x) => x.id === id);
       const target = (b.dataset.act === 'suspend' && cur && cur.status === 'suspended') ? 'active' : status;
-      await api('/admin/peers/' + encodeURIComponent(b.dataset.id), {
+      await api('/admin/peers/' + encodeURIComponent(id), {
         method: 'PATCH', body: JSON.stringify({ status: target }),
       }).catch((e) => alert(e.message));
       refreshPeers();
@@ -136,10 +173,12 @@ async function refreshThreads() {
   tb.innerHTML = threads.map((t) => `<tr>
     <td><code>${esc(t.root_id)}</code></td><td>${t.count}</td>
     <td>${(t.participants || []).map(esc).join(', ')}</td>
-    <td>${t.held ? `<span class="badge">hold ${t.held}</span>` : ''}</td>
-    <td>${t.fused ? `<span class="badge" style="color:var(--warn)">熔断</span>` : ''}</td>
-    <td><button class="ghost" data-view="${esc(t.root_id)}">查看</button>
-    <button class="ghost" data-fuse="${esc(t.root_id)}">reset 熔断</button></td></tr>`).join('');
+    <td>${t.held ? `<span class="badge warn">hold ${t.held}</span>` : ''}</td>
+    <td>${t.fused ? `<span class="badge bad">熔断</span>` : ''}</td>
+    <td class="td-actions">
+      <button class="btn btn-ghost btn-sm" data-view="${esc(t.root_id)}">查看</button>
+      <button class="btn btn-ghost btn-sm" data-fuse="${esc(t.root_id)}">reset 熔断</button>
+    </td></tr>`).join('');
   tb.querySelectorAll('[data-view]').forEach((b) => { b.onclick = () => viewThread(b.dataset.view); });
   tb.querySelectorAll('[data-fuse]').forEach((b) => {
     b.onclick = async () => {
@@ -154,31 +193,28 @@ $('qBtn').onclick = async () => {
   if (!q) return;
   const r = await api('/admin/messages?q=' + encodeURIComponent(q)).catch((e) => { alert(e.message); return null; });
   if (!r) return;
-  $('searchOut').innerHTML = `<p class="hint">命中 ${(r.items || []).length} 条（最新在前）</p>` + (r.items || []).map((m) => `<div class="msg">
+  $('searchOut').innerHTML = `<p class="muted small">命中 ${(r.items || []).length} 条（最新在前）</p>` + (r.items || []).map((m) => `<div class="msg">
     <div class="meta">#${m.seq} · ${esc(m.sender)} → ${esc(m.recipient)} · ${esc(m.kind)} · ${esc(m.id)} · thread <code>${esc(m.thread)}</code></div>
-    <div>${esc(m.payload)}</div></div>`).join('');
+    <div class="body">${esc(m.payload)}</div></div>`).join('');
 };
 
 async function viewThread(root) {
   const r = await api('/admin/messages?thread=' + encodeURIComponent(root)).catch((e) => { alert(e.message); return null; });
   if (!r) return;
   $('threadTitle').textContent = 'thread: ' + root;
-  let exp = $('threadExport');
-  if (!exp) {
-    exp = document.createElement('div');
-    exp.className = 'row';
-    exp.id = 'threadExport';
-    exp.innerHTML = `<button class="ghost" id="expMd">导出 Markdown</button><button class="ghost" id="expJsonl">导出 JSONL</button>`;
-    $('threadTitle').after(exp);
-  }
+  const exp = $('threadExport');
+  exp.innerHTML = `<button class="btn btn-outline btn-sm" id="expMd">导出 Markdown</button>
+    <button class="btn btn-outline btn-sm" id="expJsonl">导出 JSONL</button>`;
+  exp.className = 'row-btns';
+  exp.style.marginBottom = '12px';
   $('expMd').onclick = () => { window.location = '/admin/messages/export?thread=' + encodeURIComponent(root) + '&format=markdown'; };
   $('expJsonl').onclick = () => { window.location = '/admin/messages/export?thread=' + encodeURIComponent(root) + '&format=jsonl'; };
   $('threadMsgs').innerHTML = (r.items || []).map((m) => `<div class="msg ${m.approval_state === 'pending' ? 'held' : ''}">
     <div class="meta">#${m.seq} · ${esc(m.sender)} → ${esc(m.recipient)} · ${esc(m.kind)} · ${esc(m.id)} · ${esc(fmtTime(m.created_at))} · ack ${m.acked_count} · ${esc(m.approval_state)}</div>
-    <div>${esc(m.payload)}</div>
-    ${m.approval_state === 'pending' ? `<div class="row" style="margin-top:8px">
-      <button data-ok="1" data-seq="${m.seq}">批准放行</button>
-      <button class="ghost" data-ok="0" data-seq="${m.seq}">拒绝</button></div>` : ''}
+    <div class="body">${esc(m.payload)}</div>
+    ${m.approval_state === 'pending' ? `<div class="row-btns">
+      <button class="btn btn-sm" data-ok="1" data-seq="${m.seq}">批准放行</button>
+      <button class="btn btn-outline btn-sm" data-ok="0" data-seq="${m.seq}">拒绝</button></div>` : ''}
   </div>`).join('');
   $('threadMsgs').querySelectorAll('[data-ok]').forEach((b) => {
     b.onclick = async () => {
@@ -213,8 +249,8 @@ async function refreshTokens() {
   $('tokenTable').querySelector('tbody').innerHTML = toks.map((t) =>
     `<tr><td>${t.id}</td><td>${esc(t.peer_id)}</td><td><code>${esc(t.hash_prefix)}</code></td>
      <td>${esc(t.label)}</td><td>${esc(fmtTime(t.created_at))}</td><td>${esc(fmtTime(t.last_used_at))}</td>
-     <td>${esc(t.last_ip || '')}</td><td>${t.revoked_at ? esc(fmtTime(t.revoked_at)) : '-'}</td>
-     <td>${t.revoked_at ? '' : `<button class="ghost" data-rev="${t.id}">撤销</button>`}</td></tr>`).join('');
+     <td>${esc(t.last_ip || '')}</td><td>${t.revoked_at ? esc(fmtTime(t.revoked_at)) : '—'}</td>
+     <td class="td-actions">${t.revoked_at ? '' : `<button class="btn btn-ghost btn-sm" data-rev="${t.id}">撤销</button>`}</td></tr>`).join('');
   document.querySelectorAll('[data-rev]').forEach((b) => {
     b.onclick = async () => {
       if (!confirm('撤销 token #' + b.dataset.rev + '？该身份将立即失联。')) return;
