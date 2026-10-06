@@ -389,6 +389,23 @@ func TestAdminExportThread(t *testing.T) {
 	}
 }
 
+func TestPollScriptDownload(t *testing.T) {
+	f := newFixture(t)
+	// No auth required: static content.
+	req := httptest.NewRequest("GET", "/clients/relay-poll.sh", nil)
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status: %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "shellscript") {
+		t.Fatalf("content-type: %s", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "/messages?for=") {
+		t.Fatal("body is not the poll script")
+	}
+}
+
 func TestClientIPTrustBoundary(t *testing.T) {
 	f := newFixture(t)
 	// Direct connection with forged XFF: ignored (peer not in trusted CIDR).

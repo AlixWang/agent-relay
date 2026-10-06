@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -37,6 +38,21 @@ func TestEmbeddedConsoleServes(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != 404 {
 		t.Fatalf("unknown path: %d", rec.Code)
+	}
+}
+
+func TestPollScriptEmbedded(t *testing.T) {
+	s := PollScript()
+	if !strings.Contains(s, "relay-poll") || !strings.Contains(s, "/messages?for=") {
+		t.Fatal("embedded poll script looks wrong")
+	}
+	// Must stay in sync with the repo copy.
+	raw, err := os.ReadFile("../../clients/relay-poll.sh")
+	if err != nil {
+		t.Fatalf("repo copy: %v", err)
+	}
+	if s != string(raw) {
+		t.Fatal("internal/web/clients/relay-poll.sh diverged from clients/relay-poll.sh")
 	}
 }
 

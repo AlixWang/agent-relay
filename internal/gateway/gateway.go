@@ -24,6 +24,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/queue"
 	"github.com/AlixWang/agent-relay/internal/store"
 	"github.com/AlixWang/agent-relay/internal/verify"
+	"github.com/AlixWang/agent-relay/internal/web"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -64,6 +65,7 @@ func (s *Server) SetAdminHash(hash []byte) { s.adminHash = hash }
 func (s *Server) Handler(web http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /clients/relay-poll.sh", s.handlePollScript)
 	mux.HandleFunc("POST /register", s.handleRegister)
 	mux.HandleFunc("POST /messages", s.handleSend)
 	mux.HandleFunc("GET /messages", s.handlePull)
@@ -185,6 +187,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "version": 2,
 		"protocol": s.cfg.Protocol, "min_client": s.cfg.MinClient,
 	})
+}
+
+// handlePollScript serves the versioned polling script (no auth: static
+// content). Assistants download it during onboarding — never hand-write
+// protocol details.
+func (s *Server) handlePollScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write([]byte(web.PollScript()))
 }
 
 type registerReq struct {

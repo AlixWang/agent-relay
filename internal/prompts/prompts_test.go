@@ -103,6 +103,21 @@ func TestReconfigureSkipsRegistration(t *testing.T) {
 	}
 }
 
+func TestPollScriptDownloadDocumented(t *testing.T) {
+	// muse/claw prompts must tell the assistant to download the script
+	// from the server — never "ask the user for the full text" (dead loop:
+	// the user doesn't have it either).
+	for _, typ := range []string{"muse", "claw"} {
+		out := render(t, typ, Data{InviteCode: "inv_test"})
+		if !strings.Contains(out, "/clients/relay-poll.sh") {
+			t.Fatalf("%s missing script download URL", typ)
+		}
+		if strings.Contains(out, "向用户索取全文") {
+			t.Fatalf("%s still says 'ask user for full text'", typ)
+		}
+	}
+}
+
 func TestAgentTypeEmbedded(t *testing.T) {
 	// Registration curl in each template must report its own agent_type,
 	// otherwise the UI capability badges lie.

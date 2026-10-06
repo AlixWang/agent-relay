@@ -39,10 +39,17 @@ curl -s $RELAY/health
 1. 确认连通：`curl -s {{.ServerAddr}}/health` 应返回 `{"ok":true,...}`。
    内网地址走 tailnet（公网地址直连即可）；沙盒需走 tunnel 代理时：`tunnel_proxy="${HTTPS_PROXY%:*}:3130"; curl --proxy "$tunnel_proxy" ...`。
 {{if .IsReconfigure}}2. 跳过注册，直接用已有 token 验证：`curl -s {{.ServerAddr}}/peers -H "Authorization: Bearer $TOKEN"` 应返回你的身份。
-3. 把轮询脚本更新到最新版 clients/relay-poll.sh（向用户索取全文），确认 `since` 游标逻辑与 §3 一致。{{else}}2. 调用 /register 注册，保存 token（chmod 600）。
-3. 安装轮询脚本 clients/relay-poll.sh（向用户索取全文，不要自己发明协议细节），
-   每 5 秒：POST /heartbeat → GET /messages?for=身份&since=本地游标 → 有新消息才唤醒 worker。
-   纯 shell 轮询，不消耗 token。
+3. 把轮询脚本更新到服务端最新版（命令见下，不要自己发明协议细节）。{{else}}2. 调用 /register 注册，保存 token（chmod 600）。
+3. 从服务端下载轮询脚本（版本与服务端一致，不要自己发明协议细节）：
+```bash
+mkdir -p ~/workspace/task-relay/bin
+curl -s {{.ServerAddr}}/clients/relay-poll.sh -o ~/workspace/task-relay/bin/relay-poll.sh
+chmod +x ~/workspace/task-relay/bin/relay-poll.sh
+# 配置服务地址（公网地址直连；内网地址走 tailnet；沙盒走 tunnel 代理见 §4.1）
+# 然后每 5 秒跑一次：RELAY="{{.ServerAddr}}" ~/workspace/task-relay/bin/relay-poll.sh
+# 逻辑：POST /heartbeat → GET /messages?for=身份&since=本地游标 → 有新消息才唤醒 worker。
+# 纯 shell 轮询，不消耗 token。
+```
 4. 调用 `POST /verify/smoke` 触发冒烟验证（服务端下发已知 id 的冒烟任务）。{{end}}
 
 ## 5. 自验证
