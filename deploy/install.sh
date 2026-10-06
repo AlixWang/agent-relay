@@ -83,7 +83,10 @@ esac
 # NOTE: 所有交互输入一律走 /dev/tty。curl | bash 时脚本的 stdin 是下载管道
 # （已 EOF），从 stdin read 永远读到空、stty 直接报错。--yes 模式跳过交互。
 need_tty() {
-  [ -c /dev/tty ] && [ "$YES" -eq 0 ] || return 1
+  # Actually try opening /dev/tty: [ -c ] can lie under sudo/no-tty.
+  [ "$YES" -eq 0 ] && exec 9<>/dev/tty 2>/dev/null || return 1
+  exec 9>&- 2>/dev/null || true
+  return 0
 }
 
 ask() { # $1 提示 $2 默认值 -> 输出到 stdout
