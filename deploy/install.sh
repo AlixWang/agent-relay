@@ -116,6 +116,23 @@ latest_tag() {
   printf '%s' "$tag"
 }
 
+# systemd_unit $name — 进程名/服务名 -> 完整 unit 名（caddy -> caddy.service）。
+# 用 systemctl show 探测，不依赖 list-units 文本格式。
+systemd_unit() {
+  local name="$1" u
+  for u in "$name" "$name.service"; do
+    if systemctl show "$u" --property=LoadState 2>/dev/null | grep -q "=loaded"; then
+      printf '%s' "$u"
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_systemd_service() {
+  [ -n "$(systemd_unit "$1" || true)" ]
+}
+
 # issue_cert $domain — certbot standalone 申请 + 自动续期（需 root）。
 # 要求：域名已解析到本机公网 IP，且 80 端口空闲（standalone 会临时占用）。
 issue_cert() {
@@ -151,9 +168,10 @@ issue_cert() {
   local stopped=""
   if [ -n "$holder" ]; then
     warn "80 端口被 $holder 占用"
-    if systemctl list-units --type=service --state=running 2>/dev/null | grep -q "^${holder}"; then
-      log "临时停止 $holder（证书申请完自动起回）…"
-      systemctl stop "$holder" && stopped="$holder" || warn "停 $holder 失败，尝试继续（可能仍会申请失败）"
+    if is_systemd_service "$holder"; then
+      unit="$(systemd_unit "$holder")"
+      log "临时停止 $unit（证书申请完自动起回）…"
+      systemctl stop "$unit" && stopped="$unit" || warn "停 $unit 失败，尝试继续（可能仍会申请失败）"
     else
       die "80 端口被非 systemd 进程（$holder）占用：先停掉它再重跑；或改用 webroot/DNS 验证（见 docs/DEPLOY.md §公网 TLS 手动模式）"
     fi
@@ -180,14 +198,21 @@ SVC=""
 if command -v ss >/dev/null 2>&1; then
   SVC="$(ss -ltnp 2>/dev/null | grep ':80 ' | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2 || true)"
 fi
-if [ -n "$SVC" ] && systemctl list-units --type=service --state=running 2>/dev/null | grep -q "^${SVC}"; then
-  systemctl stop "$SVC" || SVC=""
-else
-  SVC=""
+UNIT=""
+if [ -n "$SVC" ]; then
+  for u in "$SVC" "$SVC.service"; do
+    if systemctl show "$u" --property=LoadState 2>/dev/null | grep -q "=loaded"; then
+      UNIT="$u"
+      break
+    fi
+  done
+fi
+if [ -n "$UNIT" ]; then
+  systemctl stop "$UNIT" || UNIT=""
 fi
 certbot renew --quiet
 RC=$?
-if [ -n "$SVC" ]; then systemctl start "$SVC" || true; fi
+if [ -n "$UNIT" ]; then systemctl start "$UNIT" || true; fi
 if systemctl cat agent-relay >/dev/null 2>&1; then
   systemctl reload-or-restart agent-relay || true
 elif command -v docker >/dev/null 2>&1 && docker inspect agent-relay >/dev/null 2>&1; then
