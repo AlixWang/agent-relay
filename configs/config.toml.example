@@ -56,3 +56,8 @@ offline_webhook_url = ""
 
 # Max request body bytes (default 1 MiB).
 max_body_bytes = 1048576
+
+# SSE push (DESIGN §4.4b): outbound-only event stream for assistants that
+# can hold a persistent process (relay-tail.sh). Short polling stays default.
+stream_keepalive_secs = 20
+stream_max_per_peer = 3

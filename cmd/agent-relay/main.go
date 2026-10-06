@@ -23,6 +23,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/queue"
 	"github.com/AlixWang/agent-relay/internal/retention"
 	"github.com/AlixWang/agent-relay/internal/store"
+	"github.com/AlixWang/agent-relay/internal/stream"
 	"github.com/AlixWang/agent-relay/internal/verify"
 	"github.com/AlixWang/agent-relay/internal/web"
 	"golang.org/x/crypto/bcrypt"
@@ -105,6 +106,8 @@ func main() {
 
 	gw := gateway.New(cfg, st, au, q, p, v, serverAddr)
 	gw.SetGuard(g)
+	// SSE fan-out (DESIGN §4.4b): in-memory wake-ups, DB stays authoritative.
+	gw.SetStream(stream.New(cfg.StreamMaxPerPeer, 500))
 	if cfg.AdminPasswordHash != "" {
 		gw.SetAdminHash([]byte(cfg.AdminPasswordHash))
 	} else {
@@ -124,8 +127,11 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: SSE streams (/messages/stream) are held open
+		// for hours; the 30s cap would silently kill them. Slow-client
+		// protection comes from the hub's per-subscriber buffer cap.
+		WriteTimeout: 0,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// Background loops.
@@ -159,6 +165,14 @@ func main() {
 type statusWriter struct {
 	http.ResponseWriter
 	status int
+}
+
+// Flush keeps SSE streaming working through the logging middleware:
+// without it the gateway's Flusher assertion fails and streams 500.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func (w *statusWriter) WriteHeader(code int) {

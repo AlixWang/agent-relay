@@ -11,6 +11,8 @@ POST   /messages    { id, to, from, kind, in_reply_to, requires_approval, payloa
                                    → { ok, seq, id } | 202 { held: true } | 409 | 429 | 426
 GET    /messages?for=<id>&since=<seq>
                                    → { ok, items: [...], next_since }
+GET    /messages/stream?for=<id>&since=<seq>   （SSE，§4.4b 推送：backlog 回放 + live 帧，需鉴权）
+                                   → text/event-stream，帧 `id/event: message/retry/data`，保活 `: ping`
 POST   /ack         { message_id, by }                        → { ok }
 POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version? }
                                    → { ok, prompt_update?, prompt_version? }（有新指令时提醒拉取）

@@ -506,6 +506,82 @@ EOF
   systemctl --no-pager status agent-relay | head -8 || true
 fi
 
+# ---- 7.5 Web 一键更新 helper（仅 systemd 模式） ----
+# Web 控制台 `POST /admin/update/apply` 以 agent-relay 用户经 sudo 调它：
+# 下载→SHA256→备份→安装→重启→健康检查→失败回滚。root 属主 0700 + sudoers
+# 仅放行 `agent-relay-update apply <v*>`，服务本身不直接提权。
+if [ "$MODE" = "systemd" ]; then
+  HELPER="/usr/local/sbin/agent-relay-update"
+  cat > "$HELPER" <<HELPER_EOF
+#!/usr/bin/env bash
+# agent-relay-update — Web 一键更新 helper (installed by deploy/install.sh).
+# Usage: agent-relay-update apply <version>  (version must match ^v[0-9])
+# Logs to stderr, machine-readable tail line: UPDATE_RESULT <ok|rolled_back|failed> <detail>
+set -uo pipefail
+REPO="$REPO"
+BIN_PATH="$BIN_PATH"
+HELPER_EOF
+  cat >> "$HELPER" <<EOF
+JOB_DIR="$DATA_DIR/update-jobs"
+logf() { printf '[update] %s\n' "\$*" >&2; }
+result() { printf 'UPDATE_RESULT %s %s\n' "\$1" "\$2"; }
+
+cmd="\${1:-}" ver="\${2:-}"
+[ "\$cmd" = "apply" ] || { result failed "usage: apply <version>"; exit 2; }
+case "\$ver" in v[0-9]*) ;; *) result failed "bad version"; exit 2;; esac
+case "\$ver" in *[^A-Za-z0-9._-]* ) result failed "bad version chars"; exit 2;; esac
+
+ARCH_RAW="\$(uname -m)"
+case "\$ARCH_RAW" in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) result failed "unsupported arch"; exit 2;; esac
+
+mkdir -p "\$JOB_DIR"
+JOB="\$JOB_DIR/\$ver.log"
+: > "\$JOB"
+{
+logf "target \$ver arch \$ARCH"
+TMP="\$(mktemp -d)"
+URL="https://github.com/\$REPO/releases/download/\$ver/agent-relay-linux-\$ARCH"
+SUMS="https://github.com/\$REPO/releases/download/\$ver/SHA256SUMS"
+curl -fSL -o "\$TMP/agent-relay" "\$URL" || { logf "download failed"; result failed "download"; exit 1; }
+EXPECTED="\$(curl -fSL "\$SUMS" | grep "agent-relay-linux-\$ARCH" | awk '{print \$1}')" || { logf "sums download failed"; result failed "sums"; exit 1; }
+ACTUAL="\$(sha256sum "\$TMP/agent-relay" | awk '{print \$1}')"
+[ -n "\$EXPECTED" ] && [ "\$EXPECTED" = "\$ACTUAL" ] || { logf "checksum mismatch"; result failed "checksum"; exit 1; }
+logf "checksum ok"
+TS="\$(date +%Y%m%d%H%M%S)"
+cp "\$BIN_PATH" "\$BIN_PATH.bak.\$TS" || { logf "backup failed"; result failed "backup"; exit 1; }
+install -m 755 "\$TMP/agent-relay" "\$BIN_PATH" || { logf "install failed"; result failed "install"; exit 1; }
+rm -rf "\$TMP"
+logf "installed, restarting"
+systemctl restart agent-relay || { logf "restart failed, rolling back"; cp "\$BIN_PATH.bak.\$TS" "\$BIN_PATH"; systemctl restart agent-relay || true; result rolled_back "restart-failed"; exit 1; }
+# 健康检查：读 config 找端口/模式（与 install.sh §8 同逻辑简化版）
+PORT="\$(grep -E '^port = ' "$CONFIG_PATH" | awk '{print \$3}' || echo 18789)"
+sleep 3
+if curl -sk --max-time 5 "http://127.0.0.1:\$PORT/health" | grep -q '"ok":true'; then
+  logf "health ok"
+  ls -t \$BIN_PATH.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+  result ok "\$ver"
+  exit 0
+fi
+logf "health failed, rolling back"
+cp "\$BIN_PATH.bak.\$TS" "\$BIN_PATH"
+systemctl restart agent-relay || true
+sleep 3
+if curl -sk --max-time 5 "http://127.0.0.1:\$PORT/health" | grep -q '"ok":true'; then
+  result rolled_back "health-failed"
+else
+  result failed "health-failed-rollback-uncertain"
+fi
+exit 1
+} 2>&1 | tee -a "\$JOB"
+EOF
+  chmod 700 "$HELPER"
+  chown root:root "$HELPER"
+  printf 'agent-relay ALL=(root) NOPASSWD: /usr/local/sbin/agent-relay-update apply v*\n' > /etc/sudoers.d/agent-relay-update
+  chmod 440 /etc/sudoers.d/agent-relay-update
+  visudo -c -q || { warn "sudoers 校验失败，已删除该文件（Web 更新不可用，重跑脚本排查）"; rm -f /etc/sudoers.d/agent-relay-update; }
+  log "Web 一键更新 helper 已安装（$HELPER + sudoers）"
+fi
+
 # ---- 8. 健康检查 ----
 sleep 1
 if [ "$LISTEN" = "auto" ]; then CHECK_HOST="127.0.0.1"; elif [ "$LISTEN" = "0.0.0.0" ]; then CHECK_HOST="127.0.0.1"; else CHECK_HOST="$LISTEN"; fi

@@ -14,6 +14,9 @@ var raw embed.FS
 //go:embed clients/relay-poll.sh
 var pollScript string
 
+//go:embed clients/relay-tail.sh
+var tailScript string
+
 // assetVersion is baked at build time (ldflags -X) so browsers refetch
 // app.js/style.css after each release instead of mixing stale cached copies.
 var assetVersion = "dev"
@@ -48,7 +51,17 @@ func Handler() http.Handler {
 // AssetVersion reports the baked asset version (?v= query on app.js/style.css).
 func AssetVersion() string { return assetVersion }
 
+// BinaryVersion reports the running release tag for the update console
+// (DESIGN §10.4). Same ldflags value: releases tag the binary and the
+// assets together, so one string identifies both.
+func BinaryVersion() string { return assetVersion }
+
 // PollScript returns the versioned polling script served at
 // GET /clients/relay-poll.sh. Static content, no auth needed — assistants
 // fetch it during onboarding instead of inventing protocol details.
 func PollScript() string { return pollScript }
+
+// TailScript returns the SSE tail daemon served at
+// GET /clients/relay-tail.sh (DESIGN §4.4b). Persistent alternative to the
+// poller: same layout, same wake JSON, same exit codes — pick one.
+func TailScript() string { return tailScript }

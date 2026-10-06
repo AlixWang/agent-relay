@@ -35,14 +35,18 @@ curl -s $RELAY/heartbeat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: app
 ## 4. 搭建步骤
 1. `curl -s {{.ServerAddr}}/health` 确认 ok=true（内网地址走 tailnet；沙盒走 tunnel 代理见 muse 模板备注）。
 2. 注册并保存 token（chmod 600）。
-3. 从服务端下载轮询脚本并建一个每 5–10 秒的 job/cron 跑它（不要自己发明协议细节）：
+3. 从服务端下载接收脚本（二选一，不要自己发明协议细节）：
 ```bash
 mkdir -p ~/workspace/task-relay/bin
+# 方式 A · 短轮询（默认）：建一个每 5–10 秒的 job/cron 跑它
 curl -s {{.ServerAddr}}/clients/relay-poll.sh -o ~/workspace/task-relay/bin/relay-poll.sh
 chmod +x ~/workspace/task-relay/bin/relay-poll.sh
 # 每 5–10 秒跑：RELAY="{{.ServerAddr}}" ~/workspace/task-relay/bin/relay-poll.sh
+# 方式 B · SSE 常驻（秒级到达，需能跑常驻进程）：
+# curl -s {{.ServerAddr}}/clients/relay-tail.sh -o ~/workspace/task-relay/bin/relay-tail.sh
+# chmod +x ~/workspace/task-relay/bin/relay-tail.sh && RELAY="{{.ServerAddr}}" ~/workspace/task-relay/bin/relay-tail.sh
 ```
-   逻辑同 muse：heartbeat 捎带 → 增量拉取 → 非空才唤醒你。纯 shell，不耗 token。
+   逻辑同 muse：heartbeat 捎带 → 增量拉取/流推送 → 非空才唤醒你。纯 shell，不耗 token。两个脚本只用其一。
 4. `POST /verify/smoke` 触发冒烟验证。
 
 ## 5. 自验证

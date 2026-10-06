@@ -1,0 +1,353 @@
+package gateway
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/AlixWang/agent-relay/internal/prompts"
+	"github.com/AlixWang/agent-relay/internal/web"
+)
+
+// Update mode detection: docker containers carry /.dockerenv; the binary
+// path is baked by install.sh/systemd vs ENTRYPOINT.
+func updateMode() string {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return "docker"
+	}
+	if exe, err := os.Executable(); err == nil && strings.HasPrefix(exe, "/usr/local/bin/") {
+		return "systemd"
+	}
+	return "unknown"
+}
+
+var verRe = regexp.MustCompile(`^v[0-9][A-Za-z0-9._-]*$`)
+
+type updateJob struct {
+	ID        string
+	Version   string
+	Status    string // running|ok|rolled_back|failed
+	Log       string
+	StartedAt int64
+	EndedAt   int64
+}
+
+type updateManager struct {
+	mu   sync.Mutex
+	jobs map[string]*updateJob
+	cur  string // running job id, "" when idle
+}
+
+func newUpdateManager() *updateManager {
+	return &updateManager{jobs: map[string]*updateJob{}}
+}
+
+func (m *updateManager) start(version string) (*updateJob, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cur != "" {
+		return nil, false
+	}
+	j := &updateJob{
+		ID:      fmt.Sprintf("upd-%d", time.Now().UnixNano()),
+		Version: version, Status: "running", StartedAt: time.Now().Unix(),
+	}
+	m.jobs[j.ID] = j
+	m.cur = j.ID
+	return j, true
+}
+
+func (m *updateManager) finish(id, status, logTail string, endedAt int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if j, ok := m.jobs[id]; ok {
+		j.Status = status
+		j.Log = logTail
+		j.EndedAt = endedAt
+	}
+	if m.cur == id {
+		m.cur = ""
+	}
+}
+
+func (m *updateManager) get(id string) *updateJob {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.jobs[id]
+}
+
+func (m *updateManager) latest() *updateJob {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var best *updateJob
+	for _, j := range m.jobs {
+		if best == nil || j.StartedAt > best.StartedAt {
+			best = j
+		}
+	}
+	return best
+}
+
+// updateMgr lives on Server lazily (avoids changing New's signature).
+func (s *Server) updateMgr() *updateManager {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.updMgr == nil {
+		s.updMgr = newUpdateManager()
+	}
+	return s.updMgr
+}
+
+// ---- GET /admin/update/status ----
+func (s *Server) handleAdminUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	mgr := s.updateMgr()
+	job := mgr.latest()
+	var jobView any
+	if job != nil {
+		mgr.mu.Lock()
+		cp := *job
+		mgr.mu.Unlock()
+		jobView = map[string]any{
+			"id": cp.ID, "version": cp.Version, "status": cp.Status,
+			"log": cp.Log, "started_at": cp.StartedAt, "ended_at": cp.EndedAt,
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true,
+		"current": map[string]any{
+			"version": web.BinaryVersion(), "tag": web.AssetVersion(),
+			"protocol": s.cfg.Protocol, "min_client": s.cfg.MinClient,
+			"prompt_version": prompts.PromptVersion,
+		},
+		"mode": updateMode(),
+		"job":  jobView,
+	})
+}
+
+// ---- POST /admin/update/check ----
+func (s *Server) handleAdminUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Version string `json:"version"`
+	}
+	if !s.readJSON(w, r, &req) {
+		return
+	}
+	if !verRe.MatchString(req.Version) {
+		writeErr(w, 400, "version must look like v1.2.3")
+		return
+	}
+	// Compare against running version for downgrade guard.
+	// A dev build (no ldflags tag) skips the guard: anything goes in tests.
+	cur := web.BinaryVersion()
+	if cur != "" && cur != "dev" && !updateNewer(cur, req.Version) {
+		writeErr(w, 400, "target must be newer than running "+cur+" (no downgrades)")
+		return
+	}
+	// Best-effort protocol-change detection: fetch the release's staged
+	// binary metadata via the GitHub API (no download yet). Offline or
+	// unparseable → unknown=true, UI forces explicit acknowledgement.
+	protoChange := false
+	minChange := false
+	unknown := false
+	if info, err := fetchReleaseInfo(req.Version); err != nil {
+		unknown = true
+	} else {
+		if info.Protocol != 0 && info.Protocol != s.cfg.Protocol {
+			protoChange = true
+		}
+		if info.MinClient != 0 && info.MinClient != s.cfg.MinClient {
+			minChange = true
+		}
+	}
+	_ = s.st.AppendAudit("admin", "update.check",
+		fmt.Sprintf("version=%s proto_change=%v min_change=%v unknown=%v", req.Version, protoChange, minChange, unknown),
+		time.Now().Unix())
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "version": req.Version,
+		"protocol_change": protoChange, "min_client_change": minChange,
+		"unknown": unknown,
+	})
+}
+
+// ---- POST /admin/update/apply ----
+func (s *Server) handleAdminUpdateApply(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Version                   string `json:"version"`
+		AcknowledgeProtocolChange bool   `json:"acknowledge_protocol_change"`
+	}
+	if !s.readJSON(w, r, &req) {
+		return
+	}
+	if !verRe.MatchString(req.Version) {
+		writeErr(w, 400, "version must look like v1.2.3")
+		return
+	}
+	mode := updateMode()
+	if mode != "systemd" {
+		writeErr(w, 400, "web update applies to systemd installs only; docker mode: run the commands shown in the console")
+		return
+	}
+	cur := web.BinaryVersion()
+	if cur != "" && cur != "dev" && !updateNewer(cur, req.Version) {
+		writeErr(w, 400, "target must be newer than running "+cur+" (no downgrades)")
+		return
+	}
+	// Re-check protocol change server-side: the UI ack must be real.
+	if info, err := fetchReleaseInfo(req.Version); err == nil {
+		changed := (info.Protocol != 0 && info.Protocol != s.cfg.Protocol) ||
+			(info.MinClient != 0 && info.MinClient != s.cfg.MinClient)
+		if changed && !req.AcknowledgeProtocolChange {
+			writeErr(w, 400, "target changes protocol/min_client: acknowledge_protocol_change required")
+			return
+		}
+	} else if !req.AcknowledgeProtocolChange {
+		writeErr(w, 400, "release metadata unreachable: acknowledge_protocol_change required to proceed blind")
+		return
+	}
+	mgr := s.updateMgr()
+	job, ok := mgr.start(req.Version)
+	if !ok {
+		writeJSON(w, 409, map[string]any{"ok": false, "error": "update_in_progress"})
+		return
+	}
+	_ = s.st.AppendAudit("admin", "update.apply",
+		fmt.Sprintf("version=%s job=%s", req.Version, job.ID), time.Now().Unix())
+	go s.runUpdateJob(job)
+	writeJSON(w, 200, map[string]any{"ok": true, "job_id": job.ID})
+}
+
+// runUpdateJob shells out to the root-owned helper via sudo. The helper
+// does download→verify→backup→install→restart→health→rollback and prints a
+// final UPDATE_RESULT line; we tail the job log file for the console.
+func (s *Server) runUpdateJob(job *updateJob) {
+	helper := "/usr/local/sbin/agent-relay-update"
+	jobDir := filepath.Join(s.cfg.DataDir, "update-jobs")
+	_ = os.MkdirAll(jobDir, 0o755)
+	logPath := filepath.Join(jobDir, job.Version+".log")
+	cmd := exec.Command("sudo", "-n", helper, "apply", job.Version)
+	out, err := cmd.CombinedOutput()
+	status := "ok"
+	detail := job.Version
+	if err != nil {
+		status = "failed"
+		detail = err.Error()
+	}
+	// Parse the helper's machine-readable tail line.
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "UPDATE_RESULT ") {
+			parts := strings.SplitN(line, " ", 3)
+			if len(parts) == 3 {
+				status, detail = parts[1], parts[2]
+			}
+		}
+	}
+	tail := string(out)
+	if len(tail) > 8000 {
+		tail = "...[truncated]...\n" + tail[len(tail)-8000:]
+	}
+	// Also append the on-disk job log if the helper wrote one (survives
+	// the restart that kills this process mid-job).
+	if data, rerr := os.ReadFile(logPath); rerr == nil && len(data) > 0 {
+		disk := string(data)
+		if len(disk) > 8000 {
+			disk = "...[truncated]...\n" + disk[len(disk)-8000:]
+		}
+		tail = disk + "\n--- helper stdout ---\n" + tail
+	}
+	now := time.Now().Unix()
+	s.updateMgr().finish(job.ID, status, tail, now)
+	action := "update.ok"
+	if status != "ok" {
+		action = "update." + status // update.rolled_back | update.failed
+	}
+	_ = s.st.AppendAudit("admin", action,
+		fmt.Sprintf("version=%s job=%s detail=%s", job.Version, job.ID, detail), now)
+	log.Printf("update job %s %s: %s", job.ID, status, detail)
+}
+
+// updateNewer reports whether target is newer than current. Versions are
+// vMAJOR.MINOR.PATCH with optional suffix; compare numerically, suffix
+// ignored (a suffix never outranks its base).
+func updateNewer(cur, target string) bool {
+	return compareVersions(target, cur) > 0
+}
+
+func compareVersions(a, b string) int {
+	pa := parseVersion(a)
+	pb := parseVersion(b)
+	for i := 0; i < 3; i++ {
+		if pa[i] != pb[i] {
+			if pa[i] > pb[i] {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
+}
+
+func parseVersion(v string) [3]int {
+	var out [3]int
+	v = strings.TrimPrefix(v, "v")
+	v = strings.SplitN(v, "-", 2)[0]
+	v = strings.SplitN(v, "+", 2)[0]
+	parts := strings.Split(v, ".")
+	for i := 0; i < 3 && i < len(parts); i++ {
+		var n int
+		fmt.Sscanf(parts[i], "%d", &n)
+		out[i] = n
+	}
+	return out
+}
+
+// releaseInfo is the subset of GitHub release metadata we need.
+type releaseInfo struct {
+	Protocol  int
+	MinClient int
+}
+
+// fetchReleaseInfo asks the GitHub API for a tag's release notes and scans
+// for `protocol: N` / `min_client: N` markers. Releases predate the marker
+// convention → zeros (treated as unknown by the caller when both are 0? no:
+// zeros mean "no info", caller compares non-zero only).
+func fetchReleaseInfo(version string) (*releaseInfo, error) {
+	// repoSlug is fixed at build: same repo that serves this binary.
+	url := "https://api.github.com/repos/AlixWang/agent-relay/releases/tags/" + version
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("github api %d", resp.StatusCode)
+	}
+	var body struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	info := &releaseInfo{}
+	for _, line := range strings.Split(body.Body, "\n") {
+		line = strings.TrimSpace(line)
+		var n int
+		if strings.HasPrefix(line, "protocol:") {
+			fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, "protocol:")), "%d", &n)
+			info.Protocol = n
+		}
+		if strings.HasPrefix(line, "min_client:") {
+			fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, "min_client:")), "%d", &n)
+			info.MinClient = n
+		}
+	}
+	return info, nil
+}

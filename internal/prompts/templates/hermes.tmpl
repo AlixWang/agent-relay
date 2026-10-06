@@ -38,6 +38,8 @@ curl -s $RELAY/heartbeat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: app
 5. 用户查 GET /peers 确认你的 status=active。
 
 ## 5. 常驻工作方式
+- 定时任务只能 1 分钟跑一次：继续用现有的轮询方式（cron 默认不变），不要切 SSE 常驻
+  （hermes 跑不了常驻进程；`clients/relay-tail.sh` 的 SSE 是给能常驻的助手用的）。
 - 没有后台轮询：请用户每隔一段时间对你说“检查中继”，你就请用户代跑拉取命令并把结果贴给你。
 - 拿到任务：按正常安全规则执行（见 §7），把结果口述给用户，由用户代发 result + ack。
 - at-least-once：未 ack 的消息下次还会出现，贵重操作先问用户“是否已做过”再动手。

@@ -102,7 +102,8 @@ func Render(agentType string, d Data) (string, error) {
 // Peers report theirs in heartbeat; the server tells laggards to pull
 // /prompts/current. Independent from protocol_version: instruction updates
 // must not force re-registration.
-const PromptVersion = 2
+// v3: SSE tail choice in muse/claw/generic, hermes cron-stays-default note.
+const PromptVersion = 3
 
 // Types returns the supported agent types for the UI picker.
 func Types() []string { return []string{"muse", "hermes", "claw", "generic"} }

@@ -4,11 +4,16 @@
 #   docker run -v agent-relay-data:/var/lib/agent-relay -p 18789:18789 agent-relay
 FROM --platform=$BUILDPLATFORM golang:1.22-bookworm AS build
 ARG TARGETOS TARGETARCH
+# Release tag for the update console + asset cache-busting. CI passes
+# VERSION=v*; local builds report dev (update downgrade guard skips dev).
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/agent-relay ./cmd/agent-relay
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+  -ldflags "-X github.com/AlixWang/agent-relay/internal/web.assetVersion=${VERSION}" \
+  -o /out/agent-relay ./cmd/agent-relay
 
 FROM debian:bookworm-slim
 RUN useradd -r -d /var/lib/agent-relay agent-relay \

@@ -23,6 +23,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/prompts"
 	"github.com/AlixWang/agent-relay/internal/queue"
 	"github.com/AlixWang/agent-relay/internal/store"
+	"github.com/AlixWang/agent-relay/internal/stream"
 	"github.com/AlixWang/agent-relay/internal/verify"
 	"github.com/AlixWang/agent-relay/internal/web"
 	"golang.org/x/crypto/bcrypt"
@@ -37,10 +38,12 @@ type Server struct {
 	queue    *queue.Service
 	presence *presence.Service
 	verify   *verify.Service
+	stream   *stream.Hub
 
 	adminHash []byte
 	mu        sync.Mutex
 	sessions  map[string]int64 // session token -> expiry unix
+	updMgr    *updateManager   // web self-update jobs (lazy init)
 
 	serverAddr string // advertised in prompts, e.g. http://100.x.y.z:18789
 }
@@ -55,8 +58,20 @@ func New(cfg *config.Config, st store.Store, au *auth.Service, q *queue.Service,
 	}
 }
 
-// SetGuard wires the guard for admin fuse-reset (kept separate from New
-// so existing construction sites don't change signature).
+// SetStream wires the SSE fan-out hub (DESIGN §4.4b). Kept separate from
+// New so existing construction sites don't change signature. Nil hub
+// disables push: Publish calls become no-ops.
+func (s *Server) SetStream(h *stream.Hub) { s.stream = h }
+
+// notifyStream wakes held SSE subscribers after a newly visible message.
+// The DB stays the source of truth: subscribers re-query VisibleTo, so a
+// missed or coalesced ping can never lose a message.
+func (s *Server) notifyStream() {
+	if s.stream != nil {
+		s.stream.NotifyAll()
+	}
+}
+
 func (s *Server) SetGuard(g *guard.Guard) { s.guard = g }
 
 func (s *Server) SetAdminHash(hash []byte) { s.adminHash = hash }
@@ -66,9 +81,13 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /clients/relay-poll.sh", s.handlePollScript)
+	mux.HandleFunc("GET /clients/relay-tail.sh", s.handleTailScript)
 	mux.HandleFunc("POST /register", s.handleRegister)
 	mux.HandleFunc("POST /messages", s.handleSend)
 	mux.HandleFunc("GET /messages", s.handlePull)
+	// SSE push (DESIGN §4.4b): same delivery view as /messages, held open.
+	// Outbound-only — works behind caddy/tailnet, no inbound to assistants.
+	mux.HandleFunc("GET /messages/stream", s.handleStream)
 	mux.HandleFunc("POST /ack", s.handleAck)
 	mux.HandleFunc("POST /heartbeat", s.handleHeartbeat)
 	mux.HandleFunc("GET /peers", s.handlePeers)
@@ -96,6 +115,10 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("POST /admin/prompts", s.requireAdmin(s.handleAdminPrompts))
 	mux.HandleFunc("GET /admin/stats", s.requireAdmin(s.handleAdminStats))
 	mux.HandleFunc("GET /admin/config", s.requireAdmin(s.handleAdminConfig))
+	// Web self-update (DESIGN §10.4): releases-only, verified, systemd-only.
+	mux.HandleFunc("GET /admin/update/status", s.requireAdmin(s.handleAdminUpdateStatus))
+	mux.HandleFunc("POST /admin/update/check", s.requireAdmin(s.handleAdminUpdateCheck))
+	mux.HandleFunc("POST /admin/update/apply", s.requireAdmin(s.handleAdminUpdateApply))
 
 	if web != nil {
 		// Catch-all for the embedded console (longest-match wins over "/";
@@ -202,6 +225,15 @@ func (s *Server) handlePollScript(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(web.PollScript()))
 }
 
+// handleTailScript serves the SSE tail daemon (no auth: static content).
+// Assistants download it when choosing push over polling — never hand-write
+// protocol details.
+func (s *Server) handleTailScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write([]byte(web.TailScript()))
+}
+
 type registerReq struct {
 	Code            string `json:"code"`
 	ID              string `json:"id"`
@@ -267,6 +299,9 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 202, map[string]any{"ok": true, "held": true, "seq": seq, "id": req.ID, "thread": rootID})
 		return
 	}
+	// A newly visible message wakes held SSE subscribers (DESIGN §4.4b).
+	// Held (202) messages are invisible until admin approve wakes them.
+	s.notifyStream()
 	// Opportunistic verify completion: a result/ack may complete smoke.
 	if done, _ := s.verify.CheckCompletion(peer.ID, now); done {
 		log.Printf("peer verified: %s", peer.ID)
@@ -945,6 +980,11 @@ func (s *Server) handleAdminApprove(w http.ResponseWriter, r *http.Request) {
 	if err := s.st.ApproveMessage(req.Seq, req.Approve); err != nil {
 		writeErr(w, 500, "approve failed")
 		return
+	}
+	// An approved message becomes visible: wake SSE subscribers (§4.4b).
+	// Rejected messages stay invisible; no wake-up needed.
+	if req.Approve {
+		s.notifyStream()
 	}
 	action := "message.approved"
 	if !req.Approve {

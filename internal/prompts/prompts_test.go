@@ -147,3 +147,22 @@ func TestHandshakeContractsPresent(t *testing.T) {
 		}
 	}
 }
+
+func TestTailChoiceDocumented(t *testing.T) {
+	for _, typ := range []string{"muse", "claw", "generic", "hermes"} {
+		out, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+		if err != nil {
+			t.Fatalf("%s: %v", typ, err)
+		}
+		if !strings.Contains(out, "relay-tail.sh") {
+			t.Fatalf("%s missing tail choice", typ)
+		}
+		// Both scripts must be presented as either/or, never both-at-once.
+		if !strings.Contains(out, "二选一") && !strings.Contains(out, "只用其一") && typ != "hermes" {
+			t.Fatalf("%s missing either/or note", typ)
+		}
+		if typ == "hermes" && !strings.Contains(out, "cron 默认不变") {
+			t.Fatalf("hermes missing cron-stays-default note")
+		}
+	}
+}

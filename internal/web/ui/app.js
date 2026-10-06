@@ -80,7 +80,9 @@ document.querySelectorAll('.tab').forEach((b) => {
   b.onclick = () => {
     document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
     b.classList.add('active');
-    ['members', 'prompts', 'threads', 'audit'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
+    ['members', 'prompts', 'threads', 'audit', 'update'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
+  };
+  if (b.dataset.tab === 'update') refreshUpdate();
   };
 });
 
@@ -311,6 +313,81 @@ $('rotBtn').onclick = async () => {
 };
 
 function refreshAll() { refreshPeers(); refreshThreads(); refreshAudit(); refreshTokens(); }
+
+/* ---------- 版本更新（§10.4）：Releases only · systemd 自动 / docker 给命令 ---------- */
+let updJobTimer = null;
+async function refreshUpdate() {
+  try {
+    const s = await api('/admin/update/status');
+    const c = s.current || {};
+    $('updCurrent').textContent =
+      `当前 ${c.tag || c.version || '?'} · protocol ${c.protocol ?? '?'} · min_client ${c.min_client ?? '?'} · 指令 v${c.prompt_version ?? '?'} · 模式 ${s.mode || '?'}`;
+    if (s.mode === 'docker') {
+      $('updDockerCard').hidden = false;
+      $('updApply').disabled = true;
+      $('updDockerCmd').textContent =
+        `# 拉取目标版本镜像并重建容器（数据卷与配置保持不动）：\n` +
+        `docker pull ghcr.io/alixwang/agent-relay:<目标版本> && \\n` +
+        `docker rm -f agent-relay && \\n` +
+        `docker run -d --name agent-relay --restart unless-stopped \\n` +
+        `  -v /var/lib/agent-relay:/var/lib/agent-relay \\n` +
+        `  -v /etc/agent-relay/config.toml:/etc/agent-relay/config.toml:ro \\n` +
+        `  ghcr.io/alixwang/agent-relay:<目标版本>`;
+    } else if (s.mode !== 'systemd') {
+      $('updCurrent').textContent += '（未知部署模式，Web 更新不可用）';
+      $('updApply').disabled = true;
+    }
+    if (s.job) renderUpdJob(s.job);
+  } catch (e) { $('updCurrent').textContent = '读取失败: ' + e.message; }
+}
+function renderUpdJob(j) {
+  const st = j.status === 'ok' ? 'ok' : (j.status === 'running' ? 'warn' : 'bad');
+  $('updLog').textContent = `[${j.id}] ${j.version} → ${j.status}\n` + (j.log || '');
+  $('updLog').dataset.state = st;
+}
+$('updCheck').onclick = async () => {
+  const v = $('updVer').value.trim();
+  if (!v) { alert('先填目标版本（如 v0.4.0）'); return; }
+  try {
+    const r = await api('/admin/update/check', { method: 'POST', body: JSON.stringify({ version: v }) });
+    const changed = r.protocol_change || r.min_client_change;
+    if (r.unknown) {
+      $('updWarn').innerHTML = `<p class="warn">目标版本元数据不可达（离线或无标记）：继续即视为跨协议更新，必须勾选确认。</p>`;
+      $('updAckRow').hidden = false;
+    } else if (changed) {
+      $('updWarn').innerHTML = `<p class="warn">⚠ 目标版本变更协议（protocol_change=${r.protocol_change} min_client_change=${r.min_client_change}）：助手可能需要重跑 prompt，必须勾选确认。</p>`;
+      $('updAckRow').hidden = false;
+    } else {
+      $('updWarn').innerHTML = `<p class="muted small">${v} 同协议，可直接应用（自动备份+健康检查+失败回滚）。</p>`;
+      $('updAckRow').hidden = true;
+    }
+    $('updApply').disabled = false;
+    $('updApply').dataset.version = v;
+  } catch (e) { alert('检查失败: ' + e.message); }
+};
+$('updApply').onclick = async () => {
+  const v = $('updApply').dataset.version;
+  if (!v) return;
+  if (!$('updAckRow').hidden && !$('updAck').checked) { alert('跨协议更新必须先勾选确认'); return; }
+  if (!confirm(`应用更新到 ${v}？\n服务会重启一次（失败自动回滚）。`)) return;
+  try {
+    const r = await api('/admin/update/apply', {
+      method: 'POST',
+      body: JSON.stringify({ version: v, acknowledge_protocol_change: $('updAck').checked }),
+    });
+    $('updLog').textContent = `job ${r.job_id} 已启动，轮询中…`;
+    clearInterval(updJobTimer);
+    updJobTimer = setInterval(async () => {
+      try {
+        const s = await api('/admin/update/status');
+        if (s.job) {
+          renderUpdJob(s.job);
+          if (s.job.status !== 'running') { clearInterval(updJobTimer); refreshUpdate(); }
+        }
+      } catch {}
+    }, 3000);
+  } catch (e) { alert('应用失败: ' + e.message); }
+};
 // Page load: stats decides login vs app; on success pull every tab's data
 // (refreshStats alone only fills the topbar — that was the empty-table bug).
 (async () => {

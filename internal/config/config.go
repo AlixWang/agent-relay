@@ -56,6 +56,11 @@ type Config struct {
 
 	OfflineWebhookURL string `toml:"offline_webhook_url"`
 	MaxBodyBytes      int    `toml:"max_body_bytes"`
+
+	// SSE push (DESIGN §4.4b): outbound-only event stream assistants can
+	// hold instead of short-polling. Zero disables the corresponding knob.
+	StreamKeepaliveSecs int `toml:"stream_keepalive_secs"`
+	StreamMaxPerPeer    int `toml:"stream_max_per_peer"`
 }
 
 // Default returns the documented defaults (DESIGN §6.1, §10.2).
@@ -79,6 +84,8 @@ func Default() *Config {
 		PeerPruneAfterDays:   7,
 		AuditRetentionDays:   90,
 		MaxBodyBytes:         1 << 20,
+		StreamKeepaliveSecs:  20,
+		StreamMaxPerPeer:     3,
 	}
 }
 
@@ -108,6 +115,7 @@ func Load(path string) (*Config, error) {
 		"progress_throttle_secs": true, "permission_ttl_secs": true, "message_ttl_days": true,
 		"peer_prune_after_days": true, "audit_retention_days": true,
 		"offline_webhook_url": true, "max_body_bytes": true,
+		"stream_keepalive_secs": true, "stream_max_per_peer": true,
 	}
 	for k := range raw {
 		if !known[k] {
@@ -159,6 +167,12 @@ func (c *Config) Validate() error {
 	}
 	if c.PermissionTTLSecs < 0 {
 		return fmt.Errorf("permission_ttl_secs must be >= 0")
+	}
+	if c.StreamKeepaliveSecs < 0 || c.StreamKeepaliveSecs > 120 {
+		return fmt.Errorf("stream_keepalive_secs must be 0-120")
+	}
+	if c.StreamMaxPerPeer < 0 {
+		return fmt.Errorf("stream_max_per_peer must be >= 0")
 	}
 	return nil
 }

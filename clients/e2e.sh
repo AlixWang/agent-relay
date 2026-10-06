@@ -221,5 +221,43 @@ jq_ok "perm task acked" '.ok == true' \
     -H 'Content-Type: application/json' \
     --data '{"message_id":"p-t1","by":"t-bob"}'
 
+# SSE push (§4.4b): backlog replay + live delivery on the same view as poll.
+STREAM_OUT="$DATA/stream.out"
+(curl -s -N --max-time 6 "${AUTH_B[@]}" \
+  "$BASE/messages/stream?for=t-bob&since=0" > "$STREAM_OUT" 2>/dev/null || true) &
+STREAM_PID=$!
+# Backlog must contain the earlier direct message d1.
+sleep 2
+if grep -q '"id":"d1"' "$STREAM_OUT" 2>/dev/null && grep -q 'event: message' "$STREAM_OUT" 2>/dev/null; then
+  ok "stream backlog replay"
+else
+  bad "stream backlog replay" "$(head -c 300 "$STREAM_OUT" 2>/dev/null)"
+fi
+# Live push: send while the stream is held open.
+curl -s -X POST "$BASE/messages" "${AUTH_A[@]}" \
+  -H 'Content-Type: application/json' \
+  --data '{"id":"stream-live1","to":"t-bob","from":"t-alice","payload":"live via sse"}' > /dev/null
+sleep 2
+if grep -q '"id":"stream-live1"' "$STREAM_OUT" 2>/dev/null; then
+  ok "stream live push"
+else
+  bad "stream live push" "$(head -c 300 "$STREAM_OUT" 2>/dev/null)"
+fi
+kill "$STREAM_PID" 2>/dev/null || true
+wait "$STREAM_PID" 2>/dev/null || true
+# Stream auth parity: spoofed for → 403, no token → 401.
+if curl -s -o /dev/null -w '%{http_code}' --max-time 3 "${AUTH_A[@]}" \
+    "$BASE/messages/stream?for=t-bob&since=0" | grep -q 403; then
+  ok "stream for-spoof 403"
+else
+  bad "stream for-spoof 403"
+fi
+if curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+    "$BASE/messages/stream?for=t-bob&since=0" | grep -q 401; then
+  ok "stream unauth 401"
+else
+  bad "stream unauth 401"
+fi
+
 echo "== pass=$pass fail=$fail =="
 test "$fail" -eq 0

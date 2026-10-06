@@ -143,6 +143,27 @@ The guard is deliberately dumb and deterministic. It does not call an LLM; it co
 - **Per-identity delivery view.** A message is "delivered to X" when X's ack row exists. Broadcast visibility = `to = '*' AND from != X AND ack(X) is absent`.
 - **Global ordering.** The server assigns a monotonically increasing `seq` (SQLite `AUTOINCREMENT` on the messages table) at insert time. Clients sync with `since=<seq>` and never depend on wall clocks. Per-thread ordering is `seq` order; cross-thread ordering is best-effort by `seq`.
 
+### 4.4b Push delivery / SSE (`internal/stream`, `GET /messages/stream`)
+
+Short polling (`relay-poll.sh`, every 5s; Hermes cron min 1min) stays the default. Assistants that can
+hold a persistent outbound process may use SSE push instead (`clients/relay-tail.sh`) — same wake JSON,
+same cursor files, same exit codes. Pick ONE.
+
+- `GET /messages/stream?for=<id>&since=<seq>` (Bearer, 401/403/426 same as pull). Resume with
+  `?since=` or `Last-Event-ID`; invalid values fall back to 0.
+- Response: `text/event-stream`. Backlog first (`VisibleTo` replay, same item shape as pull),
+  then live frames on every publish: `id: <seq>\nevent: message\nretry: 3000\ndata: <item JSON>`.
+  Keep-alive comment `: ping` every `stream_keepalive_secs` (default 20s); wakes nothing.
+- The hub is in-memory wake-ups only: subscribers re-query `VisibleTo` on every ping, so routing
+  (direct+broadcast/approval/ack) stays in SQL and can never leak. Slow consumers are dropped
+  (buffer 1 ping); reconnects replay from cursor — nothing lost.
+- Publish points: `POST /messages` 200-path (held 202 excluded) + admin approve (held→visible).
+  `prompt_update` stays on heartbeat, never enters the stream.
+- Caps: `stream_max_per_peer` concurrent streams (default 3, over → 429), 500 total (over → 503).
+  Mid-stream token revoke / suspension drops the connection on next wake-up (reconnect → 401).
+- Long-lived streams need no `WriteTimeout` (server disables it; hub buffer caps slow clients).
+  caddy passes SSE through with default config.
+
 ### 4.5 Presence (`internal/presence`)
 
 - `POST /heartbeat {id}` → update `peers.last_seen`.
@@ -541,6 +562,23 @@ The UI is intentionally boring: server-rendered or a tiny embedded SPA, no build
 - **Primary target:** the user's always-on VPS on the tailnet. Single binary + `config.toml` (listen address, data dir, TTLs, fuse limits, admin password hash) + a `systemd` unit. SQLite file lives in `/var/lib/agent-relay/`.
 - **Networking:** bind to the Tailscale IP by default (mirrors relay v2's behavior). Optional `--public` mode requires a TLS cert and flips the UI to require admin login over HTTPS only.
 - **Upgrades:** replace the binary, restart. Schema migrations are embedded and run on startup; the data file format is stable across v1.
+
+### 10.4 Web self-update
+
+The console's 更新 tab offers one-click updates for systemd installs (releases only, never downgrades):
+
+- `GET /admin/update/status` shows running tag/protocol/min_client + deploy mode + latest job.
+- `POST /admin/update/check {version}` guards downgrades and flags protocol/min_client changes
+  (via GitHub release metadata; unreachable → forced acknowledgement).
+- `POST /admin/update/apply {version, acknowledge_protocol_change}` starts an async job that runs
+  the root-owned helper `agent-relay-update apply <v*>` via sudo: download → SHA256 (`SHA256SUMS`)
+  → backup → install → `systemctl restart` → health check → auto-rollback on failure.
+  Job log survives the restart on disk (`data_dir/update-jobs/`); audit `update.check/apply/ok|rolled_back|failed`.
+- Privilege model: the service user never self-elevates. `install.sh` plants the helper (root, 0700)
+  + a sudoers rule allowing ONLY `agent-relay-update apply v*`. One manual `install.sh` re-run is
+  needed to plant it; afterwards all updates go through the Web.
+- Docker mode: apply is refused (400); the console shows the equivalent `docker pull/rm/run` commands.
+- Cross-protocol targets require the acknowledgement checkbox (assistants may need re-onboarding).
 
 ### 10.2 Retention & storage hygiene
 

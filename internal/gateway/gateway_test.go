@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/presence"
 	"github.com/AlixWang/agent-relay/internal/queue"
 	"github.com/AlixWang/agent-relay/internal/store"
+	"github.com/AlixWang/agent-relay/internal/stream"
 	"github.com/AlixWang/agent-relay/internal/verify"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -854,5 +856,162 @@ func TestPromptDistributionFlow(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("admin peers missing prompt_version: %+v", out)
+	}
+}
+
+func TestStreamBacklogAndAuth(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "claw")
+
+	// No hub wired in fixture: 503.
+	req := httptest.NewRequest("GET", "/messages/stream?for=alice&since=0", nil)
+	req.Header.Set("Authorization", "Bearer "+f.tok["alice"])
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 503 {
+		t.Fatalf("nil hub should 503, got %d", rec.Code)
+	}
+
+	// Wire hub, seed a message, stream it.
+	f.srv.SetStream(stream.New(3, 100))
+	_, out := f.do(t, "POST", "/messages",
+		map[string]any{"id": "s1", "to": "alice", "from": "bob", "payload": "hi"}, f.tok["bob"])
+	if out["ok"] != true {
+		t.Fatalf("send: %+v", out)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req = httptest.NewRequest("GET", "/messages/stream?for=alice&since=0", nil)
+	req = req.WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+f.tok["alice"])
+	rec = httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { f.mux.ServeHTTP(rec, req); close(done) }()
+	// Wait for the backlog frame, then cancel.
+	deadline := time.Now().Add(4 * time.Second)
+	for !strings.Contains(rec.Body.String(), `"id":"s1"`) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no backlog frame: %q", rec.Body.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: message") || !strings.Contains(body, "retry: 3000") {
+		t.Fatalf("frame shape: %q", body)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("content-type: %q", ct)
+	}
+
+	// Cross-identity for: 403.
+	req2 := httptest.NewRequest("GET", "/messages/stream?for=bob&since=0", nil)
+	req2.Header.Set("Authorization", "Bearer "+f.tok["alice"])
+	rec2 := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec2, req2)
+	if rec2.Code != 403 {
+		t.Fatalf("for-spoof should 403, got %d", rec2.Code)
+	}
+	// No token: 401.
+	req3 := httptest.NewRequest("GET", "/messages/stream?for=alice&since=0", nil)
+	rec3 := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec3, req3)
+	if rec3.Code != 401 {
+		t.Fatalf("unauth should 401, got %d", rec3.Code)
+	}
+}
+
+func TestStreamLivePushAndResume(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "claw")
+	f.srv.SetStream(stream.New(3, 100))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/messages/stream?for=bob&since=0", nil)
+	req = req.WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+f.tok["bob"])
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { f.mux.ServeHTTP(rec, req); close(done) }()
+	// Give the handler a moment to subscribe, then send.
+	time.Sleep(200 * time.Millisecond)
+	_, out := f.do(t, "POST", "/messages",
+		map[string]any{"id": "live1", "to": "bob", "from": "alice", "payload": "live"}, f.tok["alice"])
+	if out["ok"] != true {
+		t.Fatalf("send: %+v", out)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(rec.Body.String(), `"id":"live1"`) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no live frame: %q", rec.Body.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	// Resume with since=past-live: no replay of the old item, stream stays open.
+	msgs, _ := f.srv.queue.Visible("bob", 0, 200)
+	var maxSeq int64
+	for _, m := range msgs {
+		if m.Seq > maxSeq {
+			maxSeq = m.Seq
+		}
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel2()
+	req2 := httptest.NewRequest("GET", "/messages/stream?for=bob&since="+itoa(maxSeq), nil)
+	req2 = req2.WithContext(ctx2)
+	req2.Header.Set("Authorization", "Bearer "+f.tok["bob"])
+	rec2 := httptest.NewRecorder()
+	done2 := make(chan struct{})
+	go func() { f.mux.ServeHTTP(rec2, req2); close(done2) }()
+	<-done2 // ctx timeout ends it
+	if strings.Contains(rec2.Body.String(), `"id":"live1"`) {
+		t.Fatalf("resume replayed old item: %q", rec2.Body.String())
+	}
+}
+
+func TestStreamRevokedMidStream(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.srv.SetStream(stream.New(3, 100))
+	// Revoke alice's only token: stream must drop on next wake-up.
+	toks, _ := f.srv.st.ListTokensByPeer("alice")
+	for _, tk := range toks {
+		_ = f.srv.st.RevokeToken(tk.ID, time.Now().Unix())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/messages/stream?for=alice&since=0", nil)
+	req = req.WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+f.tok["alice"])
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { f.mux.ServeHTTP(rec, req); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(4 * time.Second):
+		t.Fatal("revoked stream did not drop")
+	}
+}
+
+func TestTailScriptServed(t *testing.T) {
+	f := newFixture(t)
+	req := httptest.NewRequest("GET", "/clients/relay-tail.sh", nil)
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("tail script: %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "shellscript") {
+		t.Fatalf("content-type: %q", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "messages/stream") {
+		t.Fatal("tail script body wrong")
 	}
 }

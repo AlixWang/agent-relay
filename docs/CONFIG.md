@@ -27,6 +27,8 @@
 | `audit_retention_days` | int | `90` | 审计日志保留 |
 | `offline_webhook_url` | string | `""` | peer 由在线转离线时 POST `{"peer_id","offline_secs","ts"}` |
 | `max_body_bytes` | int | `1048576` | 请求体上限 1 MiB |
+| `stream_keepalive_secs` | int | `20` | SSE 保活间隔秒（0=用 20；上限 120，§4.4b） |
+| `stream_max_per_peer` | int | `3` | 单身份并发流上限，超限 `429`（0=用 3，§4.4b） |
 
 ## 最小生产配置
 

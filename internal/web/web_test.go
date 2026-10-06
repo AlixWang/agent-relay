@@ -106,6 +106,9 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 		"aActor", "aAction", "refreshAudit", "exportAudit", "auditTable",
 		"refreshConfig", "configOut",
 		"refreshTokens", "tokenTable", "rotPeer", "rotLabel", "rotBtn", "rotOut",
+		"updCurrent", "updVer", "updCheck", "updApply",
+		"updWarn", "updAckRow", "updAck", "updLog",
+		"updDockerCard", "updDockerCmd",
 		"loginPage", "loginForm", "loginErr", "username", "app",
 	} {
 		if !strings.Contains(js, "$('"+ref+"')") {
@@ -115,9 +118,24 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 			t.Fatalf("index.html missing id=%q used by app.js", ref)
 		}
 	}
-	for _, tab := range []string{"members", "prompts", "threads", "audit"} {
+	for _, tab := range []string{"members", "prompts", "threads", "audit", "update"} {
 		if !ids["tab-"+tab] {
 			t.Fatalf("missing tab-%s", tab)
 		}
+	}
+}
+
+func TestTailScriptEmbedded(t *testing.T) {
+	s := TailScript()
+	if !strings.Contains(s, "relay-tail") || !strings.Contains(s, "/messages/stream?for=") {
+		t.Fatal("embedded tail script looks wrong")
+	}
+	// Must stay in sync with the repo copy.
+	raw, err := os.ReadFile("../../clients/relay-tail.sh")
+	if err != nil {
+		t.Fatalf("repo copy: %v", err)
+	}
+	if s != string(raw) {
+		t.Fatal("internal/web/clients/relay-tail.sh diverged from clients/relay-tail.sh")
 	}
 }

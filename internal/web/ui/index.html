@@ -50,6 +50,7 @@
   <button data-tab="prompts" class="tab" role="tab">邀请 &amp; Prompt</button>
   <button data-tab="threads" class="tab" role="tab">消息 &amp; 线程</button>
   <button data-tab="audit" class="tab" role="tab">审计 &amp; Token</button>
+  <button data-tab="update" class="tab" role="tab">更新</button>
 </nav>
 
 <main>
@@ -171,8 +172,7 @@
       </table>
     </div>
     <div class="card">
-      <h3>签发 Token（轮换）</h3>
-      <div class="form-row">
+      <h3>签发 Token（轮换）</h3>      <div class="form-row">
         <label class="field">peer id
           <input id="rotPeer" placeholder="peer id">
         </label>
@@ -184,6 +184,31 @@
         </div>
       </div>
       <pre id="rotOut"></pre>
+    </div>
+  </section>
+  <section id="tab-update" hidden>
+    <div class="card">
+      <h2>版本更新 <span class="muted small">（仅 GitHub Releases · systemd 自动 / docker 给命令）</span></h2>
+      <p class="muted small" id="updCurrent">读取中…</p>
+      <div class="form-row">
+        <label class="field">目标版本
+          <input id="updVer" placeholder="v0.4.0">
+        </label>
+        <div class="field field-btn">
+          <button id="updCheck" class="btn btn-outline">检查</button>
+          <button id="updApply" class="btn" disabled>应用更新</button>
+        </div>
+      </div>
+      <div id="updWarn"></div>
+      <label class="field" id="updAckRow" hidden>
+        <span><input type="checkbox" id="updAck"> 我已知晓协议变更，继续更新</span>
+      </label>
+      <pre id="updLog"></pre>
+    </div>
+    <div class="card" id="updDockerCard" hidden>
+      <h3>Docker 模式更新命令</h3>
+      <p class="muted small">Web 更新只支持 systemd。二进制/docker 混用时按下面命令手动执行：</p>
+      <pre id="updDockerCmd"></pre>
     </div>
   </section>
 </main>
