@@ -87,8 +87,7 @@ document.querySelectorAll('.tab').forEach((b) => {
     document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
     b.classList.add('active');
     ['members', 'prompts', 'threads', 'audit', 'update'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
-  };
-  if (b.dataset.tab === 'update') refreshUpdate();
+    if (b.dataset.tab === 'update') refreshUpdate();
   };
 });
 
