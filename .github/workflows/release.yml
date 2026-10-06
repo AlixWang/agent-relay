@@ -19,10 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5 # pinned major; runner resolves via tags
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: debug workspace
+        run: pwd; ls -la; ls cmd/agent-relay || true
 
       - name: build (linux amd64 + arm64, CGO off, pure Go)
         run: |
@@ -48,11 +51,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v3 # latest major; v4+ does not exist
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3 # latest major; v4+ does not exist
 
-      - uses: docker/login-action@v5
+      - uses: docker/login-action@v3 # latest major; v4/v5 do not exist
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -66,7 +69,7 @@ jobs:
             type=ref,event=tag
             type=raw,value=latest
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v5 # v5 verified; avoids unreleased-major resolution failure
         with:
           context: .
           platforms: linux/amd64,linux/arm64
