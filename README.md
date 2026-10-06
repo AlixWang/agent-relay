@@ -16,21 +16,16 @@ custom ──┘   (port 18789)   └── human (Web UI 审计/审批)
 `docs/DESIGN.md` 是完整框架蓝图；本仓库是其 Go 实现（P0+P1+P2 直达终态）。
 `prototype/` 保留 Python v2 原型，仅作回滚备份（见 `docs/MIGRATION.md`）。
 
-## 快速开始（服务端）
+## 快速开始（服务端，一键安装）
 
 ```bash
-go mod tidy
-go build -o agent-relay ./cmd/agent-relay
-
-# 1. 生成 admin 密码 hash
-./agent-relay -hash 'your-strong-password'
-
-# 2. 写 /etc/agent-relay/config.toml（见 configs/config.toml.example，
-#    字段说明见 docs/CONFIG.md），填入上一步的 hash
-# 3. 启动（systemd 见 deploy/agent-relay.service）
-./agent-relay -config /etc/agent-relay/config.toml
-# 打开 http://<tailnet-ip>:18789/ 进 Web 控制台
+# 在 VPS 上（需 root/sudo）：交互向导自动完成版本选择、网络模式、
+# admin 密码、systemd/docker 启动与健康检查
+curl -sSL https://raw.githubusercontent.com/AlixWang/agent-relay/main/deploy/install.sh | sudo bash
 ```
+
+装完打开 `http://<tailnet-ip>:18789/` 进 Web 控制台。
+手动/无人值守方式与升级流程见 `docs/DEPLOY.md`。
 
 ## 快速开始（新助手接入）
 
@@ -72,7 +67,7 @@ internal/
   retention/          TTL 归档/剪枝/审计保留
   web/ui/             嵌入式运维控制台（成员/邀请/线程/审计，无构建链）
 configs/              config.toml.example
-deploy/               systemd unit
+deploy/               install.sh（一键安装）+ systemd unit
 clients/              relay-poll.sh（零 token 轮询）+ task-relay-watch.sh（hook 包装）+ e2e.sh
 docs/                 DESIGN / API / CONFIG / DEPLOY / MIGRATION / POSTGRES / ROADMAP
 migrations/           001_init.sql（人类可读，执行体在 store/schema.sql）

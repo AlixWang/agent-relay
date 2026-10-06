@@ -2,6 +2,29 @@
 
 目标机器：常开 VPS，已加入 Tailscale，能 `tailscale ip -4` 拿到 100.x。
 
+## 0. 一键安装（推荐）
+
+```bash
+curl -sSL https://raw.githubusercontent.com/AlixWang/agent-relay/main/deploy/install.sh | sudo bash
+```
+
+交互向导依次确认：版本（默认最新 Release）→ 部署方式（systemd 二进制 / docker 镜像）→
+网络模式（tailscale 内网 / 公网 TLS / 仅本机）→ admin 密码 → 端口/数据目录。
+脚本自动完成：SHA256 校验 → 写 config（含 bcrypt hash）→ 建用户/systemd unit 或起容器 → 健康检查。
+
+```bash
+# 无人值守示例：最新版 + systemd + tailscale + 随机密码
+curl -sSL .../install.sh | sudo bash -s -- -y --random-pw
+# 指定版本 + docker + 公网 TLS
+curl -sSL .../install.sh | sudo bash -s -- --version v0.1.2 --mode docker \
+  --net public --tls-cert /etc/letsencrypt/live/x/fullchain.pem \
+  --tls-key /etc/letsencrypt/live/x/privkey.pem --admin-pw '...'
+```
+
+升级也是重跑脚本（`--version` 新版本），数据目录不动，schema 自动迁移。
+
+以下为手动步骤（脚本行为的对照说明，出问题时排查用）。
+
 ## 1. 建用户与目录
 
 ```bash
