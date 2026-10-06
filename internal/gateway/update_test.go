@@ -100,3 +100,18 @@ func TestUpdateCheckResolvesLatest(t *testing.T) {
 		t.Fatalf("bad version should 400, got %d", c)
 	}
 }
+
+func TestUpdateJobMutex(t *testing.T) {
+	mgr := newUpdateManager()
+	j1, ok := mgr.start("v9.9.9")
+	if !ok || j1 == nil {
+		t.Fatal("first start should win")
+	}
+	if _, ok := mgr.start("v9.9.10"); ok {
+		t.Fatal("second start must 409-busy")
+	}
+	mgr.finish(j1.ID, "failed", "x", 1)
+	if _, ok := mgr.start("v9.9.10"); !ok {
+		t.Fatal("after finish should accept")
+	}
+}

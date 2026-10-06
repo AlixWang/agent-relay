@@ -491,7 +491,10 @@ RestartSec=5
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$DATA_DIR
-NoNewPrivileges=true
+# NOTE: NoNewPrivileges is intentionally ABSENT: the Web self-update
+# (§10.4) runs /usr/local/sbin/agent-relay-update via a sudoers single-
+# command whitelist (`apply v*` only). NoNewPrivileges would make the
+# kernel refuse all privilege escalation and break one-click updates.
 PrivateTmp=true
 
 [Install]
