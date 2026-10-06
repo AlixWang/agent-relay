@@ -80,19 +80,27 @@ case "$ARCH_RAW" in
   *) die "不支持的架构 $ARCH_RAW（仅 amd64/arm64）";;
 esac
 
+# NOTE: 所有交互输入一律走 /dev/tty。curl | bash 时脚本的 stdin 是下载管道
+# （已 EOF），从 stdin read 永远读到空、stty 直接报错。--yes 模式跳过交互。
+need_tty() {
+  [ -c /dev/tty ] && [ "$YES" -eq 0 ] || return 1
+}
+
 ask() { # $1 提示 $2 默认值 -> 输出到 stdout
   local prompt="$1" def="$2" ans
   if [ "$YES" -eq 1 ]; then printf '%s' "$def"; return; fi
+  need_tty || die "无交互终端：请加 -y 用默认值，或用 --flag 预设（--help 查看）"
   if [ -n "$def" ]; then printf '%s [%s]: ' "$prompt" "$def" >&2; else printf '%s: ' "$prompt" >&2; fi
-  read -r ans || true
+  read -r ans </dev/tty || true
   printf '%s' "${ans:-$def}"
 }
 
 ask_secret() { # $1 提示 -> stdout（不回显）
   local prompt="$1" a b
   if [ "$YES" -eq 1 ]; then die "$prompt 未提供（-y 模式请加 --admin-pw 或 --random-pw）"; fi
-  printf '%s: ' "$prompt" >&2; stty -echo; read -r a; stty echo; printf '\n' >&2
-  printf '%s（确认）: ' "$prompt" >&2; stty -echo; read -r b; stty echo; printf '\n' >&2
+  need_tty || die "无交互终端：请用 --admin-pw 或 --random-pw 提供密码"
+  printf '%s: ' "$prompt" >&2; stty -echo </dev/tty; read -r a </dev/tty; stty echo </dev/tty; printf '\n' >&2
+  printf '确认: ' >&2; stty -echo </dev/tty; read -r b </dev/tty; stty echo </dev/tty; printf '\n' >&2
   [ "$a" = "$b" ] || die "两次输入不一致"
   [ -n "$a" ] || die "密码不能为空"
   printf '%s' "$a"
