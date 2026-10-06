@@ -2,7 +2,7 @@
 所有助手通过它互相派发任务。
 
 ## 1. 背景
-- 中继地址：{{.ServerAddr}}（用户常开 VPS，只监听 tailnet，端口 18789）
+- 中继地址：{{.ServerAddr}}（用户常开 VPS）
 - 你的身份标识：`{{.PeerID}}`
 - 协议版本：{{.ProtocolVersion}}（最低兼容以服务端 /health 的 min_client 为准）
 
@@ -37,8 +37,8 @@ curl -s $RELAY/health
 ```
 
 ## 4. 搭建步骤
-1. 确认 tailnet 连通：`curl -s {{.ServerAddr}}/health` 应返回 `{"ok":true,...}`。
-   沙盒需走 tunnel 代理时：`tunnel_proxy="${HTTPS_PROXY%:*}:3130"; curl --proxy "$tunnel_proxy" ...`。
+1. 确认连通：`curl -s {{.ServerAddr}}/health` 应返回 `{"ok":true,...}`。
+   内网地址走 tailnet；沙盒需走 tunnel 代理时：`tunnel_proxy="${HTTPS_PROXY%:*}:3130"; curl --proxy "$tunnel_proxy" ...`。
 {{if .IsReconfigure}}2. 跳过注册，直接用已有 token 验证：`curl -s {{.ServerAddr}}/peers -H "Authorization: Bearer $TOKEN"` 应返回你的身份。
 3. 把轮询脚本更新到最新版 clients/relay-poll.sh（向用户索取全文），确认 `since` 游标逻辑与 §3 一致。{{else}}2. 调用 /register 注册，保存 token（chmod 600）。
 3. 安装轮询脚本 clients/relay-poll.sh（向用户索取全文，不要自己发明协议细节），

@@ -427,8 +427,13 @@ EOF
   else
     warn "caddy 配置校验失败（可能是 import 路径不同），请手动检查 $SITE_FILE 是否被主 Caddyfile import"
   fi
-  caddy reload 2>/dev/null && log "caddy 已 reload（自动申请 $PROXY_DOMAIN 证书）" \
-    || warn "caddy reload 失败，请手动 systemctl reload caddy"
+  # NOTE: admin API 被禁（admin off）的 caddy 上 reload 必失败，用 restart。
+  if caddy reload 2>/dev/null; then
+    log "caddy 已 reload（自动申请 $PROXY_DOMAIN 证书）"
+  else
+    warn "caddy reload 失败（常见于 admin off 配置），改用 restart…"
+    systemctl restart caddy && log "caddy 已 restart" || die "caddy 启动失败：systemctl status caddy 看日志"
+  fi
 fi
 
 # ---- 7. 启动 ----
@@ -490,7 +495,9 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
   id agent-relay >/dev/null 2>&1 || useradd -r -d "$DATA_DIR" -s /usr/sbin/nologin agent-relay
-  mkdir -p "$DATA_DIR" && chown agent-relay:agent-relay "$DATA_DIR"
+  mkdir -p "$DATA_DIR" && chown -R agent-relay:agent-relay "$DATA_DIR"
+  # config 含 bcrypt hash：属主给服务用户（600），否则 ProtectSystem 下读不到
+  chown agent-relay:agent-relay "$CONFIG_PATH" && chmod 600 "$CONFIG_PATH"
   # 配置里的 data_dir 与 service 的 ReadWritePaths 保持一致
   sed -i "s|^data_dir = .*|data_dir = \"$DATA_DIR\"|" "$CONFIG_PATH"
   systemctl daemon-reload
