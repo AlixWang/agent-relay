@@ -1,4 +1,7 @@
-agent-relay
+# Built binary at repo root only (leading slash: must not match cmd/agent-relay/)
+/agent-relay
+/agent-relay-ci
+/agent-relay-test
 *.db
 *.db-wal
 *.db-shm
