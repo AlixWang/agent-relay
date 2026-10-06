@@ -174,5 +174,52 @@ jq_ok "heartbeat" '.ok == true' \
     -H 'Content-Type: application/json' \
     --data '{"id":"t-bob"}'
 
+# permission handshake: B started → request → A allow → B resumed → result → ack
+jq_ok "perm task" '.seq > 0' \
+  curl -s -X POST "$BASE/messages" "${AUTH_A[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"p-t1","to":"t-bob","from":"t-alice","payload":"list /tmp/x for me please with distinct wording entirely xxxxx"}'
+
+jq_ok "perm started" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"p-s1","to":"t-alice","from":"t-bob","kind":"status","in_reply_to":"p-t1","status":"started","payload":"B started executing the listing task now in detail xxxxx"}'
+
+jq_ok "perm request" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"p-pr1","to":"t-alice","from":"t-bob","kind":"permission_request","in_reply_to":"p-t1","op":"shell.exec","target":"/tmp/x","detail":"list it","payload":"B needs approval to run the listing command in detail xxxxx"}'
+
+jq_ok "perm fields surfaced" '.items | map(select(.kind=="permission_request"))[0].op == "shell.exec"' \
+  curl -s "$BASE/messages?for=t-alice&since=0" "${AUTH_A[@]}"
+
+jq_ok "perm allow" '.seq > 0' \
+  curl -s -X POST "$BASE/messages" "${AUTH_A[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"p-pd1","to":"t-bob","from":"t-alice","kind":"permission_decision","in_reply_to":"p-pr1","decision":"allow","payload":"A approves this one listing operation only xxxx"}'
+
+if curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/messages" "${AUTH_A[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"p-pd2","to":"t-bob","from":"t-alice","kind":"permission_decision","in_reply_to":"p-pr1","decision":"deny","payload":"A changes mind and denies now in detail xxxxxx"}' | grep -q 409; then
+  ok "perm flip 409"
+else
+  bad "perm flip 409"
+fi
+
+jq_ok "perm resumed" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"p-s2","to":"t-alice","from":"t-bob","kind":"status","in_reply_to":"p-t1","status":"resumed","payload":"B resumed after approval and continues working xxxxx"}'
+
+jq_ok "perm result" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"p-r1","to":"t-alice","from":"t-bob","kind":"result","in_reply_to":"p-t1","payload":"listing done a.txt b.txt with full output xxxxxxxxx"}'
+
+jq_ok "perm task acked" '.ok == true' \
+  curl -s -X POST "$BASE/ack" "${AUTH_B[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"message_id":"p-t1","by":"t-bob"}'
+
 echo "== pass=$pass fail=$fail =="
 test "$fail" -eq 0

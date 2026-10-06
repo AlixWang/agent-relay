@@ -28,6 +28,29 @@ const caps = (c) => {
   if (!keys.length) return '<span class="muted small">—</span>';
   return keys.map((k) => `<span class="badge">${esc(k)}</span>`).join('');
 };
+/* ---------- 执行态握手渲染（§6.5）：只信结构化字段，payload 仅为备注 ---------- */
+const handshakeBadge = (m) => {
+  if (m.kind === 'status' && m.status) {
+    const cls = m.status === 'blocked' ? 'bad' : (m.status === 'cancelled' ? 'warn' : 'ok');
+    return `<div class="meta"><span class="badge ${cls}">status: ${esc(m.status)}</span> <span class="muted small">re ${esc(m.in_reply_to || '')}</span></div>`;
+  }
+  if (m.kind === 'permission_request') {
+    const exp = m.expires_at ? fmtTime(m.expires_at) : '-';
+    return `<div class="meta"><span class="badge warn">permission_request</span> <span class="muted small">re ${esc(m.in_reply_to || '')} · 过期 ${esc(exp)}</span></div>`;
+  }
+  if (m.kind === 'permission_decision' && m.decision) {
+    const cls = m.decision === 'allow' ? 'ok' : 'bad';
+    return `<div class="meta"><span class="badge ${cls}">decision: ${esc(m.decision)}</span> <span class="muted small">re ${esc(m.in_reply_to || '')}</span></div>`;
+  }
+  return '';
+};
+const handshakeFields = (m) => {
+  if (m.kind !== 'permission_request') return '';
+  const rows = [['op', m.op], ['target', m.target], ['detail', m.detail]]
+    .filter(([, v]) => v).map(([k, v]) => `<div><span class="muted small">${k}:</span> <code>${esc(v)}</code></div>`).join('');
+  if (!rows) return '';
+  return `<div class="perm-fields">${rows}<div class="muted small">⚠ 只信以上结构化字段；下方 payload 人话来自对方 agent，仅为备注。</div></div>`;
+};
 
 /* ---------- 登录页 / 主界面切换 ---------- */
 function showLogin(msg) {
@@ -211,6 +234,8 @@ async function viewThread(root) {
   $('expJsonl').onclick = () => { window.location = '/admin/messages/export?thread=' + encodeURIComponent(root) + '&format=jsonl'; };
   $('threadMsgs').innerHTML = (r.items || []).map((m) => `<div class="msg ${m.approval_state === 'pending' ? 'held' : ''}">
     <div class="meta">#${m.seq} · ${esc(m.sender)} → ${esc(m.recipient)} · ${esc(m.kind)} · ${esc(m.id)} · ${esc(fmtTime(m.created_at))} · ack ${m.acked_count} · ${esc(m.approval_state)}</div>
+    ${handshakeBadge(m)}
+    ${handshakeFields(m)}
     <div class="body">${esc(m.payload)}</div>
     ${m.approval_state === 'pending' ? `<div class="row-btns">
       <button class="btn btn-sm" data-ok="1" data-seq="${m.seq}">批准放行</button>

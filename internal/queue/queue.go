@@ -21,6 +21,13 @@ type SendRequest struct {
 	RequiresApproval bool   `json:"requires_approval"`
 	Payload          string `json:"payload"`
 	ProtocolVersion  int    `json:"protocol_version"`
+	// Execution handshake (§6.5):
+	Status        string `json:"status"`          // kind=status: started|progress|blocked|resumed|cancelled
+	Op            string `json:"op"`              // kind=permission_request
+	Target        string `json:"target"`          // kind=permission_request
+	Detail        string `json:"detail"`          // kind=permission_request
+	Decision      string `json:"decision"`        // kind=permission_decision: allow|deny
+	ExpiresInSecs int64  `json:"expires_in_secs"` // kind=permission_request
 }
 
 // Service ties guard + store together.
@@ -32,6 +39,25 @@ type Service struct {
 // New creates a queue Service.
 func New(st store.Store, g *guard.Guard) *Service {
 	return &Service{st: st, guard: g}
+}
+
+// Handshake TTL bounds (DESIGN §6.5). ExpiresInSecs above the max is
+// clamped, not rejected — a B that overstates patience still gets a
+// decision window instead of a confusing 400.
+const (
+	DefaultPermissionTTL = 600
+	MaxPermissionTTL     = 3600
+)
+
+// defaultPermissionTTL is the effective default when a request omits
+// expires_in_secs. main overrides it from config (permission_ttl_secs).
+var defaultPermissionTTL = int64(DefaultPermissionTTL)
+
+// SetDefaultPermissionTTL overrides the expires_in_secs default.
+func SetDefaultPermissionTTL(secs int64) {
+	if secs > 0 {
+		defaultPermissionTTL = secs
+	}
 }
 
 // Send validates (guard first), inserts, and returns (seq, held, rootID).
@@ -57,10 +83,31 @@ func (s *Service) Send(req *SendRequest, now int64) (int64, bool, string, error)
 		InReplyTo:        req.InReplyTo,
 		RequiresApproval: req.RequiresApproval,
 		Payload:          req.Payload,
+		Status:           req.Status,
+		Op:               req.Op,
+		Target:           req.Target,
+		Detail:           req.Detail,
+		Decision:         req.Decision,
+		ExpiresInSecs:    req.ExpiresInSecs,
 	}
 	verdict, err := s.guard.Check(env, now)
 	if err != nil {
 		return 0, false, "", err
+	}
+	// Permission decisions take the CAS path (first decision wins).
+	if kind == "permission_decision" {
+		return s.sendDecision(req, verdict.RootID, now)
+	}
+	expiresAt := int64(0)
+	if kind == "permission_request" {
+		ttl := req.ExpiresInSecs
+		if ttl <= 0 {
+			ttl = defaultPermissionTTL
+		}
+		if ttl > MaxPermissionTTL {
+			ttl = MaxPermissionTTL
+		}
+		expiresAt = now + ttl
 	}
 	approvalState := "n/a"
 	if verdict.Held {
@@ -77,6 +124,12 @@ func (s *Service) Send(req *SendRequest, now int64) (int64, bool, string, error)
 		ApprovalState:    approvalState,
 		Payload:          req.Payload,
 		CreatedAt:        now,
+		Status:           req.Status,
+		Op:               req.Op,
+		Target:           req.Target,
+		Detail:           req.Detail,
+		Decision:         req.Decision,
+		ExpiresAt:        expiresAt,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
@@ -84,14 +137,94 @@ func (s *Service) Send(req *SendRequest, now int64) (int64, bool, string, error)
 		}
 		return 0, false, "", err
 	}
+	if kind == "permission_request" {
+		if err := s.st.CreatePermissionRequest(&store.PermissionRequest{
+			RequestID: req.ID, Thread: verdict.RootID,
+			Requester: req.From, Approver: req.To, Status: "pending",
+			Op: req.Op, Target: req.Target, Detail: req.Detail,
+			CreatedAt: now, ExpiresAt: expiresAt,
+		}); err != nil {
+			// The message row is already in; a permission row failure is
+			// a server error, not a silent half-write — surface 500 via
+			// the generic path (no Rejection code).
+			return 0, false, "", fmt.Errorf("permission row: %w", err)
+		}
+	}
 	s.guard.RecordHit(req.From, now)
 	auditAction := "message.sent"
-	if kind == "result" {
+	switch kind {
+	case "result":
 		auditAction = "result.sent"
+	case "status":
+		auditAction = "task.status"
+	case "permission_request":
+		auditAction = "permission.requested"
 	}
 	_ = s.st.AppendAudit(req.From, auditAction,
-		fmt.Sprintf("seq=%d thread=%s to=%s held=%v", seq, verdict.RootID, req.To, verdict.Held), now)
+		fmt.Sprintf("seq=%d thread=%s to=%s held=%v status=%s", seq, verdict.RootID, req.To, verdict.Held, req.Status), now)
 	return seq, verdict.Held, verdict.RootID, nil
+}
+
+// sendDecision runs the first-decision-wins CAS. A lost race, an expiry, or
+// an already-decided row returns won=false; the row is re-read so the
+// caller can answer idempotent replay (same value → 200) vs flip (409).
+func (s *Service) sendDecision(req *SendRequest, rootID string, now int64) (int64, bool, string, error) {
+	msg := &store.Message{
+		ID: req.ID, Sender: req.From, Recipient: req.To,
+		Kind: "permission_decision", InReplyTo: req.InReplyTo,
+		RootID: rootID, ApprovalState: "n/a",
+		Payload: req.Payload, CreatedAt: now, Decision: req.Decision,
+	}
+	pr, err := s.st.GetPermissionRequest(req.InReplyTo)
+	if err != nil {
+		return 0, false, "", err
+	}
+	if pr == nil {
+		return 0, false, "", &guard.Rejection{Code: "bad_permission_ref", Reason: "unknown permission request"}
+	}
+	// Same value twice: idempotent replay of a won race returns the
+	// original decision seq. Matches on value (not message id) so a
+	// retried decision with a fresh id is still idempotent.
+	if pr.Status != "pending" {
+		if (pr.Status == "allowed") == (req.Decision == "allow") {
+			if won, err := s.st.GetBySenderID(pr.Approver, pr.DecisionID); err == nil && won != nil {
+				s.guard.RecordHit(req.From, now)
+				return won.Seq, false, rootID, nil
+			}
+		}
+		return 0, false, "", &guard.Rejection{Code: "permission_already_decided", Reason: "request already decided"}
+	}
+	if now >= pr.ExpiresAt {
+		return 0, false, "", &guard.Rejection{Code: "permission_expired", Reason: "request expired; the recipient must treat it as denied"}
+	}
+	won, err := s.st.DecidePermission(msg, req.InReplyTo, req.Decision, now)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return 0, false, "", &guard.Rejection{Code: "duplicate_id", Reason: "sender already used id " + req.ID}
+		}
+		return 0, false, "", err
+	}
+	if !won {
+		// Lost the CAS race after passing the check: re-read and answer
+		// same as above (idempotent vs conflict).
+		if pr2, err := s.st.GetPermissionRequest(req.InReplyTo); err == nil && pr2 != nil && pr2.Status != "pending" {
+			if (pr2.Status == "allowed") == (req.Decision == "allow") {
+				if orig, err := s.st.GetBySenderID(pr2.Approver, pr2.DecisionID); err == nil && orig != nil {
+					s.guard.RecordHit(req.From, now)
+					return orig.Seq, false, rootID, nil
+				}
+			}
+		}
+		return 0, false, "", &guard.Rejection{Code: "permission_already_decided", Reason: "request already decided"}
+	}
+	s.guard.RecordHit(req.From, now)
+	_ = s.st.AppendAudit(req.From, "permission.decided",
+		fmt.Sprintf("thread=%s request=%s decision=%s", rootID, req.InReplyTo, req.Decision), now)
+	decided, err := s.st.GetBySenderID(req.From, req.ID)
+	if err != nil || decided == nil {
+		return 0, false, "", fmt.Errorf("decision row missing after CAS win")
+	}
+	return decided.Seq, false, rootID, nil
 }
 
 // Visible returns messages visible to peerID with seq > since (DESIGN §4.4).

@@ -56,13 +56,40 @@ type Message struct {
 	ID               string
 	Sender           string
 	Recipient        string
-	Kind             string // task|result|chat|system
+	Kind             string // task|result|chat|system|status|permission_request|permission_decision
 	InReplyTo        string
 	RootID           string
 	RequiresApproval bool
 	ApprovalState    string // n/a|pending|approved|rejected
 	Payload          string
 	CreatedAt        int64
+	// Execution-state handshake (§6.5). Only set on the new kinds:
+	// status → Status; permission_request → Op/Target/Detail + ExpiresAt;
+	// permission_decision → Decision.
+	Status    string
+	Op        string
+	Target    string
+	Detail    string
+	Decision  string // allow|deny
+	ExpiresAt int64
+}
+
+// PermissionRequest is the server-side row for one permission_request
+// message (request_id = message id). The decision CAS runs against this
+// table: first decision wins, repeats are idempotent, flips are rejected.
+type PermissionRequest struct {
+	RequestID  string `json:"request_id"`
+	Thread     string `json:"thread"`
+	Requester  string `json:"requester"`
+	Approver   string `json:"approver"`
+	Status     string `json:"status"` // pending|allowed|denied|expired
+	Op         string `json:"op"`
+	Target     string `json:"target"`
+	Detail     string `json:"detail"`
+	CreatedAt  int64  `json:"created_at"`
+	ExpiresAt  int64  `json:"expires_at"`
+	DecidedAt  int64  `json:"decided_at"`
+	DecisionID string `json:"decision_id"`
 }
 
 type AuditEntry struct {
@@ -110,6 +137,10 @@ type Store interface {
 	VisibleTo(peerID string, since int64, limit int) ([]*Message, error)
 	ThreadMessages(rootID string, limit int) ([]*Message, error)
 	LastNInThread(rootID string, n int) ([]*Message, error)
+	// LastHandshakeTs returns MAX(created_at) for a handshake slice of a
+	// thread (kind='status' + status value, one sender). Zero when absent.
+	// Used for the progress per-thread throttle (§6.5).
+	LastHandshakeTs(rootID, sender, status string) (int64, error)
 	CountThreadSince(rootID string, sinceSeq int64) (int, error)
 	ThreadOldestTs(rootID string) (int64, error)
 	MaxSeq() (int64, error)
@@ -117,6 +148,17 @@ type Store interface {
 	SearchMessages(query string, limit int) ([]*Message, error)
 	ApproveMessage(seq int64, approved bool) error
 	DeleteMessages(seqs []int64) error
+	// permission handshake (§6.5)
+	CreatePermissionRequest(pr *PermissionRequest) error
+	GetPermissionRequest(requestID string) (*PermissionRequest, error)
+	CountOpenPermissions(thread string, now int64) (int, error)
+	// DecidePermission atomically inserts a decision message and CASes a
+	// pending, unexpired row to decided. won=false (no insert) when the row
+	// is missing, expired, or already decided — the caller re-reads the row
+	// to distinguish duplicate-value idempotency from conflicting flips.
+	DecidePermission(msg *Message, requestID, decision string, decidedAt int64) (won bool, err error)
+	MarkPermissionExpired(requestID string, now int64) error
+	PrunePermissions(olderThan int64) (int64, error)
 	// acks
 	Ack(seq int64, peerID string, ts int64) error
 	IsAcked(seq int64, peerID string) (bool, error)
@@ -194,7 +236,10 @@ func (s *sqliteStore) migrate() error {
 
 func isDupErr(err error) bool {
 	msg := err.Error()
-	return strings.Contains(msg, "already exists")
+	// "already exists" covers CREATE IF NOT EXISTS races; schema.sql also
+	// carries ALTER TABLE ... ADD COLUMN for pre-existing databases, which
+	// fail with "duplicate column name" on every boot after the first.
+	return strings.Contains(msg, "already exists") || strings.Contains(msg, "duplicate column")
 }
 
 // dropTokensFK rebuilds the tokens table without the peers FK for databases
@@ -465,8 +510,9 @@ func boolToInt(b bool) int {
 func (s *sqliteStore) InsertMessage(m *Message) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.Exec(`INSERT INTO messages(id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)`, m.ID, m.Sender, m.Recipient, m.Kind, m.InReplyTo, m.RootID, boolToInt(m.RequiresApproval), m.ApprovalState, m.Payload, m.CreatedAt)
+	res, err := s.db.Exec(`INSERT INTO messages(id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,status,op,target,detail,decision,expires_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, m.ID, m.Sender, m.Recipient, m.Kind, m.InReplyTo, m.RootID, boolToInt(m.RequiresApproval), m.ApprovalState, m.Payload, m.CreatedAt,
+		m.Status, m.Op, m.Target, m.Detail, m.Decision, m.ExpiresAt)
 	if err != nil {
 		return 0, err
 	}
@@ -476,7 +522,8 @@ func (s *sqliteStore) InsertMessage(m *Message) (int64, error) {
 func scanMessage(rows *sql.Rows) (*Message, error) {
 	var m Message
 	var req int
-	err := rows.Scan(&m.Seq, &m.ID, &m.Sender, &m.Recipient, &m.Kind, &m.InReplyTo, &m.RootID, &req, &m.ApprovalState, &m.Payload, &m.CreatedAt)
+	err := rows.Scan(&m.Seq, &m.ID, &m.Sender, &m.Recipient, &m.Kind, &m.InReplyTo, &m.RootID, &req, &m.ApprovalState, &m.Payload, &m.CreatedAt,
+		&m.Status, &m.Op, &m.Target, &m.Detail, &m.Decision, &m.ExpiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -487,9 +534,11 @@ func scanMessage(rows *sql.Rows) (*Message, error) {
 func (s *sqliteStore) GetBySenderID(sender, id string) (*Message, error) {
 	var m Message
 	var req int
-	err := s.db.QueryRow(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at
+	err := s.db.QueryRow(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
+		status,op,target,detail,decision,expires_at
 		FROM messages WHERE sender=? AND id=?`, sender, id).
-		Scan(&m.Seq, &m.ID, &m.Sender, &m.Recipient, &m.Kind, &m.InReplyTo, &m.RootID, &req, &m.ApprovalState, &m.Payload, &m.CreatedAt)
+		Scan(&m.Seq, &m.ID, &m.Sender, &m.Recipient, &m.Kind, &m.InReplyTo, &m.RootID, &req, &m.ApprovalState, &m.Payload, &m.CreatedAt,
+			&m.Status, &m.Op, &m.Target, &m.Detail, &m.Decision, &m.ExpiresAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -503,9 +552,11 @@ func (s *sqliteStore) GetBySenderID(sender, id string) (*Message, error) {
 func (s *sqliteStore) GetBySeq(seq int64) (*Message, error) {
 	var m Message
 	var req int
-	err := s.db.QueryRow(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at
+	err := s.db.QueryRow(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
+		status,op,target,detail,decision,expires_at
 		FROM messages WHERE seq=?`, seq).
-		Scan(&m.Seq, &m.ID, &m.Sender, &m.Recipient, &m.Kind, &m.InReplyTo, &m.RootID, &req, &m.ApprovalState, &m.Payload, &m.CreatedAt)
+		Scan(&m.Seq, &m.ID, &m.Sender, &m.Recipient, &m.Kind, &m.InReplyTo, &m.RootID, &req, &m.ApprovalState, &m.Payload, &m.CreatedAt,
+			&m.Status, &m.Op, &m.Target, &m.Detail, &m.Decision, &m.ExpiresAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -517,7 +568,8 @@ func (s *sqliteStore) GetBySeq(seq int64) (*Message, error) {
 }
 
 func (s *sqliteStore) GetByIDAnySender(id string) ([]*Message, error) {
-	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at
+	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
+		status,op,target,detail,decision,expires_at
 		FROM messages WHERE id=? ORDER BY seq`, id)
 	if err != nil {
 		return nil, err
@@ -542,7 +594,8 @@ func (s *sqliteStore) VisibleTo(peerID string, since int64, limit int) ([]*Messa
 		limit = 200
 	}
 	rows, err := s.db.Query(`SELECT m.seq,m.id,m.sender,m.recipient,m.kind,m.in_reply_to,m.root_id,
-		m.requires_approval,m.approval_state,m.payload,m.created_at
+		m.requires_approval,m.approval_state,m.payload,m.created_at,
+		m.status,m.op,m.target,m.detail,m.decision,m.expires_at
 		FROM messages m
 		WHERE m.seq > ?
 		  AND m.approval_state NOT IN ('pending','rejected')
@@ -568,7 +621,8 @@ func (s *sqliteStore) ThreadMessages(rootID string, limit int) ([]*Message, erro
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at
+	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
+		status,op,target,detail,decision,expires_at
 		FROM messages WHERE root_id=? ORDER BY seq ASC LIMIT ?`, rootID, limit)
 	if err != nil {
 		return nil, err
@@ -586,7 +640,8 @@ func (s *sqliteStore) ThreadMessages(rootID string, limit int) ([]*Message, erro
 }
 
 func (s *sqliteStore) LastNInThread(rootID string, n int) ([]*Message, error) {
-	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at
+	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
+		status,op,target,detail,decision,expires_at
 		FROM messages WHERE root_id=? ORDER BY seq DESC LIMIT ?`, rootID, n)
 	if err != nil {
 		return nil, err
@@ -664,7 +719,8 @@ func (s *sqliteStore) SearchMessages(query string, limit int) ([]*Message, error
 		limit = 50
 	}
 	esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
-	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at
+	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
+		status,op,target,detail,decision,expires_at
 		FROM messages WHERE payload LIKE ? ESCAPE '\' ORDER BY seq DESC LIMIT ?`, "%"+esc+"%", limit)
 	if err != nil {
 		return nil, err
@@ -710,6 +766,101 @@ func (s *sqliteStore) DeleteMessages(seqs []int64) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *sqliteStore) LastHandshakeTs(rootID, sender, status string) (int64, error) {
+	var v sql.NullInt64
+	err := s.db.QueryRow(`SELECT MAX(created_at) FROM messages
+		WHERE root_id=? AND sender=? AND kind='status' AND status=?`, rootID, sender, status).Scan(&v)
+	if err != nil {
+		return 0, err
+	}
+	if !v.Valid {
+		return 0, nil
+	}
+	return v.Int64, nil
+}
+
+// ---- permission handshake (§6.5) ----
+
+func (s *sqliteStore) CreatePermissionRequest(pr *PermissionRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`INSERT INTO permission_requests(request_id,thread,requester,approver,status,op,target,detail,created_at,expires_at,decided_at,decision_id)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, pr.RequestID, pr.Thread, pr.Requester, pr.Approver, pr.Status,
+		pr.Op, pr.Target, pr.Detail, pr.CreatedAt, pr.ExpiresAt, pr.DecidedAt, pr.DecisionID)
+	return err
+}
+
+func (s *sqliteStore) GetPermissionRequest(requestID string) (*PermissionRequest, error) {
+	var pr PermissionRequest
+	err := s.db.QueryRow(`SELECT request_id,thread,requester,approver,status,op,target,detail,created_at,expires_at,decided_at,decision_id
+		FROM permission_requests WHERE request_id=?`, requestID).
+		Scan(&pr.RequestID, &pr.Thread, &pr.Requester, &pr.Approver, &pr.Status,
+			&pr.Op, &pr.Target, &pr.Detail, &pr.CreatedAt, &pr.ExpiresAt, &pr.DecidedAt, &pr.DecisionID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pr, nil
+}
+
+func (s *sqliteStore) CountOpenPermissions(thread string, now int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM permission_requests
+		WHERE thread=? AND status='pending' AND expires_at>?`, thread, now).Scan(&n)
+	return n, err
+}
+
+// DecidePermission inserts the decision message and conditionally flips a
+// pending, unexpired row in ONE transaction. won=false must be followed by
+// a re-read so the caller can tell same-value idempotency from conflicts.
+func (s *sqliteStore) DecidePermission(msg *Message, requestID, decision string, decidedAt int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO messages(id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,status,op,target,detail,decision,expires_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, msg.ID, msg.Sender, msg.Recipient, msg.Kind, msg.InReplyTo, msg.RootID,
+		boolToInt(msg.RequiresApproval), msg.ApprovalState, msg.Payload, msg.CreatedAt,
+		msg.Status, msg.Op, msg.Target, msg.Detail, msg.Decision, msg.ExpiresAt); err != nil {
+		return false, err
+	}
+	newStatus := "allowed"
+	if decision == "deny" {
+		newStatus = "denied"
+	}
+	res, err := tx.Exec(`UPDATE permission_requests
+		SET status=?, decided_at=?, decision_id=?
+		WHERE request_id=? AND status='pending' AND expires_at>?`,
+		newStatus, decidedAt, msg.ID, requestID, decidedAt)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return false, tx.Commit()
+	}
+	return true, tx.Commit()
+}
+
+func (s *sqliteStore) MarkPermissionExpired(requestID string, now int64) error {
+	_, err := s.db.Exec(`UPDATE permission_requests SET status='expired'
+		WHERE request_id=? AND status='pending' AND expires_at<=?`, requestID, now)
+	return err
+}
+
+func (s *sqliteStore) PrunePermissions(olderThan int64) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM permission_requests WHERE expires_at<? AND status!='pending'`, olderThan)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ---- acks ----

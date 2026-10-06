@@ -138,3 +138,82 @@ func TestSmokeRetryIdempotent(t *testing.T) {
 		t.Fatalf("duplicate smoke rows: %d", n)
 	}
 }
+
+func TestPermissionDecisionCAS(t *testing.T) {
+	st := openTestStore(t)
+	mustPeer(t, st, "muse-a")
+	mustPeer(t, st, "muse-b")
+	q := testSvc(st)
+	now := time.Now().Unix()
+	// Task a→b.
+	if _, _, _, err := q.Send(&SendRequest{ID: "t1", To: "muse-b", From: "muse-a",
+		Payload: "do the thing with enough distinct wording to avoid dup detection entirely xxxxxxxxx"}, now); err != nil {
+		t.Fatalf("task: %v", err)
+	}
+	// B starts + requests permission.
+	if _, _, _, err := q.Send(&SendRequest{ID: "s1", To: "muse-a", From: "muse-b", Kind: "status",
+		InReplyTo: "t1", Status: "started", Payload: "B started executing the delegated task now in detail xxxxx"}, now); err != nil {
+		t.Fatalf("started: %v", err)
+	}
+	if _, _, _, err := q.Send(&SendRequest{ID: "pr1", To: "muse-a", From: "muse-b", Kind: "permission_request",
+		InReplyTo: "t1", Op: "shell.exec", Target: "/tmp/x", Detail: "list it",
+		Payload: "B needs approval to run the listing command for this step in detail xxxxx"}, now); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	pr, err := st.GetPermissionRequest("pr1")
+	if err != nil || pr == nil || pr.Status != "pending" || pr.ExpiresAt <= now {
+		t.Fatalf("perm row: %+v %v", pr, err)
+	}
+	// A allows: first decision wins.
+	seq, _, _, err := q.Send(&SendRequest{ID: "pd1", To: "muse-b", From: "muse-a", Kind: "permission_decision",
+		InReplyTo: "pr1", Decision: "allow", Payload: "A approves this one listing operation only in detail x"}, now)
+	if err != nil || seq == 0 {
+		t.Fatalf("allow: %v", err)
+	}
+	if pr, _ := st.GetPermissionRequest("pr1"); pr.Status != "allowed" {
+		t.Fatalf("row status: %s", pr.Status)
+	}
+	// Same value replayed with a new id: idempotent 200, no flip.
+	seq2, _, _, err := q.Send(&SendRequest{ID: "pd1b", To: "muse-b", From: "muse-a", Kind: "permission_decision",
+		InReplyTo: "pr1", Decision: "allow", Payload: "A re-sends the same approval after a retry in detail x"}, now)
+	if err != nil || seq2 == 0 {
+		t.Fatalf("replay: %v", err)
+	}
+	// Conflicting flip: 409.
+	if _, _, _, err := q.Send(&SendRequest{ID: "pd2", To: "muse-b", From: "muse-a", Kind: "permission_decision",
+		InReplyTo: "pr1", Decision: "deny", Payload: "A changes mind and now denies the operation in detail xxx"}, now); err == nil {
+		t.Fatal("expected flip rejection")
+	} else if r, ok := err.(*guard.Rejection); !ok || r.Code != "permission_already_decided" {
+		t.Fatalf("wrong code: %v", err)
+	}
+	// Exact same decision message id resent: duplicate_id (sender id reuse).
+	if _, _, _, err := q.Send(&SendRequest{ID: "pd1", To: "muse-b", From: "muse-a", Kind: "permission_decision",
+		InReplyTo: "pr1", Decision: "allow", Payload: "A approves this one listing operation only in detail x"}, now); err == nil {
+		t.Fatal("expected duplicate_id")
+	} else if r, ok := err.(*guard.Rejection); !ok || r.Code != "duplicate_id" {
+		t.Fatalf("wrong code: %v", err)
+	}
+}
+
+func TestPermissionDecisionExpired(t *testing.T) {
+	st := openTestStore(t)
+	mustPeer(t, st, "muse-a")
+	mustPeer(t, st, "muse-b")
+	q := testSvc(st)
+	now := time.Now().Unix()
+	if _, _, _, err := q.Send(&SendRequest{ID: "t1", To: "muse-b", From: "muse-a",
+		Payload: "expiring task with distinct wording to avoid dup detection entirely xxxxx"}, now); err != nil {
+		t.Fatalf("task: %v", err)
+	}
+	if _, _, _, err := q.Send(&SendRequest{ID: "pr1", To: "muse-a", From: "muse-b", Kind: "permission_request",
+		InReplyTo: "t1", ExpiresInSecs: 60, Payload: "B needs a quick approval for this step in detail xxxxxxxxxx"}, now); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	// Decide after expiry: fail-closed 409.
+	if _, _, _, err := q.Send(&SendRequest{ID: "pd1", To: "muse-b", From: "muse-a", Kind: "permission_decision",
+		InReplyTo: "pr1", Decision: "allow", Payload: "A approves too late after the window closed in detail xx"}, now+61); err == nil {
+		t.Fatal("expected permission_expired")
+	} else if r, ok := err.(*guard.Rejection); !ok || r.Code != "permission_expired" {
+		t.Fatalf("wrong code: %v", err)
+	}
+}

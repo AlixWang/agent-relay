@@ -40,14 +40,19 @@ type Config struct {
 	Protocol  int `toml:"protocol"`
 	MinClient int `toml:"min_client"`
 
-	OnlineTimeoutSecs  int `toml:"online_timeout_secs"`
-	VerifyTimeoutSecs  int `toml:"verify_timeout_secs"`
-	FuseMaxMessages    int `toml:"fuse_max_messages"`
-	FuseMaxAgeSecs     int `toml:"fuse_max_age_secs"`
-	RatePerMinute      int `toml:"rate_per_minute"`
-	MessageTTLDays     int `toml:"message_ttl_days"`
-	PeerPruneAfterDays int `toml:"peer_prune_after_days"`
-	AuditRetentionDays int `toml:"audit_retention_days"`
+	OnlineTimeoutSecs int `toml:"online_timeout_secs"`
+	VerifyTimeoutSecs int `toml:"verify_timeout_secs"`
+	FuseMaxMessages   int `toml:"fuse_max_messages"`
+	FuseMaxAgeSecs    int `toml:"fuse_max_age_secs"`
+	RatePerMinute     int `toml:"rate_per_minute"`
+	// Permission handshake (§6.5): per-thread caps for execution-time
+	// remote approval. Zero disables the corresponding cap.
+	MaxOpenPermissions   int   `toml:"max_open_permissions"`
+	ProgressThrottleSecs int64 `toml:"progress_throttle_secs"`
+	PermissionTTLSecs    int64 `toml:"permission_ttl_secs"`
+	MessageTTLDays       int   `toml:"message_ttl_days"`
+	PeerPruneAfterDays   int   `toml:"peer_prune_after_days"`
+	AuditRetentionDays   int   `toml:"audit_retention_days"`
 
 	OfflineWebhookURL string `toml:"offline_webhook_url"`
 	MaxBodyBytes      int    `toml:"max_body_bytes"`
@@ -56,21 +61,24 @@ type Config struct {
 // Default returns the documented defaults (DESIGN §6.1, §10.2).
 func Default() *Config {
 	return &Config{
-		ListenAddr:         "auto",
-		Port:               18789,
-		DataDir:            "/var/lib/agent-relay",
-		Public:             false,
-		Protocol:           1,
-		MinClient:          1,
-		OnlineTimeoutSecs:  300,
-		VerifyTimeoutSecs:  600,
-		FuseMaxMessages:    50,
-		FuseMaxAgeSecs:     24 * 3600,
-		RatePerMinute:      60,
-		MessageTTLDays:     30,
-		PeerPruneAfterDays: 7,
-		AuditRetentionDays: 90,
-		MaxBodyBytes:       1 << 20,
+		ListenAddr:           "auto",
+		Port:                 18789,
+		DataDir:              "/var/lib/agent-relay",
+		Public:               false,
+		Protocol:             1,
+		MinClient:            1,
+		OnlineTimeoutSecs:    300,
+		VerifyTimeoutSecs:    600,
+		FuseMaxMessages:      50,
+		FuseMaxAgeSecs:       24 * 3600,
+		RatePerMinute:        60,
+		MaxOpenPermissions:   10,
+		ProgressThrottleSecs: 10,
+		PermissionTTLSecs:    600,
+		MessageTTLDays:       30,
+		PeerPruneAfterDays:   7,
+		AuditRetentionDays:   90,
+		MaxBodyBytes:         1 << 20,
 	}
 }
 
@@ -96,7 +104,8 @@ func Load(path string) (*Config, error) {
 		"admin_password_hash": true, "protocol": true, "min_client": true,
 		"online_timeout_secs": true, "verify_timeout_secs": true,
 		"fuse_max_messages": true, "fuse_max_age_secs": true,
-		"rate_per_minute": true, "message_ttl_days": true,
+		"rate_per_minute": true, "max_open_permissions": true,
+		"progress_throttle_secs": true, "permission_ttl_secs": true, "message_ttl_days": true,
 		"peer_prune_after_days": true, "audit_retention_days": true,
 		"offline_webhook_url": true, "max_body_bytes": true,
 	}
@@ -141,6 +150,15 @@ func (c *Config) Validate() error {
 	}
 	if c.RatePerMinute < 1 {
 		return fmt.Errorf("rate_per_minute must be >= 1")
+	}
+	if c.MaxOpenPermissions < 0 {
+		return fmt.Errorf("max_open_permissions must be >= 0")
+	}
+	if c.ProgressThrottleSecs < 0 {
+		return fmt.Errorf("progress_throttle_secs must be >= 0")
+	}
+	if c.PermissionTTLSecs < 0 {
+		return fmt.Errorf("permission_ttl_secs must be >= 0")
 	}
 	return nil
 }

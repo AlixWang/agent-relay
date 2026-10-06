@@ -235,3 +235,80 @@ func TestPeerPruneKeepsNeverSeen(t *testing.T) {
 		t.Fatal("stale peer kept")
 	}
 }
+
+func TestPermissionRequestCAS(t *testing.T) {
+	st := openTest(t)
+	mustPeer(t, st, "a")
+	mustPeer(t, st, "b")
+	now := int64(1000)
+	mustMsg(t, st, &Message{ID: "t1", Sender: "a", Recipient: "b", Kind: "task",
+		RootID: "a/t1", Payload: "work", CreatedAt: now})
+	// New fields round-trip through insert + read.
+	mustMsg(t, st, &Message{ID: "pr1", Sender: "b", Recipient: "a", Kind: "permission_request",
+		InReplyTo: "t1", RootID: "a/t1", Payload: "need approval", CreatedAt: now,
+		Op: "shell.exec", Target: "/tmp/x", Detail: "list it", ExpiresAt: now + 600})
+	got, err := st.GetBySenderID("b", "pr1")
+	if err != nil || got == nil || got.Op != "shell.exec" || got.Target != "/tmp/x" ||
+		got.Detail != "list it" || got.ExpiresAt != now+600 {
+		t.Fatalf("fields lost: %+v %v", got, err)
+	}
+	// Permission row create + read + count.
+	if err := st.CreatePermissionRequest(&PermissionRequest{
+		RequestID: "pr1", Thread: "a/t1", Requester: "b", Approver: "a",
+		Status: "pending", Op: "shell.exec", Target: "/tmp/x", Detail: "list it",
+		CreatedAt: now, ExpiresAt: now + 600,
+	}); err != nil {
+		t.Fatalf("create perm: %v", err)
+	}
+	if n, _ := st.CountOpenPermissions("a/t1", now); n != 1 {
+		t.Fatalf("open count: %d", n)
+	}
+	// CAS win: decision message inserted, row flipped.
+	dec := &Message{ID: "pd1", Sender: "a", Recipient: "b", Kind: "permission_decision",
+		InReplyTo: "pr1", RootID: "a/t1", Payload: "ok once", CreatedAt: now, Decision: "allow"}
+	won, err := st.DecidePermission(dec, "pr1", "allow", now+5)
+	if err != nil || !won {
+		t.Fatalf("CAS win: %v %v", won, err)
+	}
+	pr, _ := st.GetPermissionRequest("pr1")
+	if pr.Status != "allowed" || pr.DecidedAt != now+5 || pr.DecisionID != "pd1" {
+		t.Fatalf("row after CAS: %+v", pr)
+	}
+	// CAS loss on a decided row: no insert... (insert of the losing
+	// decision still happens inside DecidePermission — that path is only
+	// reached from queue.sendDecision which re-checks first; here assert
+	// the row itself does not flip).
+	dec2 := &Message{ID: "pd2", Sender: "a", Recipient: "b", Kind: "permission_decision",
+		InReplyTo: "pr1", RootID: "a/t1", Payload: "changed mind", CreatedAt: now + 6, Decision: "deny"}
+	won, err = st.DecidePermission(dec2, "pr1", "deny", now+6)
+	if err != nil || won {
+		t.Fatalf("CAS loss: %v %v", won, err)
+	}
+	pr, _ = st.GetPermissionRequest("pr1")
+	if pr.Status != "allowed" {
+		t.Fatalf("row flipped on loss: %+v", pr)
+	}
+	// Expired pending row: MarkPermissionExpired flips it.
+	if err := st.CreatePermissionRequest(&PermissionRequest{
+		RequestID: "pr-old", Thread: "a/t1", Requester: "b", Approver: "a",
+		Status: "pending", CreatedAt: now - 900, ExpiresAt: now - 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkPermissionExpired("pr-old", now); err != nil {
+		t.Fatal(err)
+	}
+	if pr, _ := st.GetPermissionRequest("pr-old"); pr.Status != "expired" {
+		t.Fatalf("not expired: %+v", pr)
+	}
+	if n, _ := st.CountOpenPermissions("a/t1", now); n != 0 {
+		t.Fatalf("expired still open: %d", n)
+	}
+	// Prune drops decided rows past TTL, keeps pending and unexpired.
+	if n, err := st.PrunePermissions(now); err != nil || n != 1 {
+		t.Fatalf("prune old: %d %v", n, err)
+	}
+	if n, err := st.PrunePermissions(now + 7200); err != nil || n != 1 {
+		t.Fatalf("prune later: %d %v", n, err)
+	}
+}

@@ -282,9 +282,17 @@ func (s *Server) sendRejection(w http.ResponseWriter, err error) {
 			writeJSON(w, 429, map[string]any{"ok": false, "error": rej.Error()})
 			return
 		}
+		// Direction/approver violations are identity misuse: 403 like the
+		// from/for/by binding checks, not a 409 content refusal.
+		if rej.Code == "permission_not_authorized" {
+			writeJSON(w, 403, map[string]any{"ok": false, "error": rej.Error()})
+			return
+		}
 		code := 400
 		switch rej.Code {
-		case "duplicate_id", "loop_fuse_tripped", "loop_guard":
+		case "duplicate_id", "loop_fuse_tripped", "loop_guard",
+			"permission_already_decided", "permission_expired",
+			"bad_permission_ref", "permission_rate_limited", "progress_throttled":
 			code = 409
 		}
 		writeJSON(w, code, map[string]any{"ok": false, "error": rej.Error()})
@@ -294,7 +302,12 @@ func (s *Server) sendRejection(w http.ResponseWriter, err error) {
 	switch {
 	case strings.HasPrefix(msg, "duplicate_id"),
 		strings.HasPrefix(msg, "loop_fuse_tripped"),
-		strings.HasPrefix(msg, "loop_guard"):
+		strings.HasPrefix(msg, "loop_guard"),
+		strings.HasPrefix(msg, "permission_already_decided"),
+		strings.HasPrefix(msg, "permission_expired"),
+		strings.HasPrefix(msg, "bad_permission_ref"),
+		strings.HasPrefix(msg, "permission_rate_limited"),
+		strings.HasPrefix(msg, "progress_throttled"):
 		writeJSON(w, 409, map[string]any{"ok": false, "error": msg})
 	case strings.HasPrefix(msg, "rate_limited"):
 		w.Header().Set("Retry-After", "10")
@@ -343,6 +356,8 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 			"kind": m.Kind, "in_reply_to": m.InReplyTo, "thread": m.RootID,
 			"payload": m.Payload, "created_at": m.CreatedAt,
 			"approval_state": m.ApprovalState,
+			"status":         m.Status, "op": m.Op, "target": m.Target,
+			"detail": m.Detail, "decision": m.Decision, "expires_at": m.ExpiresAt,
 		})
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "items": items, "next_since": next})
@@ -742,6 +757,8 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 				"seq": m.Seq, "id": m.ID, "sender": m.Sender, "recipient": m.Recipient,
 				"kind": m.Kind, "thread": m.RootID, "payload": m.Payload,
 				"approval_state": m.ApprovalState, "created_at": m.CreatedAt,
+				"status": m.Status, "op": m.Op, "target": m.Target,
+				"detail": m.Detail, "decision": m.Decision, "expires_at": m.ExpiresAt,
 			})
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "items": items})
@@ -793,6 +810,8 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 			"seq": m.Seq, "id": m.ID, "sender": m.Sender, "recipient": m.Recipient,
 			"kind": m.Kind, "in_reply_to": m.InReplyTo, "payload": m.Payload,
 			"approval_state": m.ApprovalState, "acked_count": acked, "created_at": m.CreatedAt,
+			"status": m.Status, "op": m.Op, "target": m.Target,
+			"detail": m.Detail, "decision": m.Decision, "expires_at": m.ExpiresAt,
 		})
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "items": items})
@@ -833,6 +852,8 @@ func (s *Server) handleAdminExport(w http.ResponseWriter, r *http.Request) {
 				"seq": m.Seq, "id": m.ID, "sender": m.Sender, "recipient": m.Recipient,
 				"kind": m.Kind, "in_reply_to": m.InReplyTo, "thread": m.RootID,
 				"payload": m.Payload, "approval_state": m.ApprovalState, "created_at": m.CreatedAt,
+				"status": m.Status, "op": m.Op, "target": m.Target,
+				"detail": m.Detail, "decision": m.Decision, "expires_at": m.ExpiresAt,
 			})
 		}
 		return
@@ -841,6 +862,15 @@ func (s *Server) handleAdminExport(w http.ResponseWriter, r *http.Request) {
 	for _, m := range msgs {
 		fmt.Fprintf(w, "## #%d %s → %s (%s, %s)\n\n%s\n\n",
 			m.Seq, m.Sender, m.Recipient, m.Kind, m.ApprovalState, m.Payload)
+		if m.Kind == "permission_request" {
+			fmt.Fprintf(w, "- op=%s target=%s detail=%s expires_at=%d\n\n", m.Op, m.Target, m.Detail, m.ExpiresAt)
+		}
+		if m.Kind == "permission_decision" {
+			fmt.Fprintf(w, "- decision=%s (re %s)\n\n", m.Decision, m.InReplyTo)
+		}
+		if m.Kind == "status" && m.Status != "" {
+			fmt.Fprintf(w, "- status=%s (re %s)\n\n", m.Status, m.InReplyTo)
+		}
 	}
 }
 

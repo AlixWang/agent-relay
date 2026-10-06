@@ -17,17 +17,32 @@ type Envelope struct {
 	ID               string
 	To               string
 	From             string
-	Kind             string // task|result|chat
+	Kind             string // task|result|chat|status|permission_request|permission_decision
 	InReplyTo        string
 	RequiresApproval bool
 	Payload          string
+	// Handshake fields (§6.5): status → Status; permission_request →
+	// Op/Target/Detail/ExpiresInSecs; permission_decision → Decision.
+	Status        string
+	Op            string
+	Target        string
+	Detail        string
+	Decision      string // allow|deny
+	ExpiresInSecs int64
 }
 
-// Limits configures the fuse and rate limiter (DESIGN §6.1).
+// Limits configures the fuse and rate limiter (DESIGN §6.1) plus the
+// permission-handshake caps (§6.5).
 type Limits struct {
 	FuseMaxMessages int
 	FuseMaxAgeSecs  int64
 	RatePerMinute   int
+	// MaxOpenPermissions caps unexpired open permission_requests per
+	// thread (approval-fatigue guard). <=0 disables the cap.
+	MaxOpenPermissions int
+	// ProgressThrottleSecs floors spacing between kind=status/progress
+	// messages per sender per thread. <=0 disables (besides global rate).
+	ProgressThrottleSecs int64
 }
 
 // Rejection is a machine-readable send refusal.
@@ -67,9 +82,9 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 	switch env.Kind {
 	case "", "task":
 		env.Kind = "task"
-	case "result", "chat", "system":
+	case "result", "chat", "system", "status", "permission_request", "permission_decision":
 	default:
-		return nil, &Rejection{Code: "bad_message", Reason: "kind must be task|result|chat"}
+		return nil, &Rejection{Code: "bad_message", Reason: "kind must be task|result|chat|status|permission_request|permission_decision"}
 	}
 
 	// Idempotency: UNIQUE(sender,id) — duplicate returns 409 without duplicating.
@@ -111,9 +126,19 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 			Reason: fmt.Sprintf("thread %s is older than %d hours", rootID, g.limits.FuseMaxAgeSecs/3600)}
 	}
 
-	// Loop heuristic over the last 5 messages in the thread.
-	if rej := g.loopCheck(rootID, env); rej != nil {
-		return nil, rej
+	// Handshake kinds skip the loop heuristic: allow/deny/started are short
+	// by design and would otherwise trip courtesy-loop/4-hop rules.
+	if !isHandshakeKind(env.Kind) {
+		if rej := g.loopCheck(rootID, env); rej != nil {
+			return nil, rej
+		}
+	}
+
+	// Permission handshake semantics (§6.5).
+	if env.Kind == "status" || env.Kind == "permission_request" || env.Kind == "permission_decision" {
+		if err := g.checkHandshake(env, rootID, now); err != nil {
+			return nil, err
+		}
 	}
 
 	// Approval gate: held server-side, delivered only after human approval.
@@ -274,6 +299,137 @@ func (g *Guard) loopCheck(rootID string, env *Envelope) *Rejection {
 				}
 			}
 		}
+	}
+	return nil
+}
+
+// ---- permission handshake validation (DESIGN §6.5) ----
+
+func isHandshakeKind(kind string) bool {
+	return kind == "status" || kind == "permission_request" || kind == "permission_decision"
+}
+
+// validHandshakeStatuses is the status value vocabulary for kind=status.
+var validHandshakeStatuses = map[string]bool{
+	"started": true, "progress": true, "blocked": true, "resumed": true, "cancelled": true,
+}
+
+// taskOf finds the task message a handshake refers to. For status and
+// permission_request, InReplyTo names the task id; for permission_decision
+// it names the request message id, whose own InReplyTo names the task.
+func (g *Guard) taskOf(env *Envelope) *store.Message {
+	msgs, err := g.st.GetByIDAnySender(env.InReplyTo)
+	if err != nil || len(msgs) == 0 {
+		return nil
+	}
+	if env.Kind == "permission_decision" {
+		for _, m := range msgs {
+			if m.Kind != "permission_request" {
+				continue
+			}
+			tasks, err := g.st.GetByIDAnySender(m.InReplyTo)
+			if err != nil || len(tasks) == 0 {
+				return nil
+			}
+			return tasks[0]
+		}
+		return nil
+	}
+	return msgs[0]
+}
+
+// checkHandshake enforces reference integrity, direction rules, permission
+// lifecycle (first decision wins, expiry is fail-closed), the open-request
+// cap, and the progress throttle. RequiresApproval is refused on handshake
+// kinds: pre-send approval and execution approval are separate gates.
+func (g *Guard) checkHandshake(env *Envelope, rootID string, now int64) error {
+	if env.RequiresApproval {
+		return &Rejection{Code: "bad_message", Reason: "requires_approval is not allowed on handshake kinds"}
+	}
+	if env.InReplyTo == "" {
+		return &Rejection{Code: "bad_permission_ref", Reason: "in_reply_to is required on handshake kinds"}
+	}
+	task := g.taskOf(env)
+	if task == nil || task.Kind != "task" {
+		return &Rejection{Code: "bad_permission_ref", Reason: "in_reply_to does not reference a task"}
+	}
+	if task.RootID != "" && rootID != task.RootID {
+		return &Rejection{Code: "bad_permission_ref", Reason: "handshake is in a different thread than its task"}
+	}
+	switch env.Kind {
+	case "status":
+		if !validHandshakeStatuses[env.Status] {
+			return &Rejection{Code: "bad_message", Reason: "status must be started|progress|blocked|resumed|cancelled"}
+		}
+		if env.Status == "cancelled" {
+			// Either side may cancel: the task sender or its recipient.
+			if env.From != task.Sender && env.From != task.Recipient {
+				return &Rejection{Code: "permission_not_authorized",
+					Reason: "only the task sender or recipient may cancel"}
+			}
+			return nil
+		}
+		// Lifecycle signals come from the task recipient (B) only.
+		if env.From != task.Recipient || env.To != task.Sender {
+			return &Rejection{Code: "permission_not_authorized",
+				Reason: "lifecycle status must flow from the task recipient back to its sender"}
+		}
+		if env.Status == "progress" && g.limits.ProgressThrottleSecs > 0 {
+			last, err := g.st.LastHandshakeTs(rootID, env.From, "progress")
+			if err != nil {
+				return err
+			}
+			if last != 0 && now-last < g.limits.ProgressThrottleSecs {
+				return &Rejection{Code: "progress_throttled",
+					Reason: fmt.Sprintf("progress updates throttled: one per %d seconds per thread", g.limits.ProgressThrottleSecs)}
+			}
+		}
+		return nil
+	case "permission_request":
+		// Requests come from the task recipient (B) back to its sender (A).
+		if env.From != task.Recipient || env.To != task.Sender {
+			return &Rejection{Code: "permission_not_authorized",
+				Reason: "permission requests must flow from the task recipient back to its sender"}
+		}
+		if g.limits.MaxOpenPermissions > 0 {
+			n, err := g.st.CountOpenPermissions(rootID, now)
+			if err != nil {
+				return err
+			}
+			if n >= g.limits.MaxOpenPermissions {
+				return &Rejection{Code: "permission_rate_limited",
+					Reason: fmt.Sprintf("too many open permission requests in thread %s", rootID)}
+			}
+		}
+		return nil
+	case "permission_decision":
+		if env.Decision != "allow" && env.Decision != "deny" {
+			return &Rejection{Code: "bad_message", Reason: "decision must be allow|deny"}
+		}
+		pr, err := g.st.GetPermissionRequest(env.InReplyTo)
+		if err != nil {
+			return err
+		}
+		if pr == nil {
+			return &Rejection{Code: "bad_permission_ref", Reason: "unknown permission request"}
+		}
+		// Only the request's approver (A) may decide.
+		if env.From != pr.Approver || env.To != pr.Requester {
+			return &Rejection{Code: "permission_not_authorized",
+				Reason: "only the requested approver may decide"}
+		}
+		if pr.Status != "pending" {
+			// Same value re-sent: let the queue layer answer idempotently
+			// with the original decision seq. Conflicting flips stop here.
+			if (pr.Status == "allowed") != (env.Decision == "allow") {
+				return &Rejection{Code: "permission_already_decided", Reason: "request already decided"}
+			}
+			return nil
+		}
+		if now >= pr.ExpiresAt {
+			return &Rejection{Code: "permission_expired", Reason: "request expired; the recipient must treat it as denied"}
+		}
+		return nil
 	}
 	return nil
 }

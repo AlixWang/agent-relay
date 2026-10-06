@@ -172,3 +172,33 @@ func TestDisabledWindowsSkip(t *testing.T) {
 		t.Fatalf("disabled should no-op: %+v", stats)
 	}
 }
+
+func TestPermissionsPrunedWithTTL(t *testing.T) {
+	st := openTest(t)
+	r := New(st, Policy{MessageTTLDays: 30, DataDir: t.TempDir()})
+	now := int64(100 * 86400)
+	st.CreatePermissionRequest(mkPerm("old-decided", "a/t1", "allowed", now-40*86400, now-40*86400))
+	st.CreatePermissionRequest(mkPerm("fresh-decided", "a/t1", "denied", now-86400, now-86400))
+	st.CreatePermissionRequest(mkPerm("pending", "a/t1", "pending", now-100, now+3600))
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["permissions_pruned"] != 1 {
+		t.Fatalf("stats: %+v", stats)
+	}
+	if pr, _ := st.GetPermissionRequest("old-decided"); pr != nil {
+		t.Fatal("old row kept")
+	}
+	if pr, _ := st.GetPermissionRequest("fresh-decided"); pr == nil {
+		t.Fatal("fresh row pruned")
+	}
+	if pr, _ := st.GetPermissionRequest("pending"); pr == nil {
+		t.Fatal("pending row pruned")
+	}
+}
+
+func mkPerm(id, thread, status string, created, expires int64) *store.PermissionRequest {
+	return &store.PermissionRequest{RequestID: id, Thread: thread, Requester: "b", Approver: "a",
+		Status: status, CreatedAt: created, ExpiresAt: expires}
+}

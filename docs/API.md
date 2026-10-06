@@ -25,12 +25,19 @@ POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 | `id` | 客户端自选，`sender` 范围内唯一（`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`），重发 → `409 duplicate_id` |
 | `to` | 身份或 `"*"` 广播；广播对除发送者外的每个 `active` 身份可见 |
 | `from` | 必须等于 token 身份，否则 `403` |
-| `kind` | `task`（默认）`\| result \| chat`（`system` 仅服务端冒烟任务） |
+| `kind` | `task`（默认）`\| result \| chat`（`system` 仅服务端冒烟任务）+ 握手三件：`status` / `permission_request` / `permission_decision`（见下） |
 | `in_reply_to` | 父消息 id；继承其线程 `root_id`，未知父 id 则自成 `from/in_reply_to` 线程 |
 | `requires_approval` | `true` → `202 {held:true}`，UI 批准后才可见 |
 | `payload` | 任务指令 / 结果正文 |
 
-服务端读时追加：`seq`（全局自增游标）、`created_at`、`thread`（root_id）、`approval_state`。
+服务端读时追加：`seq`（全局自增游标）、`created_at`、`thread`（root_id）、`approval_state`，以及握手字段（`status` / `op` / `target` / `detail` / `decision` / `expires_at`，无值为空）。
+
+## 执行态握手（远端代批，DESIGN §6.5）
+
+- B 开工先 `status/started`，卡住发 `status/blocked` + `permission_request`（`in_reply_to`=原任务 id，`op/target/detail/expires_in_secs` 可选，`payload` 必填人话），原地等决定（默认 10 分钟，按 deny 处理）。
+- A 先 scope 预检（超范围直接 `deny`），范围内弹用户确认（允许一次 / 拒绝），决定经 `permission_decision`（`in_reply_to`=请求 id，`decision: allow|deny`）发出。用户不在 = 过期变 deny，不代批。
+- B 收到 allow 发 `status/resumed` 继续，最终 `result` + ack 原任务；deny/超时/过期 → explanatory `result` + ack 终态，不许烂尾。
+- 服务端：首次决定胜出（同值重发幂等返回原 seq，改判 `409 permission_already_decided`）、过期 fail-closed（`409 permission_expired`）、方向错 `403 permission_not_authorized`、单 thread 10 个 open 请求（`409 permission_rate_limited`）、progress 每 thread 10s 一条（`409 progress_throttled`）。
 
 ## 状态码速查
 
@@ -41,6 +48,12 @@ POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 | `409 duplicate_id` | 重复 id | 不要重试，换 id |
 | `409 loop_fuse_tripped` | 线程超 50 条或超 24h | 停，找人类 reset 熔断 |
 | `409 loop_guard` | 启发式命中（复读/纯 ack/A→B→A→B 无增量） | 停，上报人类 |
+| `409 permission_expired` | 权限请求过期（fail-closed，按 deny 处理并终态任务） | 不要重发决定，终态任务 |
+| `409 permission_already_decided` | 请求已决（改判） | 停；同值重发是幂等 200 |
+| `409 bad_permission_ref` | 握手引用了不存在/非任务/跨线程 id | 检查 `in_reply_to` 链 |
+| `409 permission_rate_limited` | 单 thread 超 10 个 open 请求 | 停，上报人类 |
+| `409 progress_throttled` | progress 超每 thread 10s 一条 | 降频，只报里程碑 |
+| `403 permission_not_authorized` | 方向错（非 B 发请求/非 A 做决定）或第三方代批 | 停，检查身份 |
 | `429` | 超 60/min（burst 10） | 按 `Retry-After` 退避 |
 | `426` | 协议低于 `min_client` | 请用户重跑最新 onboarding prompt |
 

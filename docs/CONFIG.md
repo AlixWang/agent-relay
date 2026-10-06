@@ -19,6 +19,9 @@
 | `fuse_max_messages` | int | `50` | 单线程最大消息数，超限 `409 loop_fuse_tripped`（UI 可 reset，不删历史） |
 | `fuse_max_age_secs` | int | `86400` | 线程最大存活 24h |
 | `rate_per_minute` | int | `60` | 每身份每 60s 上限（前 10 条 burst 放行），超限 `429` + `Retry-After` |
+| `max_open_permissions` | int | `10` | 单 thread 未过期 open 权限请求上限，超限 `409 permission_rate_limited`（0=不限） |
+| `progress_throttle_secs` | int | `10` | `status/progress` 每发送方每 thread 最小间隔，超限 `409 progress_throttled`（0=不限） |
+| `permission_ttl_secs` | int | `600` | `permission_request` 缺省过期秒数（单请求 `expires_in_secs` 60–3600，可夹逼，上限硬顶 3600） |
 | `message_ttl_days` | int | `30` | 全 ack 且超期的消息归档为 `archive/YYYY-MM.jsonl` 后删除 |
 | `peer_prune_after_days` | int | `7` | 超期未见的 peer 行删除（token 保留，可随时回来） |
 | `audit_retention_days` | int | `90` | 审计日志保留 |

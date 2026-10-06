@@ -73,6 +73,34 @@ CREATE TABLE IF NOT EXISTS verify_state (
     smoke_id      TEXT DEFAULT '',
     updated_at    INTEGER DEFAULT 0
 );
+-- Execution-state columns for remote approval (§6.5): status handshake
+-- values started progress blocked resumed cancelled, structured permission
+-- fields op target detail, decision allow deny, request expiry.
+-- ALTERs (not inline columns) so pre-existing databases migrate on boot;
+-- migrate() tolerates "duplicate column" on repeat starts.
+ALTER TABLE messages ADD COLUMN status TEXT DEFAULT '';
+ALTER TABLE messages ADD COLUMN op TEXT DEFAULT '';
+ALTER TABLE messages ADD COLUMN target TEXT DEFAULT '';
+ALTER TABLE messages ADD COLUMN detail TEXT DEFAULT '';
+ALTER TABLE messages ADD COLUMN decision TEXT DEFAULT '';
+ALTER TABLE messages ADD COLUMN expires_at INTEGER DEFAULT 0;
+-- Permission handshake rows (§6.5). One row per permission_request message
+-- where request_id equals the message id. The decision CAS runs on this table.
+CREATE TABLE IF NOT EXISTS permission_requests (
+    request_id    TEXT PRIMARY KEY,
+    thread        TEXT NOT NULL,
+    requester     TEXT NOT NULL,
+    approver      TEXT NOT NULL,
+    status        TEXT DEFAULT 'pending',
+    op            TEXT DEFAULT '',
+    target        TEXT DEFAULT '',
+    detail        TEXT DEFAULT '',
+    created_at    INTEGER NOT NULL,
+    expires_at    INTEGER NOT NULL,
+    decided_at    INTEGER DEFAULT 0,
+    decision_id   TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_perm_thread ON permission_requests(thread, status);
 CREATE INDEX IF NOT EXISTS idx_messages_recipient_seq ON messages(recipient, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_root ON messages(root_id, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender, id);

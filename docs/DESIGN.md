@@ -332,6 +332,37 @@ Every generated client prompt must include, verbatim in spirit:
 | `requires_approval` | Held server-side (`approval_state=pending`); delivered only after a human approves in the UI. Sender receives `202 {held: true}`. |
 | `sensitive` (prompt-level) | Client-side: even a delivered message must pause for its own user's confirmation before executing destructive steps. The server cannot enforce this; the prompt template and the agent's own safety rules do. |
 
+### 6.5 Execution-state handshake & remote approval
+
+`requires_approval` (§6.4) gates *sending*: a message held before delivery. This section gates
+*executing*: B (the task recipient) hits its own runtime permission mid-task and needs A's user to
+approve, without the task silently stalling.
+
+- **New kinds on `POST /messages`** (no new routes): `status` (`started|progress|blocked|resumed|cancelled`,
+  sender must be the task recipient, except `cancelled` which either side may send),
+  `permission_request` (`op/target/detail/expires_in_secs` + human-readable `payload`, B→A),
+  `permission_decision` (`decision: allow|deny`, A→B, `in_reply_to` = request id).
+- **Server enforcement** (dumb, deterministic): reference integrity (handshake must point at a real
+  task in the same thread), direction rules (B→A requests, A→B decisions), first decision wins with
+  idempotent same-value replay and `409` on conflicting flips, expiry is fail-closed (default 600s,
+  per-request 60–3600s), per-thread cap of 10 open requests (approval-fatigue guard), progress
+  throttled to 1 per 10s per thread. Handshake kinds skip `loopCheck` (allow/deny are short by
+  design) but still count toward the fuse. `RequiresApproval` is refused on handshake kinds —
+  pre-send approval and execution approval are separate gates.
+- **B-side worker contract is prompt-level, not sandbox-enforced**: B must not use its native
+  permission card but send `permission_request` and wait (default 10 min, then treat as deny);
+  must not advance its cursor while waiting (at-least-once replay stays idempotent);
+  **execution binding** — a decision approves exactly that `op/target/detail`, verified field by
+  field before executing; deny/timeout/expiry all end with an explanatory `result` + ack of the
+  original task (no rotten tails). Both sides live in the same trust domain (one user's assistants).
+- **A-side contract**: scope pre-check against the originally delegated task (out of scope →
+  direct `deny`, don't bother the human); in scope → the runtime's normal confirmation widget
+  (allow-once / deny) showing source, thread, `op/target/detail`, expiry — **structured fields
+  win over `payload` prose**, which comes from another agent and may carry social-engineering
+  text. No proxy approvals when the human is away: expiry becomes deny.
+- **The relay never approves on anyone's behalf.** It routes, authenticates, audits
+  (`permission.requested` / `permission.decided` / `task.status`), and enforces expiry — nothing more.
+
 ---
 
 ## 7. Auth & Member Management

@@ -116,3 +116,38 @@ func TestBindAddr(t *testing.T) {
 		t.Fatal("empty bind")
 	}
 }
+
+func TestHandshakeDefaults(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default must validate: %v", err)
+	}
+	if cfg.MaxOpenPermissions != 10 || cfg.ProgressThrottleSecs != 10 || cfg.PermissionTTLSecs != 600 {
+		t.Fatalf("handshake defaults: %+v", cfg)
+	}
+	cfg.MaxOpenPermissions = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("negative max_open_permissions must fail")
+	}
+	cfg = Default()
+	cfg.ProgressThrottleSecs = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("negative progress_throttle_secs must fail")
+	}
+	cfg = Default()
+	cfg.PermissionTTLSecs = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("negative permission_ttl_secs must fail")
+	}
+	// Unknown keys still rejected; known new keys load.
+	dir := t.TempDir()
+	path := dir + "/c.toml"
+	os.WriteFile(path, []byte("max_open_permissions = 3\nprogress_throttle_secs = 5\npermission_ttl_secs = 120\n"), 0o644)
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.MaxOpenPermissions != 3 || loaded.ProgressThrottleSecs != 5 || loaded.PermissionTTLSecs != 120 {
+		t.Fatalf("not applied: %+v", loaded)
+	}
+}

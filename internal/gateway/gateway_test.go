@@ -621,3 +621,173 @@ func TestFuseTripAndReset(t *testing.T) {
 		t.Fatalf("after reset: %d", c)
 	}
 }
+
+func TestPermissionHandshakeEndToEnd(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "muse")
+
+	// A→B task.
+	c, _ := f.do(t, "POST", "/messages",
+		map[string]any{"id": "t1", "to": "bob", "from": "alice",
+			"payload": "list /tmp/x for me with enough distinct wording to avoid dup entirely xxxxx"}, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("task: %d", c)
+	}
+	// B started.
+	c, _ = f.do(t, "POST", "/messages",
+		map[string]any{"id": "s1", "to": "alice", "from": "bob", "kind": "status",
+			"in_reply_to": "t1", "status": "started",
+			"payload": "B started executing the delegated listing task now in detail xxxxx"}, f.tok["bob"])
+	if c != 200 {
+		t.Fatalf("started: %d", c)
+	}
+	// B blocked + permission request.
+	c, out := f.do(t, "POST", "/messages",
+		map[string]any{"id": "pr1", "to": "alice", "from": "bob", "kind": "permission_request",
+			"in_reply_to": "t1", "op": "shell.exec", "target": "/tmp/x", "detail": "list it",
+			"payload": "B needs approval to run the listing command for this step in detail xxxxx"}, f.tok["bob"])
+	if c != 200 {
+		t.Fatalf("request: %d %+v", c, out)
+	}
+	// A pulls: status + request visible with structured fields.
+	c, out = f.do(t, "GET", "/messages?for=alice&since=0", nil, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("pull: %d", c)
+	}
+	items := out["items"].([]any)
+	byKind := map[string]map[string]any{}
+	for _, it := range items {
+		m := it.(map[string]any)
+		byKind[m["kind"].(string)] = m
+	}
+	st, ok := byKind["status"]
+	if !ok || st["status"] != "started" || st["in_reply_to"] != "t1" {
+		t.Fatalf("status not surfaced: %+v", items)
+	}
+	pr, ok := byKind["permission_request"]
+	if !ok || pr["op"] != "shell.exec" || pr["target"] != "/tmp/x" || pr["detail"] != "list it" {
+		t.Fatalf("request fields not surfaced: %+v", items)
+	}
+	if pr["expires_at"] == nil || pr["expires_at"].(float64) <= 0 {
+		t.Fatalf("expires_at missing: %+v", pr)
+	}
+	// A allows.
+	c, out = f.do(t, "POST", "/messages",
+		map[string]any{"id": "pd1", "to": "bob", "from": "alice", "kind": "permission_decision",
+			"in_reply_to": "pr1", "decision": "allow", "payload": "A approves this one listing operation only xxxx"}, f.tok["alice"])
+	if c != 200 || out["seq"] == nil {
+		t.Fatalf("allow: %d %+v", c, out)
+	}
+	allowSeq := out["seq"]
+	// Same-value replay (fresh id): idempotent, same seq.
+	c, out = f.do(t, "POST", "/messages",
+		map[string]any{"id": "pd1-retry", "to": "bob", "from": "alice", "kind": "permission_decision",
+			"in_reply_to": "pr1", "decision": "allow", "payload": "A re-sends the same approval after retry xxxxx"}, f.tok["alice"])
+	if c != 200 || out["seq"] != allowSeq {
+		t.Fatalf("replay: %d %+v (want seq %v)", c, out, allowSeq)
+	}
+	// Conflicting flip: 409.
+	c, out = f.do(t, "POST", "/messages",
+		map[string]any{"id": "pd2", "to": "bob", "from": "alice", "kind": "permission_decision",
+			"in_reply_to": "pr1", "decision": "deny", "payload": "A changes mind and denies the operation now xxxxxx"}, f.tok["alice"])
+	if c != 409 || !strings.Contains(out["error"].(string), "permission_already_decided") {
+		t.Fatalf("flip: %d %+v", c, out)
+	}
+	// Third party deciding: 403-class.
+	f.registerPeer(t, "mallory", "muse")
+	c, _ = f.do(t, "POST", "/messages",
+		map[string]any{"id": "pd3", "to": "bob", "from": "mallory", "kind": "permission_decision",
+			"in_reply_to": "pr1", "decision": "deny", "payload": "mallory meddles with padding xxxxxxxxxxxxxxxxx"}, f.tok["mallory"])
+	if c != 409 && c != 403 {
+		t.Fatalf("third-party decide should 409/403, got %d", c)
+	}
+	// B sees the decision, resumes, finishes with result + ack.
+	c, out = f.do(t, "GET", "/messages?for=bob&since=0", nil, f.tok["bob"])
+	found := false
+	for _, it := range out["items"].([]any) {
+		m := it.(map[string]any)
+		if m["kind"] == "permission_decision" && m["decision"] == "allow" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("B cannot see decision: %+v", out)
+	}
+	for _, body := range []map[string]any{
+		{"id": "s2", "to": "alice", "from": "bob", "kind": "status",
+			"in_reply_to": "t1", "status": "resumed", "payload": "B resumed after approval and continues working xxxxx"},
+		{"id": "r1", "to": "alice", "from": "bob", "kind": "result",
+			"in_reply_to": "t1", "payload": "listing done: a.txt b.txt with full output here xxxxxxxxx"},
+	} {
+		c, _ = f.do(t, "POST", "/messages", body, f.tok["bob"])
+		if c != 200 {
+			t.Fatalf("B follow-up %+v: %d", body["id"], c)
+		}
+	}
+	c, _ = f.do(t, "POST", "/ack", map[string]any{"message_id": "t1", "by": "bob"}, f.tok["bob"])
+	if c != 200 {
+		t.Fatalf("ack task: %d", c)
+	}
+	// Thread view shows the full chain with structured fields.
+	admin := f.adminLogin(t)
+	c, detail := f.doAuth(t, "GET", "/admin/messages?thread=alice/t1", nil, admin)
+	if c != 200 {
+		t.Fatalf("thread: %d", c)
+	}
+	kinds := []string{}
+	for _, it := range detail["items"].([]any) {
+		kinds = append(kinds, it.(map[string]any)["kind"].(string))
+	}
+	for _, want := range []string{"task", "status", "permission_request", "permission_decision", "result"} {
+		found := false
+		for _, k := range kinds {
+			if k == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("thread missing %s: %v", want, kinds)
+		}
+	}
+}
+
+func TestPermissionDenyEndsTask(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "muse")
+	f.do(t, "POST", "/messages",
+		map[string]any{"id": "t1", "to": "bob", "from": "alice",
+			"payload": "delete the temp dir with distinct wording to avoid dup entirely xxxxx"}, f.tok["alice"])
+	f.do(t, "POST", "/messages",
+		map[string]any{"id": "pr1", "to": "alice", "from": "bob", "kind": "permission_request",
+			"in_reply_to": "t1", "op": "shell.exec", "target": "/tmp/scratch", "detail": "rm -rf",
+			"payload": "B needs approval for the destructive removal step in detail xxxxxxxxx"}, f.tok["bob"])
+	// A denies with scope reason; B ends the task with an explanatory result.
+	c, _ := f.do(t, "POST", "/messages",
+		map[string]any{"id": "pd1", "to": "bob", "from": "alice", "kind": "permission_decision",
+			"in_reply_to": "pr1", "decision": "deny", "payload": "out of the scope I was given, not approving xxxxx"}, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("deny: %d", c)
+	}
+	c, _ = f.do(t, "POST", "/messages",
+		map[string]any{"id": "r1", "to": "alice", "from": "bob", "kind": "result",
+			"in_reply_to": "t1", "payload": "declined: approval denied by A (out of scope), nothing executed x"}, f.tok["bob"])
+	if c != 200 {
+		t.Fatalf("terminal result: %d", c)
+	}
+	c, _ = f.do(t, "POST", "/ack", map[string]any{"message_id": "t1", "by": "bob"}, f.tok["bob"])
+	if c != 200 {
+		t.Fatalf("ack: %d", c)
+	}
+	// Audit captured the handshake.
+	admin := f.adminLogin(t)
+	c, out := f.doAuth(t, "GET", "/admin/audit?action=permission.decided&limit=5", nil, admin)
+	if c != 200 || len(out["entries"].([]any)) != 1 {
+		t.Fatalf("audit decided: %d %+v", c, out)
+	}
+	c, out = f.doAuth(t, "GET", "/admin/audit?action=permission.requested&limit=5", nil, admin)
+	if c != 200 || len(out["entries"].([]any)) != 1 {
+		t.Fatalf("audit requested: %d %+v", c, out)
+	}
+}

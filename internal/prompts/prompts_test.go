@@ -128,3 +128,22 @@ func TestAgentTypeEmbedded(t *testing.T) {
 		}
 	}
 }
+
+func TestHandshakeContractsPresent(t *testing.T) {
+	// Both sides of the remote-approval handshake must be documented in
+	// every template: B-side execution binding + wait/timeout rules, and
+	// A-side scope pre-check + structured-fields-first rendering.
+	for _, typ := range Types() {
+		out := render(t, typ, Data{InviteCode: "inv_test"})
+		for _, must := range []string{
+			"permission_request", "permission_decision",
+			"执行绑定", "游标", // B-side: execution binding, cursor discipline
+			"scope", "结构化字段", // A-side: pre-check, fields-first rendering
+			"不代批", "explanatory result",
+		} {
+			if !strings.Contains(out, must) {
+				t.Fatalf("%s missing handshake contract %q", typ, must)
+			}
+		}
+	}
+}

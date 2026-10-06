@@ -158,6 +158,8 @@ code { background: var(--card-2); border: 1px solid var(--border); padding: 1px 
 .msg .meta { color: var(--muted); font-size: 0.76rem; margin-bottom: 8px; font-family: var(--mono); }
 .msg .body { white-space: pre-wrap; word-break: break-word; }
 .msg.held { border-color: color-mix(in srgb, var(--warning) 55%, transparent); }
+.perm-fields { border: 1px dashed var(--border); border-radius: var(--radius); padding: 8px 10px; margin-bottom: 8px; font-size: 0.82rem; }
+.perm-fields code { font-family: var(--mono); }
 .row-btns { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 
 /* ---------- mobile ---------- */

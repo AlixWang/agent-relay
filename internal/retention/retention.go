@@ -16,7 +16,10 @@ type Policy struct {
 	MessageTTLDays     int
 	PeerPruneAfterDays int
 	AuditRetentionDays int
-	DataDir            string
+	// PermissionTTLSecs overrides the queue default (600s) for how long a
+	// pending permission request stays decidable. <=0 keeps the default.
+	PermissionTTLSecs int64
+	DataDir           string
 }
 
 // Runner executes retention passes.
@@ -63,6 +66,16 @@ func (r *Runner) RunOnce(now int64) (map[string]int64, error) {
 			return stats, err
 		}
 		stats["audit_pruned"] = n
+	}
+	// Decided/expired permission rows older than the message TTL are
+	// dropped; pending rows are never pruned here (expiry is enforced at
+	// decision time, and CountOpenPermissions ignores expired rows).
+	if r.policy.MessageTTLDays > 0 {
+		n, err := r.st.PrunePermissions(now - int64(r.policy.MessageTTLDays)*86400)
+		if err != nil {
+			return stats, err
+		}
+		stats["permissions_pruned"] = n
 	}
 	return stats, nil
 }

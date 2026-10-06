@@ -70,10 +70,21 @@ func main() {
 	defer st.Close()
 
 	au := auth.New(st, 3600)
+	permTTL := cfg.PermissionTTLSecs
+	if permTTL <= 0 {
+		permTTL = queue.DefaultPermissionTTL
+	}
+	permTTLMax := permTTL
+	if permTTLMax > queue.MaxPermissionTTL {
+		permTTLMax = queue.MaxPermissionTTL
+	}
+	queue.SetDefaultPermissionTTL(permTTLMax)
 	g := guard.New(st, guard.Limits{
-		FuseMaxMessages: cfg.FuseMaxMessages,
-		FuseMaxAgeSecs:  int64(cfg.FuseMaxAgeSecs),
-		RatePerMinute:   cfg.RatePerMinute,
+		FuseMaxMessages:      cfg.FuseMaxMessages,
+		FuseMaxAgeSecs:       int64(cfg.FuseMaxAgeSecs),
+		RatePerMinute:        cfg.RatePerMinute,
+		MaxOpenPermissions:   cfg.MaxOpenPermissions,
+		ProgressThrottleSecs: cfg.ProgressThrottleSecs,
 	})
 	q := queue.New(st, g)
 	p := presence.New(st, int64(cfg.OnlineTimeoutSecs), cfg.OfflineWebhookURL)
@@ -202,6 +213,7 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config) {
 		MessageTTLDays:     cfg.MessageTTLDays,
 		PeerPruneAfterDays: cfg.PeerPruneAfterDays,
 		AuditRetentionDays: cfg.AuditRetentionDays,
+		PermissionTTLSecs:  cfg.PermissionTTLSecs,
 		DataDir:            cfg.DataDir,
 	})
 	t := time.NewTicker(6 * time.Hour)
