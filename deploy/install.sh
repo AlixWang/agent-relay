@@ -136,9 +136,17 @@ issue_cert() {
   fi
   # 80 端口占用处理：standalone 要求 LE 能回连 http://域名/.well-known。
   # 占用者若是 systemd 服务，临时停掉，申请完再起回来。
+  if ! command -v ss >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    log "安装 iproute2（检测 80 端口占用）…"
+    apt-get install -y -qq iproute2 2>/dev/null || true
+  fi
   local holder=""
-  if command -v ss >/dev/null; then
+  if command -v ss >/dev/null 2>&1; then
     holder="$(ss -ltnp 2>/dev/null | grep ':80 ' | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2 || true)"
+  fi
+  if [ -z "$holder" ] && (echo >/dev/tcp/127.0.0.1/80) 2>/dev/null; then
+    warn "80 端口被占用但查不到进程名"
+    die "先手动停掉占 80 的服务再重跑；或改用 webroot/DNS 验证（见 docs/DEPLOY.md）"
   fi
   local stopped=""
   if [ -n "$holder" ]; then
@@ -162,11 +170,35 @@ issue_cert() {
     log "恢复 $stopped…"
     systemctl start "$stopped" || warn "$stopped 恢复失败，请手动 systemctl start $stopped"
   fi
-  # 自动续期：certbot 自带 systemd timer，一般已启用；双保险加一条 cron
-  if ! crontab -l 2>/dev/null | grep -q "certbot renew"; then
-    (crontab -l 2>/dev/null; echo "17 3 * * * certbot renew --quiet --deploy-hook 'systemctl reload-or-restart agent-relay' # agent-relay") | crontab - \
-      && log "已加 cron 自动续期（每天 3:17，续期后 reload 服务）" || warn "cron 写入失败，请手动配续期"
-  fi
+  # 自动续期：独立包装脚本（每天 cron 调用）：让出 80 → renew → 恢复占位
+  # 服务 → reload relay。certbot 自带 systemd timer 一般也已启用，双保险。
+  cat > /usr/local/sbin/agent-relay-renew.sh <<'RENEW_EOF'
+#!/usr/bin/env bash
+# agent-relay certbot auto-renew wrapper (installed by deploy/install.sh).
+set -uo pipefail
+SVC=""
+if command -v ss >/dev/null 2>&1; then
+  SVC="$(ss -ltnp 2>/dev/null | grep ':80 ' | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2 || true)"
+fi
+if [ -n "$SVC" ] && systemctl list-units --type=service --state=running 2>/dev/null | grep -q "^${SVC}"; then
+  systemctl stop "$SVC" || SVC=""
+else
+  SVC=""
+fi
+certbot renew --quiet
+RC=$?
+if [ -n "$SVC" ]; then systemctl start "$SVC" || true; fi
+if systemctl cat agent-relay >/dev/null 2>&1; then
+  systemctl reload-or-restart agent-relay || true
+elif command -v docker >/dev/null 2>&1 && docker inspect agent-relay >/dev/null 2>&1; then
+  docker restart agent-relay || true
+fi
+exit "$RC"
+RENEW_EOF
+  chmod 755 /usr/local/sbin/agent-relay-renew.sh
+  (crontab -l 2>/dev/null | grep -v "# agent-relay" || true
+   echo "17 3 * * * /usr/local/sbin/agent-relay-renew.sh # agent-relay") | crontab - \
+    && log "已加 cron 自动续期（每天 3:17，续期时自动让出 80 端口并 reload 服务）" || warn "cron 写入失败，请手动配续期"
 }
 
 # ---- 1. 版本 ----
