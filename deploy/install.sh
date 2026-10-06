@@ -155,9 +155,19 @@ case "$NET" in
   public)
     [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ] || {
       [ "$YES" -eq 1 ] && die "公网模式需 --tls-cert/--tls-key"
-      TLS_CERT="$(ask "TLS 证书路径（fullchain.pem）" "")"
-      TLS_KEY="$(ask "TLS 私钥路径（privkey.pem）" "")"
-      [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ] || die "公网模式必须提供证书"
+      cat >&2 <<'EOF'
+公网模式需要：一个已解析到本机公网 IP 的域名 + TLS 证书文件。
+还没有证书？先申请（Debian/Ubuntu，要求域名已解析到本机）：
+  sudo apt install certbot
+  sudo certbot certonly --standalone -d relay.example.com
+证书一般在 /etc/letsencrypt/live/<域名>/ 下：
+  fullchain.pem（证书）、privkey.pem（私钥）
+还没有域名？直接重跑本脚本选 tailscale 内网模式（选项 1，无需证书）。
+注意：公网暴露面更大，务必设置强 admin 密码并及时续期证书。
+EOF
+      TLS_CERT="$(ask "TLS 证书路径" "")"
+      TLS_KEY="$(ask "TLS 私钥路径" "")"
+      [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ] || die "公网模式必须提供证书（或重跑脚本选 tailscale 模式）"
     }
     [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ] || die "证书文件不存在"
     LISTEN="0.0.0.0"
