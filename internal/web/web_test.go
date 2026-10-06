@@ -24,13 +24,20 @@ func TestEmbeddedConsoleServes(t *testing.T) {
 			t.Fatalf("%s content-type: %s", path, ct)
 		}
 	}
-	// index.html must reference the JS/CSS the handler serves.
+	// index.html must reference the JS/CSS the handler serves, with a cache
+	// busting version; / itself must be no-cache.
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	body := rec.Body.String()
-	if !strings.Contains(body, "/app.js") || !strings.Contains(body, "/style.css") {
-		t.Fatal("index.html missing asset references")
+	if !strings.Contains(body, "/app.js?v=") || !strings.Contains(body, "/style.css?v=") {
+		t.Fatal("index.html missing versioned asset references")
+	}
+	if strings.Contains(body, "{{ASSET_V}}") {
+		t.Fatal("unrendered asset placeholder")
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("index cache-control: %q", cc)
 	}
 	// Unknown path → 404, not a panic.
 	req = httptest.NewRequest("GET", "/nope.js", nil)
