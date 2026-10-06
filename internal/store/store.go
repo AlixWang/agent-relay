@@ -30,14 +30,14 @@ type Peer struct {
 }
 
 type TokenRow struct {
-	ID         int64
-	PeerID     string
-	TokenHash  string
-	Label      string
-	CreatedAt  int64
-	LastUsedAt int64
-	LastIP     string
-	RevokedAt  int64
+	ID         int64  `json:"id"`
+	PeerID     string `json:"peer_id"`
+	TokenHash  string `json:"token_hash"`
+	Label      string `json:"label"`
+	CreatedAt  int64  `json:"created_at"`
+	LastUsedAt int64  `json:"last_used_at"`
+	LastIP     string `json:"last_ip"`
+	RevokedAt  int64  `json:"revoked_at"`
 }
 
 type Invite struct {
@@ -66,11 +66,11 @@ type Message struct {
 }
 
 type AuditEntry struct {
-	Seq    int64
-	Ts     int64
-	Actor  string
-	Action string
-	Detail string
+	Seq    int64  `json:"seq"`
+	Ts     int64  `json:"ts"`
+	Actor  string `json:"actor"`
+	Action string `json:"action"`
+	Detail string `json:"detail"`
 }
 
 // Store is the repository interface. Postgres can implement this later (P2)
