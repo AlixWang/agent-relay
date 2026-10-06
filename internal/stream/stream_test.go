@@ -71,3 +71,22 @@ done:
 		t.Fatalf("pings coalesced, got %d", n)
 	}
 }
+
+func TestLivePeers(t *testing.T) {
+	var h *Hub
+	if got := h.LivePeers(); got != nil {
+		t.Fatalf("nil hub: %+v", got)
+	}
+	h = New(3, 10)
+	if got := h.LivePeers(); len(got) != 0 {
+		t.Fatalf("empty: %+v", got)
+	}
+	a, _ := h.Subscribe("alice")
+	if got := h.LivePeers(); !got["alice"] {
+		t.Fatalf("live: %+v", got)
+	}
+	h.Unsubscribe(a)
+	if got := h.LivePeers(); got["alice"] {
+		t.Fatalf("drained: %+v", got)
+	}
+}

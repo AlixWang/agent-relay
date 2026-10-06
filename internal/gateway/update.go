@@ -133,12 +133,22 @@ func (s *Server) handleAdminUpdateStatus(w http.ResponseWriter, r *http.Request)
 }
 
 // ---- POST /admin/update/check ----
+// Empty version resolves to the latest GitHub release: the console's
+// 检查 button works with no input. Explicit versions must match ^v[0-9].
 func (s *Server) handleAdminUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Version string `json:"version"`
 	}
 	if !s.readJSON(w, r, &req) {
 		return
+	}
+	if req.Version == "" {
+		latest, err := fetchLatestRelease()
+		if err != nil {
+			writeErr(w, 502, "latest release unreachable: "+err.Error())
+			return
+		}
+		req.Version = latest
 	}
 	if !verRe.MatchString(req.Version) {
 		writeErr(w, 400, "version must look like v1.2.3")
@@ -312,6 +322,31 @@ func parseVersion(v string) [3]int {
 type releaseInfo struct {
 	Protocol  int
 	MinClient int
+}
+
+// fetchLatestRelease resolves the newest v* release tag from the GitHub
+// API (redirects to the actual latest, drafts/prereleases excluded by the
+// /latest endpoint). Used when the console checks with no version input.
+func fetchLatestRelease() (string, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://api.github.com/repos/AlixWang/agent-relay/releases/latest")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("github api %d", resp.StatusCode)
+	}
+	var body struct {
+		Tag string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", err
+	}
+	if !verRe.MatchString(body.Tag) {
+		return "", fmt.Errorf("bad tag %q", body.Tag)
+	}
+	return body.Tag, nil
 }
 
 // fetchReleaseInfo asks the GitHub API for a tag's release notes and scans

@@ -105,3 +105,21 @@ func (h *Hub) Counts(peer string) (int, int) {
 	defer h.mu.Unlock()
 	return h.perPeer[peer], len(h.subs)
 }
+
+// LivePeers returns the set of peers currently holding at least one
+// stream. Used by the members console to show SSE vs polling (§4.4b).
+// Nil hub → nil (callers treat as "all polling").
+func (h *Hub) LivePeers() map[string]bool {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := map[string]bool{}
+	for peer, n := range h.perPeer {
+		if n > 0 {
+			out[peer] = true
+		}
+	}
+	return out
+}

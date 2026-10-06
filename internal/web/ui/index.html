@@ -64,7 +64,7 @@
     </div>
     <div class="table-wrap">
       <table id="peerTable" class="table">
-        <thead><tr><th>身份</th><th>类型</th><th>状态</th><th>在线</th><th>最后在线</th><th>协议</th><th>指令</th><th>能力</th><th>简介</th><th class="th-right">操作</th></tr></thead>
+        <thead><tr><th>身份</th><th>类型</th><th>状态</th><th>在线</th><th>最后在线</th><th>协议</th><th>指令</th><th>能力</th><th>简介</th><th>接收</th><th class="th-right">操作</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -191,8 +191,8 @@
       <h2>版本更新 <span class="muted small">（仅 GitHub Releases · systemd 自动 / docker 给命令）</span></h2>
       <p class="muted small" id="updCurrent">读取中…</p>
       <div class="form-row">
-        <label class="field">目标版本
-          <input id="updVer" placeholder="v0.4.0">
+        <label class="field">目标版本（留空=最新版）
+          <input id="updVer" placeholder="留空查最新版">
         </label>
         <div class="field field-btn">
           <button id="updCheck" class="btn btn-outline">检查</button>

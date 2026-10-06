@@ -1124,3 +1124,52 @@ func TestProfileLifecycle(t *testing.T) {
 		t.Fatalf("peers missing profile: %+v", out)
 	}
 }
+
+func TestTransportSurfacedInPeers(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "claw")
+	f.srv.SetStream(stream.New(3, 100))
+	// Hold a stream for alice only.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/messages/stream?for=alice&since=0", nil)
+	req = req.WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+f.tok["alice"])
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { f.mux.ServeHTTP(rec, req); close(done) }()
+	time.Sleep(300 * time.Millisecond) // let it subscribe
+	c, out := f.do(t, "GET", "/peers", nil, f.tok["bob"])
+	if c != 200 {
+		t.Fatalf("peers: %d", c)
+	}
+	got := map[string]string{}
+	for _, it := range out["peers"].([]any) {
+		m := it.(map[string]any)
+		if tr, ok := m["transport"].(string); ok {
+			got[m["id"].(string)] = tr
+		}
+	}
+	cancel()
+	<-done
+	if got["alice"] != "sse" || got["bob"] != "poll" {
+		t.Fatalf("transport: %+v", got)
+	}
+	// Admin view matches.
+	admin := f.adminLogin(t)
+	c, out = f.doAuth(t, "GET", "/admin/peers", nil, admin)
+	if c != 200 {
+		t.Fatalf("admin peers: %d", c)
+	}
+	found := false
+	for _, it := range out["peers"].([]any) {
+		m := it.(map[string]any)
+		if m["id"] == "bob" && m["transport"] == "poll" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("admin peers missing transport: %+v", out)
+	}
+}

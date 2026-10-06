@@ -31,6 +31,10 @@ type PeerView struct {
 	// for routing unassigned work. Shown in UI, searchable via /peers.
 	Profile          string `json:"profile,omitempty"`
 	ProfileUpdatedAt int64  `json:"profile_updated_at,omitempty"`
+	// Transport (§4.4b): how the peer currently receives messages.
+	// "sse" = holding a live /messages/stream; "poll" = short-polling
+	// (or offline/unknown). Computed from the stream hub, not stored.
+	Transport string `json:"transport,omitempty"`
 }
 
 // Service tracks last-seen and fires offline transitions.
@@ -98,7 +102,10 @@ func (s *Service) Beat(peerID string, protocolVer int, capabilities string, prom
 }
 
 // List returns all peers with online computed.
-func (s *Service) List(now int64) ([]*PeerView, error) {
+// live, when non-nil, marks peers holding an SSE stream: their transport
+// is reported as "sse", everyone else as "poll" (§4.4b). The map comes
+// from the stream hub (LivePeers); nil means "hub absent, all poll".
+func (s *Service) List(now int64, live map[string]bool) ([]*PeerView, error) {
 	peers, err := s.st.ListPeers()
 	if err != nil {
 		return nil, err
@@ -116,6 +123,11 @@ func (s *Service) List(now int64) ([]*PeerView, error) {
 		var caps any
 		if err := json.Unmarshal([]byte(orEmptyJSON(p.Capabilities)), &caps); err == nil {
 			v.Capabilities = caps
+		}
+		if live != nil && live[p.ID] {
+			v.Transport = "sse"
+		} else {
+			v.Transport = "poll"
 		}
 		if !online && p.LastSeen != 0 {
 			v.OfflineSecs = now - p.LastSeen

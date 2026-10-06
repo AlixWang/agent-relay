@@ -562,7 +562,7 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 	if !s.checkVersion(w, peer) {
 		return
 	}
-	views, err := s.presence.List(time.Now().Unix())
+	views, err := s.presence.List(time.Now().Unix(), s.liveTransports())
 	if err != nil {
 		writeErr(w, 500, "peers failed")
 		return
@@ -762,12 +762,21 @@ func (s *Server) handleAdminDeleteInvite(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleAdminListPeers(w http.ResponseWriter, r *http.Request) {
-	views, err := s.presence.List(time.Now().Unix())
+	views, err := s.presence.List(time.Now().Unix(), s.liveTransports())
 	if err != nil {
 		writeErr(w, 500, "peers failed")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "peers": views})
+}
+
+// liveTransports snapshots the SSE hub's live peers for the members
+// console (§4.4b). Nil hub → nil → presence reports everyone as "poll".
+func (s *Server) liveTransports() map[string]bool {
+	if s.stream == nil {
+		return nil
+	}
+	return s.stream.LivePeers()
 }
 
 func (s *Server) handleAdminDeletePeer(w http.ResponseWriter, r *http.Request) {

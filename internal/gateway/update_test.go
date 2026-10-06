@@ -78,3 +78,25 @@ func containsStr(v any, sub string) bool {
 	}
 	return false
 }
+
+func TestUpdateCheckResolvesLatest(t *testing.T) {
+	f := newFixture(t)
+	admin := f.adminLogin(t)
+	// Empty version → latest lookup. With network it resolves (dev build
+	// skips the downgrade guard); offline it 502s. Either way it must NOT
+	// 400 on validation — empty is a valid "give me latest" request.
+	c, out := f.doAuth(t, "POST", "/admin/update/check",
+		map[string]any{"version": ""}, admin)
+	if c == 400 {
+		t.Fatalf("empty version must not 400: %+v", out)
+	}
+	if c == 200 && out["version"] == nil {
+		t.Fatalf("resolved check missing version: %+v", out)
+	}
+	// Bad shape still 400.
+	c, _ = f.doAuth(t, "POST", "/admin/update/check",
+		map[string]any{"version": "main"}, admin)
+	if c != 400 {
+		t.Fatalf("bad version should 400, got %d", c)
+	}
+}

@@ -36,6 +36,11 @@ const profileCell = (p) => {
   const stale = p.profile_updated_at ? ago(p.profile_updated_at) : '未知';
   return `<span title="更新于 ${esc(stale)}">${esc(p.profile)}</span>`;
 };
+/* ---------- 接收方式（§4.4b）：sse = 常驻流在线，poll = 短轮询 ---------- */
+const transportBadge = (p) => {
+  if ((p.transport || 'poll') === 'sse') return `<span class="badge ok">SSE</span>`;
+  return `<span class="badge">轮询</span>`;
+};
 const caps = (c) => {
   if (!c || typeof c !== 'object') return '<span class="muted small">—</span>';
   const keys = Object.keys(c).filter((k) => c[k]);
@@ -145,6 +150,7 @@ async function refreshPeers() {
     <td>${promptBadge(p)}</td>
     <td>${caps(p.capabilities)}</td>
     <td>${profileCell(p)}</td>
+    <td>${transportBadge(p)}</td>
     <td class="td-actions">
       <button class="btn btn-ghost btn-sm" data-act="suspend" data-id="${esc(p.id)}">${p.status === 'suspended' ? '解封' : '停用'}</button>
       <button class="btn btn-ghost btn-sm" data-act="activate" data-id="${esc(p.id)}">激活</button>
@@ -352,23 +358,27 @@ function renderUpdJob(j) {
   $('updLog').dataset.state = st;
 }
 $('updCheck').onclick = async () => {
+  // 空输入 = 查最新版（服务端拉 GitHub latest）；填了就查指定版。
   const v = $('updVer').value.trim();
-  if (!v) { alert('先填目标版本（如 v0.4.0）'); return; }
+  $('updApply').disabled = true;
+  $('updWarn').innerHTML = `<p class="muted small">检查中${v ? '：' + esc(v) : '（最新版）'}…</p>`;
   try {
     const r = await api('/admin/update/check', { method: 'POST', body: JSON.stringify({ version: v }) });
+    const ver = r.version;
+    $('updVer').value = ver;
     const changed = r.protocol_change || r.min_client_change;
     if (r.unknown) {
-      $('updWarn').innerHTML = `<p class="warn">目标版本元数据不可达（离线或无标记）：继续即视为跨协议更新，必须勾选确认。</p>`;
+      $('updWarn').innerHTML = `<p class="warn">${esc(ver)} 元数据不可达（离线或无标记）：继续即视为跨协议更新，必须勾选确认。</p>`;
       $('updAckRow').hidden = false;
     } else if (changed) {
-      $('updWarn').innerHTML = `<p class="warn">⚠ 目标版本变更协议（protocol_change=${r.protocol_change} min_client_change=${r.min_client_change}）：助手可能需要重跑 prompt，必须勾选确认。</p>`;
+      $('updWarn').innerHTML = `<p class="warn">⚠ ${esc(ver)} 变更协议（protocol_change=${r.protocol_change} min_client_change=${r.min_client_change}）：助手可能需要重跑 prompt，必须勾选确认。</p>`;
       $('updAckRow').hidden = false;
     } else {
-      $('updWarn').innerHTML = `<p class="muted small">${v} 同协议，可直接应用（自动备份+健康检查+失败回滚）。</p>`;
+      $('updWarn').innerHTML = `<p class="muted small">${esc(ver)} 同协议，可直接应用（自动备份+健康检查+失败回滚）。</p>`;
       $('updAckRow').hidden = true;
     }
     $('updApply').disabled = false;
-    $('updApply').dataset.version = v;
+    $('updApply').dataset.version = ver;
   } catch (e) { alert('检查失败: ' + e.message); }
 };
 $('updApply').onclick = async () => {

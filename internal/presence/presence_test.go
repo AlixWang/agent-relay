@@ -31,7 +31,7 @@ func TestBeatAndList(t *testing.T) {
 	if err := s.Beat("a", 1, `{"shell":true}`, 0, "", now); err != nil {
 		t.Fatalf("beat: %v", err)
 	}
-	views, err := s.List(now)
+	views, err := s.List(now, nil)
 	if err != nil || len(views) != 1 {
 		t.Fatalf("list: %+v (%v)", views, err)
 	}
@@ -43,7 +43,7 @@ func TestBeatAndList(t *testing.T) {
 		t.Fatalf("touch/caps: %+v", p)
 	}
 	// Past the window → offline with age.
-	views, _ = s.List(now + 301)
+	views, _ = s.List(now+301, nil)
 	if views[0].Online || views[0].OfflineSecs != 301 {
 		t.Fatalf("should be offline 301s: %+v", views[0])
 	}
@@ -51,7 +51,7 @@ func TestBeatAndList(t *testing.T) {
 	if err := st.CreatePeer(&store.Peer{ID: "ghost", Status: "pending", CreatedAt: 1000}); err != nil {
 		t.Fatal(err)
 	}
-	views, _ = s.List(now)
+	views, _ = s.List(now, nil)
 	for _, v := range views {
 		if v.ID == "ghost" && (v.Online || v.OfflineSecs != 0) {
 			t.Fatalf("ghost: %+v", v)
@@ -149,7 +149,7 @@ func TestPromptVersionForwardOnly(t *testing.T) {
 		t.Fatalf("zero clobbered: %+v", p)
 	}
 	// List surfaces the fields.
-	views, _ := s.List(now + 20)
+	views, _ := s.List(now+20, nil)
 	if len(views) != 1 || views[0].PromptVersion != 2 {
 		t.Fatalf("list: %+v", views)
 	}
@@ -178,8 +178,40 @@ func TestProfileViaBeat(t *testing.T) {
 	if p.Profile != "做巡检" || p.ProfileUpdatedAt != now {
 		t.Fatalf("empty clobbered: %+v", p)
 	}
-	views, _ := s.List(now + 10)
+	views, _ := s.List(now+10, nil)
 	if len(views) != 1 || views[0].Profile != "做巡检" {
 		t.Fatalf("list: %+v", views)
+	}
+}
+
+func TestTransportMarksLive(t *testing.T) {
+	st := openTest(t)
+	for _, id := range []string{"a", "b"} {
+		if err := st.CreatePeer(&store.Peer{ID: id, Status: "active", CreatedAt: 1000}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := New(st, 300, "")
+	now := int64(5000)
+	if err := s.Beat("a", 0, "", 0, "", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Beat("b", 0, "", 0, "", now); err != nil {
+		t.Fatal(err)
+	}
+	views, _ := s.List(now, map[string]bool{"a": true})
+	got := map[string]string{}
+	for _, v := range views {
+		got[v.ID] = v.Transport
+	}
+	if got["a"] != "sse" || got["b"] != "poll" {
+		t.Fatalf("transport: %+v", got)
+	}
+	// Nil live map → all poll.
+	views, _ = s.List(now, nil)
+	for _, v := range views {
+		if v.Transport != "poll" {
+			t.Fatalf("nil live: %+v", v)
+		}
 	}
 }
