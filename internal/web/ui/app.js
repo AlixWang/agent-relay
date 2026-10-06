@@ -30,6 +30,12 @@ const promptBadge = (p) => {
   const when = p.prompt_updated_at ? fmtTime(p.prompt_updated_at) : '从未';
   return `<span class="badge warn" title="确认于 ${esc(when)}">v${v} → v${serverPromptVersion}</span>`;
 };
+/* ---------- 简介展示（§8.7）：自述能力 + 常干任务，供路由未指派任务 ---------- */
+const profileCell = (p) => {
+  if (!p.profile) return '<span class="muted small">未填写</span>';
+  const stale = p.profile_updated_at ? ago(p.profile_updated_at) : '未知';
+  return `<span title="更新于 ${esc(stale)}">${esc(p.profile)}</span>`;
+};
 const caps = (c) => {
   if (!c || typeof c !== 'object') return '<span class="muted small">—</span>';
   const keys = Object.keys(c).filter((k) => c[k]);
@@ -139,6 +145,7 @@ async function refreshPeers() {
     <td>v${p.protocol_version ?? '?'}</td>
     <td>${promptBadge(p)}</td>
     <td>${caps(p.capabilities)}</td>
+    <td>${profileCell(p)}</td>
     <td class="td-actions">
       <button class="btn btn-ghost btn-sm" data-act="suspend" data-id="${esc(p.id)}">${p.status === 'suspended' ? '解封' : '停用'}</button>
       <button class="btn btn-ghost btn-sm" data-act="activate" data-id="${esc(p.id)}">激活</button>

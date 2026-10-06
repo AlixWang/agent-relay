@@ -390,6 +390,9 @@ peer_prune_after_days = 7
 audit_retention_days = 90
 offline_webhook_url = ""
 max_body_bytes = 1048576
+stream_keepalive_secs = 20
+stream_max_per_peer = 3
+profile_refresh_days = 7
 EOF
 chmod 600 "$CONFIG_PATH"
 # docker 模式数据目录归属：镜像内 agent-relay 用户 uid 未定，运行时用 --user 或放宽目录权限

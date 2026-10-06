@@ -61,3 +61,7 @@ max_body_bytes = 1048576
 # can hold a persistent process (relay-tail.sh). Short polling stays default.
 stream_keepalive_secs = 20
 stream_max_per_peer = 3
+
+# Assistant profile (DESIGN §8.7): heartbeat nudges a refresh when the
+# self-intro is older than this. 0 disables the nudge.
+profile_refresh_days = 7

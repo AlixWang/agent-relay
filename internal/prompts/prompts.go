@@ -103,7 +103,9 @@ func Render(agentType string, d Data) (string, error) {
 // /prompts/current. Independent from protocol_version: instruction updates
 // must not force re-registration.
 // v3: SSE tail choice in muse/claw/generic, hermes cron-stays-default note.
-const PromptVersion = 3
+// v4: assistant profile §8.7 (register/heartbeat dual-shape capabilities
+// fix for the hermes 400 included).
+const PromptVersion = 4
 
 // Types returns the supported agent types for the UI picker.
 func Types() []string { return []string{"muse", "hermes", "claw", "generic"} }

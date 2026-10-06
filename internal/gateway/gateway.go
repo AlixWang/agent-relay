@@ -239,7 +239,53 @@ type registerReq struct {
 	ID              string `json:"id"`
 	AgentType       string `json:"agent_type"`
 	ProtocolVersion int    `json:"protocol_version"`
-	Capabilities    string `json:"capabilities"`
+	// Capabilities accepts either a JSON string ('{"shell":true}') or an
+	// object ({"shell":true}). Humans hand-write curl; objects are the
+	// natural shape and must not 400 (hermes heartbeat bug).
+	Capabilities json.RawMessage `json:"capabilities"`
+	// Profile is the assistant's self-intro (§8.7): capabilities + usual
+	// tasks in one or two sentences, for routing unassigned work.
+	Profile string `json:"profile"`
+}
+
+// capsOrDefault normalizes the dual-shape capabilities field for
+// register/heartbeat. Unparseable input falls back to "{}" instead of
+// 400: capabilities are advisory metadata, never worth rejecting a peer.
+// (The strict-decode 400 on object-shaped capabilities was the hermes
+// heartbeat bug: humans naturally write {"shell":true}, not a string.)
+func capsOrDefault(raw json.RawMessage) string {
+	s, err := capsString(raw)
+	if err != nil {
+		return "{}"
+	}
+	return s
+}
+
+// capsString normalizes the dual-shape capabilities field to a JSON
+// object string for storage. Empty/missing → "{}". Invalid → error.
+func capsString(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "{}", nil
+	}
+	// Quoted string: unquote, must itself be valid JSON (object preferred
+	// but any valid JSON is stored verbatim — List re-parses leniently).
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return "", err
+		}
+		if s == "" {
+			return "{}", nil
+		}
+		if !json.Valid([]byte(s)) {
+			return "", fmt.Errorf("capabilities string is not JSON")
+		}
+		return s, nil
+	}
+	if !json.Valid(raw) {
+		return "", fmt.Errorf("capabilities is not JSON")
+	}
+	return string(raw), nil
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -257,7 +303,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	peer, plaintext, err := s.auth.Register(req.Code, req.ID, req.AgentType,
-		req.ProtocolVersion, req.Capabilities, time.Now().Unix())
+		req.ProtocolVersion, capsOrDefault(req.Capabilities), time.Now().Unix())
 	if err != nil {
 		if re, ok := err.(*auth.RegisterError); ok {
 			writeErr(w, 400, re.Code+": "+re.Detail)
@@ -266,6 +312,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		log.Printf("register error: %v", err)
 		writeErr(w, 500, "register failed")
 		return
+	}
+	// Profile at register (§8.7): seed the intro immediately so routing
+	// works before the first heartbeat.
+	now := time.Now().Unix()
+	if req.Profile != "" {
+		_ = s.st.UpdatePeerProfile(peer.ID, req.Profile, now)
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "peer_id": peer.ID, "token": plaintext})
 }
@@ -441,11 +493,17 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 type heartbeatReq struct {
 	ID              string `json:"id"`
 	ProtocolVersion int    `json:"protocol_version"`
-	Capabilities    string `json:"capabilities"`
+	// Capabilities accepts a JSON string or object (same dual shape as
+	// register). Missing/empty keeps the stored value.
+	Capabilities json.RawMessage `json:"capabilities"`
 	// PromptVersion is the peer's confirmed worker-instruction revision
 	// (§8.6). The response carries prompt_update=true when the server
 	// runs a newer revision and the peer should pull /prompts/current.
 	PromptVersion int `json:"prompt_version"`
+	// Profile is the peer's self-reported intro (§8.7): capabilities +
+	// usual tasks, distilled from its own memory. Empty keeps the stored
+	// value; the server nudges a refresh when it goes stale.
+	Profile string `json:"profile"`
 }
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -468,11 +526,11 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if pv == 0 {
 		pv = peer.ProtocolVer
 	}
-	caps := req.Capabilities
-	if caps == "" {
+	caps := capsOrDefault(req.Capabilities)
+	if caps == "{}" {
 		caps = peer.Capabilities
 	}
-	if err := s.presence.Beat(peer.ID, pv, caps, req.PromptVersion, time.Now().Unix()); err != nil {
+	if err := s.presence.Beat(peer.ID, pv, caps, req.PromptVersion, req.Profile, time.Now().Unix()); err != nil {
 		writeErr(w, 500, "heartbeat failed")
 		return
 	}
@@ -480,10 +538,18 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if p2 != nil && !s.checkVersion(w, p2) {
 		return
 	}
+	now := time.Now().Unix()
 	resp := map[string]any{"ok": true}
 	if p2 != nil && p2.PromptVersion < prompts.PromptVersion {
 		resp["prompt_update"] = true
 		resp["prompt_version"] = prompts.PromptVersion
+	}
+	// Profile refresh nudge (§8.7): never-set or older than
+	// profile_refresh_days. Same channel as prompt_update; the assistant
+	// rewrites its intro from memory and confirms via the next heartbeat.
+	if refr := int64(s.cfg.ProfileRefreshDays) * 86400; refr > 0 && p2 != nil &&
+		(p2.Profile == "" || now-p2.ProfileUpdatedAt > refr) {
+		resp["profile_refresh"] = true
 	}
 	writeJSON(w, 200, resp)
 }
@@ -726,12 +792,21 @@ func (s *Server) handleAdminPatchPeer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DisplayName string `json:"display_name"`
 		Status      string `json:"status"`
+		Profile     string `json:"profile"`
 	}
 	if !s.readJSON(w, r, &req) {
 		return
 	}
 	if req.DisplayName != "" {
 		if err := s.st.UpdatePeerMeta(id, req.DisplayName); err != nil {
+			writeErr(w, 500, "update failed")
+			return
+		}
+	}
+	// Admin can fix a peer's self-intro (§8.7) without waiting for the
+	// next heartbeat refresh.
+	if req.Profile != "" {
+		if err := s.st.UpdatePeerProfile(id, req.Profile, time.Now().Unix()); err != nil {
 			writeErr(w, 500, "update failed")
 			return
 		}

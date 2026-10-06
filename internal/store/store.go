@@ -19,16 +19,18 @@ var schemaSQL string
 // ---- Domain types (DESIGN §5.1) ----
 
 type Peer struct {
-	ID              string
-	DisplayName     string
-	AgentType       string
-	ProtocolVer     int
-	Capabilities    string // JSON
-	Status          string // pending|verifying|active|suspended|failed
-	CreatedAt       int64
-	LastSeen        int64
-	PromptVersion   int   // worker-instruction revision the peer runs (§8.6)
-	PromptUpdatedAt int64 // when the peer confirmed the current revision
+	ID               string
+	DisplayName      string
+	AgentType        string
+	ProtocolVer      int
+	Capabilities     string // JSON
+	Status           string // pending|verifying|active|suspended|failed
+	CreatedAt        int64
+	LastSeen         int64
+	PromptVersion    int    // worker-instruction revision the peer runs (§8.6)
+	PromptUpdatedAt  int64  // when the peer confirmed the current revision
+	Profile          string // self-reported capabilities + usual tasks (§8.7)
+	ProfileUpdatedAt int64  // when the profile was last set/refreshed
 }
 
 type TokenRow struct {
@@ -112,6 +114,10 @@ type Store interface {
 	UpdatePeerStatus(id, status string) error
 	UpdatePeerMeta(id, displayName string) error
 	UpdatePeerCapabilities(id string, protocolVer int, caps string) error
+	// UpdatePeerProfile records a peer's self-reported profile (§8.7).
+	// Empty profile keeps the stored value (same "not reporting" rule as
+	// capabilities): only a non-empty string overwrites.
+	UpdatePeerProfile(id, profile string, ts int64) error
 	// UpdatePeerPrompt records a peer's confirmed worker-instruction
 	// revision (§8.6). Only moves forward: stale replays are ignored.
 	UpdatePeerPrompt(id string, promptVersion int, ts int64) error
@@ -290,9 +296,10 @@ func (s *sqliteStore) CreatePeer(p *Peer) error {
 func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 	var p Peer
 	err := s.db.QueryRow(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen,
-		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0) FROM peers WHERE id=?`, id).
+		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
+		COALESCE(profile,''),COALESCE(profile_updated_at,0) FROM peers WHERE id=?`, id).
 		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
-			&p.PromptVersion, &p.PromptUpdatedAt)
+			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -304,7 +311,8 @@ func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 
 func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 	rows, err := s.db.Query(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen,
-		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0) FROM peers ORDER BY id`)
+		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
+		COALESCE(profile,''),COALESCE(profile_updated_at,0) FROM peers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +321,7 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 	for rows.Next() {
 		var p Peer
 		if err := rows.Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
-			&p.PromptVersion, &p.PromptUpdatedAt); err != nil {
+			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
@@ -333,6 +341,11 @@ func (s *sqliteStore) UpdatePeerMeta(id, displayName string) error {
 
 func (s *sqliteStore) UpdatePeerCapabilities(id string, protocolVer int, caps string) error {
 	_, err := s.db.Exec(`UPDATE peers SET protocol_ver=?, capabilities=? WHERE id=?`, protocolVer, caps, id)
+	return err
+}
+
+func (s *sqliteStore) UpdatePeerProfile(id, profile string, ts int64) error {
+	_, err := s.db.Exec(`UPDATE peers SET profile=?, profile_updated_at=? WHERE id=?`, profile, ts, id)
 	return err
 }
 

@@ -1015,3 +1015,112 @@ func TestTailScriptServed(t *testing.T) {
 		t.Fatal("tail script body wrong")
 	}
 }
+
+func TestCapabilitiesDualShape(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now().Unix()
+	// Register with object-shaped capabilities (the hermes case).
+	code, _, _ := f.srv.auth.CreateInvite("cap1", "hermes", "admin", now)
+	c, out := f.do(t, "POST", "/register",
+		map[string]any{"code": code, "id": "cap1", "agent_type": "hermes",
+			"protocol_version": 1, "capabilities": map[string]any{"shell": true}}, "")
+	if c != 200 || out["token"] == nil {
+		t.Fatalf("object caps register: %d %+v", c, out)
+	}
+	tok := out["token"].(string)
+	p, _ := f.srv.st.GetPeer("cap1")
+	if p.Capabilities != `{"shell":true}` {
+		t.Fatalf("stored caps: %q", p.Capabilities)
+	}
+	// Heartbeat with object-shaped capabilities: must 200, not 400.
+	c, out = f.do(t, "POST", "/heartbeat",
+		map[string]any{"id": "cap1", "capabilities": map[string]any{"polling": true}}, tok)
+	if c != 200 {
+		t.Fatalf("object caps heartbeat: %d %+v", c, out)
+	}
+	p, _ = f.srv.st.GetPeer("cap1")
+	if p.Capabilities != `{"polling":true}` {
+		t.Fatalf("updated caps: %q", p.Capabilities)
+	}
+	// String shape still works (backward compat with templates).
+	code2, _, _ := f.srv.auth.CreateInvite("cap2", "muse", "admin", now)
+	c, out = f.do(t, "POST", "/register",
+		map[string]any{"code": code2, "id": "cap2", "protocol_version": 1,
+			"capabilities": `{"shell":true}`}, "")
+	if c != 200 {
+		t.Fatalf("string caps register: %d %+v", c, out)
+	}
+	// Garbage capabilities degrade to {} instead of 400.
+	c, _ = f.do(t, "POST", "/heartbeat",
+		map[string]any{"id": "cap1", "capabilities": 42}, tok)
+	if c != 200 {
+		t.Fatalf("garbage caps should degrade, got %d", c)
+	}
+}
+
+func TestProfileLifecycle(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now().Unix()
+	// Register with a profile: stored immediately.
+	code, _, _ := f.srv.auth.CreateInvite("pro1", "muse", "admin", now)
+	c, out := f.do(t, "POST", "/register",
+		map[string]any{"code": code, "id": "pro1", "protocol_version": 1,
+			"profile": "shell+git, 常做仓库巡检"}, "")
+	if c != 200 || out["token"] == nil {
+		t.Fatalf("register: %d %+v", c, out)
+	}
+	tok := out["token"].(string)
+	p, _ := f.srv.st.GetPeer("pro1")
+	if p.Profile == "" || p.ProfileUpdatedAt == 0 {
+		t.Fatalf("profile not seeded: %+v", p)
+	}
+	// Fresh profile: no nudge.
+	c, out = f.do(t, "POST", "/heartbeat", map[string]any{"id": "pro1"}, tok)
+	if c != 200 {
+		t.Fatalf("heartbeat: %d", c)
+	}
+	if _, nudged := out["profile_refresh"]; nudged {
+		t.Fatalf("fresh profile should not nudge: %+v", out)
+	}
+	// Stale profile (backdate 8 days > default 7): nudge fires.
+	_ = f.srv.st.UpdatePeerProfile("pro1", p.Profile, now-8*86400)
+	c, out = f.do(t, "POST", "/heartbeat", map[string]any{"id": "pro1"}, tok)
+	if c != 200 || out["profile_refresh"] != true {
+		t.Fatalf("stale nudge: %d %+v", c, out)
+	}
+	// Refresh via heartbeat: stored + nudge stops.
+	c, out = f.do(t, "POST", "/heartbeat",
+		map[string]any{"id": "pro1", "profile": "shell+git+docker, 常做巡检与发布"}, tok)
+	if c != 200 {
+		t.Fatalf("refresh: %d", c)
+	}
+	if _, nudged := out["profile_refresh"]; nudged {
+		t.Fatalf("still nudged after refresh: %+v", out)
+	}
+	p, _ = f.srv.st.GetPeer("pro1")
+	if p.Profile != "shell+git+docker, 常做巡检与发布" {
+		t.Fatalf("profile: %q", p.Profile)
+	}
+	// Never-set profile: nudge fires.
+	f.registerPeer(t, "pro2", "claw")
+	tok2 := f.tok["pro2"]
+	c, out = f.do(t, "POST", "/heartbeat", map[string]any{"id": "pro2"}, tok2)
+	if c != 200 || out["profile_refresh"] != true {
+		t.Fatalf("empty nudge: %d %+v", c, out)
+	}
+	// /peers surfaces the profile for routing.
+	c, out = f.do(t, "GET", "/peers", nil, tok2)
+	if c != 200 {
+		t.Fatalf("peers: %d", c)
+	}
+	found := false
+	for _, it := range out["peers"].([]any) {
+		m := it.(map[string]any)
+		if m["id"] == "pro1" && m["profile"] == "shell+git+docker, 常做巡检与发布" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("peers missing profile: %+v", out)
+	}
+}

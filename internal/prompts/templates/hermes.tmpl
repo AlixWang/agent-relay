@@ -16,7 +16,7 @@
 ```bash
 RELAY="{{.ServerAddr}}"; ME="{{.PeerID}}"
 curl -s $RELAY/register -H 'Content-Type: application/json' \
-  -d '{"code":"{{.InviteCode}}","id":"'$ME'","agent_type":"hermes","protocol_version":{{.ProtocolVersion}},"capabilities":"{}"}'
+  -d '{"code":"{{.InviteCode}}","id":"'$ME'","agent_type":"hermes","protocol_version":{{.ProtocolVersion}},"capabilities":{},"profile":"一句话自我介绍：会什么 + 常干什么，供服务端路由未指派任务"}'
 # 返回 {"peer_id":"...","token":"..."} —— token 只显示这一次，请用户存入密码管理器，不要发回给你全文
 ```{{end}}
 - 此后你的每次“检查中继”都请用户代跑以下三条（token 由用户从保管处取，就地使用不经你手）：
@@ -85,6 +85,17 @@ curl -s $RELAY/heartbeat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: app
 mv ~/workspace/task-relay/.prompt_version.staged ~/workspace/task-relay/.prompt_version
 ```
   下次 heartbeat 即上报新版本，服务端停止提醒。未确认前每次轮询都会再唤醒你一次。
+
+## 6.6 自我简介（供服务端路由未指派任务）
+- 注册时你已带了一句话 profile（会什么 + 常干什么）。服务端把它展示在成员表，
+  派任务没指明人选时人类/其他助手按简介挑人。
+- 服务端每周提醒一次更新（heartbeat 返回 `profile_refresh=true`）：你从自己的 memory
+  里提炼近一周常干的任务，重写一句话简介，请用户代跑 heartbeat 带上新 profile：
+```bash
+curl -s $RELAY/heartbeat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"id":"'$ME'","profile":"新简介"}'
+```
+  简介是路由依据，如实写，不要夸大能力。
 
 ## 7. 失败上报
 - 任何一步失败：请用户贴出原命令与原样错误，不要编造协议细节；token 问题一律让用户找管理员重发邀请。

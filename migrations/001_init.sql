@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS peers (
 -- Prompt distribution (§8.6).
 ALTER TABLE peers ADD COLUMN prompt_version INTEGER DEFAULT 0;
 ALTER TABLE peers ADD COLUMN prompt_updated_at INTEGER DEFAULT 0;
+-- Assistant profile (§8.7): self-reported capabilities + usual tasks for
+-- routing unassigned work. Set at register, refreshable via heartbeat.
+ALTER TABLE peers ADD COLUMN profile TEXT DEFAULT '';
+ALTER TABLE peers ADD COLUMN profile_updated_at INTEGER DEFAULT 0;
 -- NOTE: tokens.peer_id intentionally has NO foreign key to peers(id).
 -- Tokens outlive peers by design (DESIGN §10.2): peers are pruned after
 -- peer_prune_after_days, tokens persist until revoked so a returning

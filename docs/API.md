@@ -14,8 +14,8 @@ GET    /messages?for=<id>&since=<seq>
 GET    /messages/stream?for=<id>&since=<seq>   （SSE，§4.4b 推送：backlog 回放 + live 帧，需鉴权）
                                    → text/event-stream，帧 `id/event: message/retry/data`，保活 `: ping`
 POST   /ack         { message_id, by }                        → { ok }
-POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version? }
-                                   → { ok, prompt_update?, prompt_version? }（有新指令时提醒拉取）
+POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version?, profile? }
+                                   → { ok, prompt_update?, prompt_version?, profile_refresh? }（新指令/简介过期时提醒）
 GET    /prompts/current           → { ok, prompt_version, agent_type, prompt }（§8.6 指令下发，需鉴权）
 GET    /peers                         → { ok, peers: [{ id, display_name, agent_type, status,
                                             online, last_seen, protocol_version, capabilities }] }

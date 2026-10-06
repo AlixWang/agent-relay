@@ -28,7 +28,7 @@ func TestBeatAndList(t *testing.T) {
 	}
 	s := New(st, 300, "")
 	now := int64(2000)
-	if err := s.Beat("a", 1, `{"shell":true}`, 0, now); err != nil {
+	if err := s.Beat("a", 1, `{"shell":true}`, 0, "", now); err != nil {
 		t.Fatalf("beat: %v", err)
 	}
 	views, err := s.List(now)
@@ -105,7 +105,7 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 		t.Fatal("duplicate audit")
 	}
 	// Heartbeat then sweep: online again, no event; next drop fires again.
-	if err := s.Beat("a", 0, "", 0, 2500); err != nil {
+	if err := s.Beat("a", 0, "", 0, "", 2500); err != nil {
 		t.Fatal(err)
 	}
 	s.Sweep(2550)
@@ -125,7 +125,7 @@ func TestPromptVersionForwardOnly(t *testing.T) {
 	}
 	s := New(st, 300, "")
 	now := int64(3000)
-	if err := s.Beat("a", 0, "", 2, now); err != nil {
+	if err := s.Beat("a", 0, "", 2, "", now); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := st.GetPeer("a")
@@ -133,7 +133,7 @@ func TestPromptVersionForwardOnly(t *testing.T) {
 		t.Fatalf("prompt not recorded: %+v", p)
 	}
 	// Stale replay must not clobber.
-	if err := s.Beat("a", 0, "", 1, now+10); err != nil {
+	if err := s.Beat("a", 0, "", 1, "", now+10); err != nil {
 		t.Fatal(err)
 	}
 	p, _ = st.GetPeer("a")
@@ -141,7 +141,7 @@ func TestPromptVersionForwardOnly(t *testing.T) {
 		t.Fatalf("stale clobbered: %+v", p)
 	}
 	// Zero means "not reporting": untouched.
-	if err := s.Beat("a", 0, "", 0, now+20); err != nil {
+	if err := s.Beat("a", 0, "", 0, "", now+20); err != nil {
 		t.Fatal(err)
 	}
 	p, _ = st.GetPeer("a")
@@ -151,6 +151,35 @@ func TestPromptVersionForwardOnly(t *testing.T) {
 	// List surfaces the fields.
 	views, _ := s.List(now + 20)
 	if len(views) != 1 || views[0].PromptVersion != 2 {
+		t.Fatalf("list: %+v", views)
+	}
+}
+
+func TestProfileViaBeat(t *testing.T) {
+	st := openTest(t)
+	if err := st.CreatePeer(&store.Peer{ID: "a", AgentType: "muse", Status: "active", CreatedAt: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, 300, "")
+	now := int64(4000)
+	// Non-empty overwrites with timestamp.
+	if err := s.Beat("a", 0, "", 0, "做巡检", now); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := st.GetPeer("a")
+	if p.Profile != "做巡检" || p.ProfileUpdatedAt != now {
+		t.Fatalf("profile: %+v", p)
+	}
+	// Empty keeps the stored value.
+	if err := s.Beat("a", 0, "", 0, "", now+10); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = st.GetPeer("a")
+	if p.Profile != "做巡检" || p.ProfileUpdatedAt != now {
+		t.Fatalf("empty clobbered: %+v", p)
+	}
+	views, _ := s.List(now + 10)
+	if len(views) != 1 || views[0].Profile != "做巡检" {
 		t.Fatalf("list: %+v", views)
 	}
 }

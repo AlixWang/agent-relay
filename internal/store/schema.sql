@@ -18,6 +18,11 @@ CREATE TABLE IF NOT EXISTS peers (
 -- ALTERs so pre-existing databases migrate on boot like the §6.5 columns.
 ALTER TABLE peers ADD COLUMN prompt_version INTEGER DEFAULT 0;
 ALTER TABLE peers ADD COLUMN prompt_updated_at INTEGER DEFAULT 0;
+-- Assistant profile (§8.7): self-reported capabilities + usual tasks for
+-- routing unassigned work. Set at register, refreshable via heartbeat.
+-- profile_refresh_days (config) controls the server's refresh nudge.
+ALTER TABLE peers ADD COLUMN profile TEXT DEFAULT '';
+ALTER TABLE peers ADD COLUMN profile_updated_at INTEGER DEFAULT 0;
 -- NOTE: tokens.peer_id intentionally has NO foreign key to peers(id).
 -- Tokens outlive peers by design (DESIGN §10.2): peers are pruned after
 -- peer_prune_after_days, tokens persist until revoked so a returning

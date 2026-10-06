@@ -166,3 +166,18 @@ func TestTailChoiceDocumented(t *testing.T) {
 		}
 	}
 }
+
+func TestProfileSectionsPresent(t *testing.T) {
+	for _, typ := range []string{"muse", "claw", "generic", "hermes"} {
+		out, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+		if err != nil {
+			t.Fatalf("%s: %v", typ, err)
+		}
+		if !strings.Contains(out, "profile") || !strings.Contains(out, "profile_refresh") {
+			t.Fatalf("%s missing profile section", typ)
+		}
+		if !strings.Contains(out, `"profile":`) {
+			t.Fatalf("%s register curl missing profile field", typ)
+		}
+	}
+}

@@ -61,6 +61,11 @@ type Config struct {
 	// hold instead of short-polling. Zero disables the corresponding knob.
 	StreamKeepaliveSecs int `toml:"stream_keepalive_secs"`
 	StreamMaxPerPeer    int `toml:"stream_max_per_peer"`
+
+	// Assistant profile (§8.7): self-reported capabilities + usual tasks.
+	// The server nudges online peers to refresh via heartbeat when the
+	// profile is older than this. 0 disables the nudge.
+	ProfileRefreshDays int `toml:"profile_refresh_days"`
 }
 
 // Default returns the documented defaults (DESIGN §6.1, §10.2).
@@ -86,6 +91,7 @@ func Default() *Config {
 		MaxBodyBytes:         1 << 20,
 		StreamKeepaliveSecs:  20,
 		StreamMaxPerPeer:     3,
+		ProfileRefreshDays:   7,
 	}
 }
 
@@ -116,6 +122,7 @@ func Load(path string) (*Config, error) {
 		"peer_prune_after_days": true, "audit_retention_days": true,
 		"offline_webhook_url": true, "max_body_bytes": true,
 		"stream_keepalive_secs": true, "stream_max_per_peer": true,
+		"profile_refresh_days": true,
 	}
 	for k := range raw {
 		if !known[k] {
@@ -173,6 +180,9 @@ func (c *Config) Validate() error {
 	}
 	if c.StreamMaxPerPeer < 0 {
 		return fmt.Errorf("stream_max_per_peer must be >= 0")
+	}
+	if c.ProfileRefreshDays < 0 {
+		return fmt.Errorf("profile_refresh_days must be >= 0")
 	}
 	return nil
 }

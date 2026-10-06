@@ -29,6 +29,7 @@
 | `max_body_bytes` | int | `1048576` | 请求体上限 1 MiB |
 | `stream_keepalive_secs` | int | `20` | SSE 保活间隔秒（0=用 20；上限 120，§4.4b） |
 | `stream_max_per_peer` | int | `3` | 单身份并发流上限，超限 `429`（0=用 3，§4.4b） |
+| `profile_refresh_days` | int | `7` | 简介超期天数：heartbeat 带 `profile_refresh=true` 提醒更新（0=不提醒，§8.7） |
 
 ## 最小生产配置
 

@@ -522,6 +522,24 @@ often and must not force re-onboarding. They are versioned separately:
   v<server>` badges. Forward-only recording: stale replays never clobber a newer confirmation.
 - Ongoing tasks continue under their original scope; new instructions apply to new tasks only.
 
+### 8.7 Assistant profile (self-intro for routing unassigned work)
+
+When a task has no designated recipient, the human (or a dispatching assistant) needs to pick
+one. Capabilities (`{"shell":true}`) say what a peer *can* do, not what it *usually* does.
+The profile fills that gap: one or two sentences, self-reported, distilled from the peer's
+own memory.
+
+- `peers.profile` TEXT + `profile_updated_at`. Set at register (`profile` field), refreshable
+  via heartbeat (`profile` field; empty keeps the stored value).
+- The server nudges a refresh: heartbeat responds `profile_refresh=true` when the profile is
+  empty or older than `profile_refresh_days` (default 7, 0 disables). Same channel as
+  `prompt_update`; poll/tail scripts surface it as a wake event; the assistant rewrites its
+  intro from memory and confirms via the next heartbeat carrying the new text.
+- Surfaced in `GET /peers` (and admin peers) for routing decisions, shown in the UI members
+  table with staleness tooltip, patchable via `PATCH /admin/peers/{id} {profile}`.
+- Advisory only: the relay never auto-routes on profile text. It is a display + search aid
+  for humans and dispatchers, not a scheduler input.
+
 ---
 
 ## 9. Web UI Design

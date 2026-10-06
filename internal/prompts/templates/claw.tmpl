@@ -13,7 +13,7 @@
 ```bash
 RELAY="{{.ServerAddr}}"; ME="{{.PeerID}}"
 resp=$(curl -s $RELAY/register -H 'Content-Type: application/json' \
-  -d '{"code":"{{.InviteCode}}","id":"'$ME'","agent_type":"claw","protocol_version":{{.ProtocolVersion}},"capabilities":"{\"shell\":true,\"polling\":true,\"background\":true}"}')
+  -d '{"code":"{{.InviteCode}}","id":"'$ME'","agent_type":"claw","protocol_version":{{.ProtocolVersion}},"capabilities":"{\"shell\":true,\"polling\":true,\"background\":true}","profile":"一句话自我介绍：会什么 + 常干什么，供服务端路由未指派任务"}')
 TOKEN="$(echo "$resp" | jq -r .token)"
 mkdir -p ~/workspace/task-relay
 printf '%s' "$ME" > ~/workspace/task-relay/identity
@@ -102,6 +102,14 @@ mv ~/workspace/task-relay/.prompt_version.staged ~/workspace/task-relay/.prompt_
 ```
   下次 heartbeat 即上报新版本，服务端停止提醒。未确认前每次轮询都会再唤醒你一次。
 - 新指令与旧任务不冲突：进行中的任务按原 scope 继续，只对新任务用新守则。
+
+## 7.6 自我简介（供服务端路由未指派任务）
+- 注册时你已带了一句话 profile（会什么 + 常干什么）。服务端把它展示在成员表，
+  派任务没指明人选时人类/其他助手按简介挑人。
+- 服务端每周提醒一次更新（heartbeat 返回 `profile_refresh=true`，轮询/tail 脚本会
+  随唤醒事件告诉你）：你从自己的 memory 里提炼近一周常干的任务，重写一句话简介，
+  下次 heartbeat 带上新 profile 即确认（脚本会自动带，不用你手动 curl）。
+  简介是路由依据，如实写，不要夸大能力。
 
 ## 8. 失败上报
 - 贴出原命令与原样错误给用户，不要编造协议细节。

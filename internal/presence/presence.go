@@ -27,6 +27,10 @@ type PeerView struct {
 	// and when it confirmed. UI shows laggards; server nudges via heartbeat.
 	PromptVersion   int   `json:"prompt_version"`
 	PromptUpdatedAt int64 `json:"prompt_updated_at,omitempty"`
+	// Assistant profile (§8.7): self-reported capabilities + usual tasks
+	// for routing unassigned work. Shown in UI, searchable via /peers.
+	Profile          string `json:"profile,omitempty"`
+	ProfileUpdatedAt int64  `json:"profile_updated_at,omitempty"`
 }
 
 // Service tracks last-seen and fires offline transitions.
@@ -58,7 +62,9 @@ func New(st store.Store, onlineTimeoutSecs int64, webhookURL string) *Service {
 // The wasOnline baseline suppresses a spurious offline event on first sight.
 // promptVersion is the peer's confirmed worker-instruction revision (§8.6);
 // <=0 means "not reporting" (old client) and leaves the stored value alone.
-func (s *Service) Beat(peerID string, protocolVer int, capabilities string, promptVersion int, now int64) error {
+// profile is the peer's self-reported intro (§8.7); empty keeps the stored
+// value, non-empty overwrites with now as profile_updated_at.
+func (s *Service) Beat(peerID string, protocolVer int, capabilities string, promptVersion int, profile string, now int64) error {
 	if err := s.st.TouchPeer(peerID, now); err != nil {
 		return err
 	}
@@ -77,6 +83,9 @@ func (s *Service) Beat(peerID string, protocolVer int, capabilities string, prom
 	}
 	if promptVersion > 0 {
 		_ = s.st.UpdatePeerPrompt(peerID, promptVersion, now)
+	}
+	if profile != "" {
+		_ = s.st.UpdatePeerProfile(peerID, profile, now)
 	}
 	// First sighting: mark online baseline so we don't fire a spurious
 	// offline event before the first timeout window passes.
@@ -102,6 +111,7 @@ func (s *Service) List(now int64) ([]*PeerView, error) {
 			Status: p.Status, LastSeen: p.LastSeen, Online: online,
 			ProtocolVer:   p.ProtocolVer,
 			PromptVersion: p.PromptVersion, PromptUpdatedAt: p.PromptUpdatedAt,
+			Profile: p.Profile, ProfileUpdatedAt: p.ProfileUpdatedAt,
 		}
 		var caps any
 		if err := json.Unmarshal([]byte(orEmptyJSON(p.Capabilities)), &caps); err == nil {
