@@ -130,14 +130,22 @@ func bearer(r *http.Request) string {
 	return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 }
 
-func clientIP(r *http.Request) string {
-	if h := r.Header.Get("X-Forwarded-For"); h != "" {
-		parts := strings.Split(h, ",")
-		return strings.TrimSpace(parts[0])
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// clientIP resolves the peer IP. X-Forwarded-For is trusted only when the
+// TCP peer is inside the configured trusted-proxy CIDR (default loopback);
+// otherwise any client could spoof audit/last_ip via a forged header.
+func (s *Server) clientIP(r *http.Request) string {
+	remote := r.RemoteAddr
+	host, _, err := net.SplitHostPort(remote)
 	if err != nil {
-		return r.RemoteAddr
+		host = remote
+	}
+	if h := r.Header.Get("X-Forwarded-For"); h != "" {
+		if ip := net.ParseIP(host); ip != nil && s.cfg.TrustedProxyNet().Contains(ip) {
+			parts := strings.Split(h, ",")
+			if first := strings.TrimSpace(parts[0]); first != "" {
+				return first
+			}
+		}
 	}
 	return host
 }
@@ -155,7 +163,7 @@ func (s *Server) authed(w http.ResponseWriter, r *http.Request) (*store.Peer, *s
 		writeErr(w, 401, "unauthorized")
 		return nil, nil
 	}
-	s.auth.Touch(t.ID, clientIP(r))
+	s.auth.Touch(t.ID, s.clientIP(r))
 	return p, t
 }
 
@@ -466,7 +474,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: "agent_relay_admin", Value: tok, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 3600,
-		Secure: s.cfg.Public,
+		Secure: s.cfg.Public || s.cfg.BehindProxy,
 	})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -18,6 +19,21 @@ type Config struct {
 	Public     bool   `toml:"public"`
 	TLSCert    string `toml:"tls_cert"`
 	TLSKey     string `toml:"tls_key"`
+
+	// BehindProxy declares that TLS terminates at a reverse proxy
+	// (caddy/nginx/traefik) in front of this server. Effects:
+	//   - PublicAddr is advertised to assistants (onboarding prompts)
+	//     instead of the bind address;
+	//   - admin cookies get Secure (the outside is HTTPS even though the
+	//     local hop is plain HTTP);
+	//   - client IPs are read from X-Forwarded-For (RemoteAddr would
+	//     always be the proxy otherwise, poisoning audit/token last_ip).
+	// The proxy itself is configured out-of-band (install.sh writes the
+	// caddy site file; see docs/DEPLOY.md for nginx equivalents).
+	// Requires Public=false (double TLS is a misconfiguration).
+	BehindProxy  bool   `toml:"behind_proxy"`
+	PublicAddr   string `toml:"public_addr"`   // e.g. https://relay.example.com
+	TrustedProxy string `toml:"trusted_proxy"` // CIDR allowed to set X-Forwarded-For, default 127.0.0.1/32
 
 	AdminPasswordHash string `toml:"admin_password_hash"`
 
@@ -76,6 +92,7 @@ func Load(path string) (*Config, error) {
 	known := map[string]bool{
 		"listen_addr": true, "port": true, "data_dir": true,
 		"public": true, "tls_cert": true, "tls_key": true,
+		"behind_proxy": true, "public_addr": true, "trusted_proxy": true,
 		"admin_password_hash": true, "protocol": true, "min_client": true,
 		"online_timeout_secs": true, "verify_timeout_secs": true,
 		"fuse_max_messages": true, "fuse_max_age_secs": true,
@@ -105,6 +122,20 @@ func (c *Config) Validate() error {
 	if c.Public && (c.TLSCert == "" || c.TLSKey == "") {
 		return fmt.Errorf("public mode requires tls_cert and tls_key")
 	}
+	if c.BehindProxy {
+		if c.Public {
+			return fmt.Errorf("behind_proxy and public are mutually exclusive (TLS would terminate twice)")
+		}
+		if c.PublicAddr == "" {
+			return fmt.Errorf("behind_proxy requires public_addr (e.g. https://relay.example.com)")
+		}
+		if !strings.HasPrefix(c.PublicAddr, "https://") {
+			return fmt.Errorf("public_addr must start with https://")
+		}
+		if _, _, err := net.ParseCIDR(orCIDR(c.TrustedProxy)); err != nil {
+			return fmt.Errorf("bad trusted_proxy CIDR: %w", err)
+		}
+	}
 	if c.FuseMaxMessages < 2 {
 		return fmt.Errorf("fuse_max_messages must be >= 2")
 	}
@@ -130,6 +161,23 @@ func (c *Config) BindAddr() string {
 		}
 		return fmt.Sprintf("%s:%d", c.ListenAddr, c.Port)
 	}
+}
+
+// orCIDR defaults an empty trusted_proxy to loopback-only.
+func orCIDR(s string) string {
+	if s == "" {
+		return "127.0.0.1/32"
+	}
+	return s
+}
+
+// TrustedProxyNet parses the configured trusted-proxy CIDR.
+func (c *Config) TrustedProxyNet() *net.IPNet {
+	_, n, err := net.ParseCIDR(orCIDR(c.TrustedProxy))
+	if err != nil {
+		_, n, _ = net.ParseCIDR("127.0.0.1/32")
+	}
+	return n
 }
 
 func tailscaleIPv4() string {

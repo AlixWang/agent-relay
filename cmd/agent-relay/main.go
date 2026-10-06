@@ -80,13 +80,17 @@ func main() {
 	v := verify.New(st, int64(cfg.VerifyTimeoutSecs))
 
 	bind := cfg.BindAddr()
-	scheme := "http"
-	if cfg.Public {
-		scheme = "https"
+	// serverAddr is what assistants see in onboarding prompts. Behind a
+	// reverse proxy it is the public address, not the local bind.
+	serverAddr := cfg.PublicAddr
+	if serverAddr == "" {
+		scheme := "http"
+		if cfg.Public {
+			scheme = "https"
+		}
+		// bind is ip:port already.
+		serverAddr = scheme + "://" + bind
 	}
-	host := bind
-	// bind is ip:port already.
-	serverAddr := scheme + "://" + host
 
 	gw := gateway.New(cfg, st, au, q, p, v, serverAddr)
 	gw.SetGuard(g)

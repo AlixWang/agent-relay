@@ -9,7 +9,14 @@ curl -sSL https://raw.githubusercontent.com/AlixWang/agent-relay/main/deploy/ins
 ```
 
 交互向导依次确认：版本（默认最新 Release）→ 部署方式（systemd 二进制 / docker 镜像）→
-网络模式（tailscale 内网 / 公网 TLS / 仅本机）→ admin 密码 → 端口/数据目录。
+网络模式（tailscale 内网 / 公网 TLS / 仅本机 / caddy 反代共存）→ admin 密码 → 端口/数据目录。
+
+| 网络模式 | 适用场景 | TLS 谁终止 | relay 监听 |
+|---|---|---|---|
+| tailscale | 无公网需求，助手全在 tailnet | 无（内网明文） | tailnet IP |
+| public | 干净机器，80 空闲或已有证书 | relay 自己（certbot 申请） | 0.0.0.0:443 |
+| loopback | 本机调试 | 无 | 127.0.0.1 |
+| caddy | 80/443 已被 caddy 占用（如本机有 v2ray/网站） | caddy 自动 HTTPS | 127.0.0.1 明文，caddy 反代公网域名 |
 脚本自动完成：SHA256 校验 → 写 config（含 bcrypt hash）→ 建用户/systemd unit 或起容器 → 健康检查。
 
 ```bash

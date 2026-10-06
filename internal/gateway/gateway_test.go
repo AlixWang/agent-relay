@@ -389,6 +389,30 @@ func TestAdminExportThread(t *testing.T) {
 	}
 }
 
+func TestClientIPTrustBoundary(t *testing.T) {
+	f := newFixture(t)
+	// Direct connection with forged XFF: ignored (peer not in trusted CIDR).
+	req := httptest.NewRequest("GET", "/peers", nil)
+	req.RemoteAddr = "203.0.113.9:1234"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	if got := f.srv.clientIP(req); got != "203.0.113.9" {
+		t.Fatalf("untrusted XFF honored: %s", got)
+	}
+	// Via loopback proxy: first XFF entry wins.
+	req2 := httptest.NewRequest("GET", "/peers", nil)
+	req2.RemoteAddr = "127.0.0.1:5678"
+	req2.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
+	if got := f.srv.clientIP(req2); got != "203.0.113.9" {
+		t.Fatalf("trusted XFF ignored: %s", got)
+	}
+	// No header: RemoteAddr host.
+	req3 := httptest.NewRequest("GET", "/peers", nil)
+	req3.RemoteAddr = "127.0.0.1:9999"
+	if got := f.srv.clientIP(req3); got != "127.0.0.1" {
+		t.Fatalf("direct ip: %s", got)
+	}
+}
+
 func TestAdminConfigSnapshot(t *testing.T) {
 	f := newFixture(t)
 	admin := f.adminLogin(t)

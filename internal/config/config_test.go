@@ -68,6 +68,37 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestBehindProxyValidation(t *testing.T) {
+	cfg := Default()
+	cfg.BehindProxy = true
+	cfg.Public = true
+	cfg.PublicAddr = "https://relay.example.com"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("behind_proxy+public must conflict")
+	}
+	cfg = Default()
+	cfg.BehindProxy = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("behind_proxy without public_addr must fail")
+	}
+	cfg.PublicAddr = "http://relay.example.com"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("non-https public_addr must fail")
+	}
+	cfg.PublicAddr = "https://relay.example.com"
+	cfg.TrustedProxy = "not-a-cidr"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("bad trusted_proxy must fail")
+	}
+	cfg.TrustedProxy = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid behind_proxy: %v", err)
+	}
+	if got := cfg.TrustedProxyNet().String(); got != "127.0.0.1/32" {
+		t.Fatalf("default trusted proxy: %s", got)
+	}
+}
+
 func TestBindAddr(t *testing.T) {
 	cfg := Default()
 	cfg.ListenAddr = "127.0.0.1"

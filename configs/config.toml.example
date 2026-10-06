@@ -13,6 +13,14 @@ public = false
 tls_cert = ""
 tls_key = ""
 
+# 反代共存（caddy/nginx/traefik 在前终止 TLS）。与 public 互斥。
+# 此时 relay 只听本机明文，对外地址走 public_addr（onboarding prompt
+# 与 serverAddr 播报用它）；admin cookie 照样 Secure；X-Forwarded-For
+# 只信任 trusted_proxy 网段（默认仅本机）。
+behind_proxy = false
+public_addr = ""        # 如 https://relay.example.com（behind_proxy=true 必填）
+trusted_proxy = ""      # 允许设 XFF 的 CIDR，空=127.0.0.1/32
+
 # bcrypt hash for the admin UI session login. Generate with:
 #   agent-relay -hash 'your-strong-password'
 # If empty, the server prints a one-time random password on startup
