@@ -41,6 +41,38 @@ func TestAllTypesRender(t *testing.T) {
 	}
 }
 
+func TestNetworkNoteModes(t *testing.T) {
+	if got := NetworkNoteFor(false, "", false); !strings.Contains(got, "tailnet") {
+		t.Fatalf("tailscale default: %q", got)
+	}
+	if got := NetworkNoteFor(false, "", true); !strings.Contains(got, "TLS") {
+		t.Fatalf("public direct: %q", got)
+	}
+	if got := NetworkNoteFor(true, "https://relay.example.com", false); !strings.Contains(got, "反代") {
+		t.Fatalf("behind proxy: %q", got)
+	}
+}
+
+func TestNoHardcodedTailscaleAssumption(t *testing.T) {
+	// Rendered prompts must not contradict a public/proxy deployment:
+	// no bare "Tailscale" branding, no tailnet-only claims.
+	for _, typ := range Types() {
+		out := render(t, typ, Data{
+			InviteCode:  "inv_test",
+			ServerAddr:  "https://relay.example.com",
+			NetworkNote: NetworkNoteFor(true, "https://relay.example.com", false),
+		})
+		for _, bad := range []string{"基于 Tailscale", "只监听 tailnet", "能上 tailnet"} {
+			if strings.Contains(out, bad) {
+				t.Fatalf("%s contains stale tailscale copy %q", typ, bad)
+			}
+		}
+		if !strings.Contains(out, "反代") {
+			t.Fatalf("%s missing proxy note", typ)
+		}
+	}
+}
+
 func TestUnknownTypeFallsBack(t *testing.T) {
 	out := render(t, "nope", Data{InviteCode: "inv_x"})
 	if !strings.Contains(out, "agent_type") && !strings.Contains(out, "generic") {

@@ -926,6 +926,7 @@ func (s *Server) handleAdminPrompts(w http.ResponseWriter, r *http.Request) {
 		prompt, err := prompts.Render(req.AgentType, prompts.Data{
 			ServerAddr: s.serverAddr, PeerID: req.PeerID,
 			ProtocolVersion: s.cfg.Protocol, IsReconfigure: true,
+			NetworkNote: prompts.NetworkNoteFor(s.cfg.BehindProxy, s.cfg.PublicAddr, s.cfg.Public),
 		})
 		if err != nil {
 			writeErr(w, 500, "render failed")
@@ -954,6 +955,7 @@ func (s *Server) handleAdminPrompts(w http.ResponseWriter, r *http.Request) {
 	prompt, err := prompts.Render(req.AgentType, prompts.Data{
 		ServerAddr: s.serverAddr, InviteCode: code, PeerID: peerID,
 		ProtocolVersion: s.cfg.Protocol,
+		NetworkNote:     prompts.NetworkNoteFor(s.cfg.BehindProxy, s.cfg.PublicAddr, s.cfg.Public),
 	})
 	if err != nil {
 		writeErr(w, 500, "render failed")

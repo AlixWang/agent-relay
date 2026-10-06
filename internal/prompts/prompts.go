@@ -36,6 +36,24 @@ type Data struct {
 	// IsReconfigure renders the credential/registration sections for an
 	// existing peer (protocol upgrade): reuse the saved token, skip /register.
 	IsReconfigure bool
+	// NetworkNote is a one-line parenthetical describing how the server is
+	// reached, rendered after the address. Must match the deployment:
+	// tailscale bind, public TLS, or reverse-proxy coexistence.
+	// Empty falls back to the tailscale wording (backward compatible).
+	NetworkNote string
+}
+
+// NetworkNoteFor derives the parenthetical from the effective serving mode.
+// behindProxy/publicAddr mirror the server config (behind_proxy/public_addr);
+// public mirrors direct-TLS mode. Anything else is the tailscale default.
+func NetworkNoteFor(behindProxy bool, publicAddr string, public bool) string {
+	if behindProxy && publicAddr != "" {
+		return "公网地址（经反代接入用户常开 VPS，TLS 由反代终止）"
+	}
+	if public {
+		return "公网地址（用户常开 VPS，TLS 直连）"
+	}
+	return "用户常开 VPS（只监听 tailnet）"
 }
 
 // Render returns the paste-ready prompt block for agentType.
@@ -47,6 +65,9 @@ func Render(agentType string, d Data) (string, error) {
 		agentType = "generic"
 	}
 	d.AgentType = agentType
+	if d.NetworkNote == "" {
+		d.NetworkNote = "用户常开 VPS（只监听 tailnet）"
+	}
 	if d.IsReconfigure && d.InviteCode == "" {
 		d.InviteCode = "(not needed — reuse your saved token)"
 	}

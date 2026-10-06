@@ -3,7 +3,7 @@
 与校验方法。
 
 ## 1. 背景
-- 中继地址：{{.ServerAddr}}（用户常开 VPS）
+- 中继地址：{{.ServerAddr}}（{{.NetworkNote}}）
 - 你的身份标识：`{{.PeerID}}`
 - 协议版本：{{.ProtocolVersion}}
 - 你的能力：无 shell、无定时器、无后台、无持久文件。token 由用户代为保管，
@@ -12,7 +12,7 @@
 ## 2. 凭证
 {{if .IsReconfigure}}- 沿用用户已代管的个人 token，不要重新注册、不要索取新 invite。token 丢失让用户找管理员轮换。
 - 以下注册块跳过（你已是成员）：{{else}}- 一次性邀请码：`{{.InviteCode}}`（注册用一次即废）
-- 请用户在能上 tailnet 的机器上执行注册（把 ME 换成你的身份）：
+- 请用户在能连通中继地址的机器上执行注册（把 ME 换成你的身份）：
 ```bash
 RELAY="{{.ServerAddr}}"; ME="{{.PeerID}}"
 curl -s $RELAY/register -H 'Content-Type: application/json' \
