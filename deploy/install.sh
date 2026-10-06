@@ -134,9 +134,34 @@ issue_cert() {
     warn "  2) 用 DNS 验证：certbot certonly --manual --preferred-challenges dns -d $domain"
     die "域名未指向本机，停止申请（避免 LE 限流）"
   fi
+  # 80 端口占用处理：standalone 要求 LE 能回连 http://域名/.well-known。
+  # 占用者若是 systemd 服务，临时停掉，申请完再起回来。
+  local holder=""
+  if command -v ss >/dev/null; then
+    holder="$(ss -ltnp 2>/dev/null | grep ':80 ' | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2 || true)"
+  fi
+  local stopped=""
+  if [ -n "$holder" ]; then
+    warn "80 端口被 $holder 占用"
+    if systemctl list-units --type=service --state=running 2>/dev/null | grep -q "^${holder}"; then
+      log "临时停止 $holder（证书申请完自动起回）…"
+      systemctl stop "$holder" && stopped="$holder" || warn "停 $holder 失败，尝试继续（可能仍会申请失败）"
+    else
+      die "80 端口被非 systemd 进程（$holder）占用：先停掉它再重跑；或改用 webroot/DNS 验证（见 docs/DEPLOY.md §公网 TLS 手动模式）"
+    fi
+  fi
   log "申请证书：$domain（standalone，需 80 端口空闲）…"
-  certbot certonly --standalone --non-interactive --agree-tos \
-    --register-unsafely-without-email -d "$domain" || die "证书申请失败（常见：80 端口被占 / 域名未解析到本机）"
+  if certbot certonly --standalone --non-interactive --agree-tos \
+    --register-unsafely-without-email -d "$domain"; then
+    log "证书申请成功"
+  else
+    [ -n "$stopped" ] && systemctl start "$stopped" || true
+    die "证书申请失败（排查：80 端口是否真空闲 / 域名解析是否刚改还没生效 / 防火墙是否放行 80）"
+  fi
+  if [ -n "$stopped" ]; then
+    log "恢复 $stopped…"
+    systemctl start "$stopped" || warn "$stopped 恢复失败，请手动 systemctl start $stopped"
+  fi
   # 自动续期：certbot 自带 systemd timer，一般已启用；双保险加一条 cron
   if ! crontab -l 2>/dev/null | grep -q "certbot renew"; then
     (crontab -l 2>/dev/null; echo "17 3 * * * certbot renew --quiet --deploy-hook 'systemctl reload-or-restart agent-relay' # agent-relay") | crontab - \
