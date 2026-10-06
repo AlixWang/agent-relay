@@ -276,4 +276,13 @@ $('rotBtn').onclick = async () => {
 };
 
 function refreshAll() { refreshPeers(); refreshThreads(); refreshAudit(); refreshTokens(); }
-refreshStats();
+// Page load: stats decides login vs app; on success pull every tab's data
+// (refreshStats alone only fills the topbar — that was the empty-table bug).
+(async () => {
+  try {
+    await api('/admin/stats');
+    refreshAll();
+  } catch {
+    refreshStats();
+  }
+})();
