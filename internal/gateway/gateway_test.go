@@ -791,3 +791,68 @@ func TestPermissionDenyEndsTask(t *testing.T) {
 		t.Fatalf("audit requested: %d %+v", c, out)
 	}
 }
+
+func TestPromptDistributionFlow(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+
+	// Fresh peer reports nothing: heartbeat nudges (stored 0 < current 2).
+	c, out := f.do(t, "POST", "/heartbeat", map[string]any{"id": "alice"}, f.tok["alice"])
+	if c != 200 || out["prompt_update"] != true || out["prompt_version"] == nil {
+		t.Fatalf("nudge: %d %+v", c, out)
+	}
+	// Pull the current instructions.
+	c, out = f.do(t, "GET", "/prompts/current", nil, f.tok["alice"])
+	if c != 200 || out["prompt_version"] == nil {
+		t.Fatalf("current: %d %+v", c, out)
+	}
+	prompt, _ := out["prompt"].(string)
+	if prompt == "" || !strings.Contains(prompt, "alice") {
+		t.Fatalf("prompt not personalized: %.120s", prompt)
+	}
+	if out["agent_type"] != "muse" {
+		t.Fatalf("agent_type: %+v", out)
+	}
+	// Confirm via heartbeat: nudge stops.
+	ver := int64(out["prompt_version"].(float64))
+	c, out = f.do(t, "POST", "/heartbeat",
+		map[string]any{"id": "alice", "prompt_version": ver}, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("confirm heartbeat: %d", c)
+	}
+	if _, nudged := out["prompt_update"]; nudged {
+		t.Fatalf("still nudged after confirm: %+v", out)
+	}
+	p, _ := f.srv.st.GetPeer("alice")
+	if p.PromptVersion != int(ver) || p.PromptUpdatedAt == 0 {
+		t.Fatalf("peer row: %+v", p)
+	}
+	// After confirm the stored version is current: no more nudges.
+	c, out = f.do(t, "POST", "/heartbeat", map[string]any{"id": "alice"}, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("post-confirm heartbeat: %d", c)
+	}
+	if _, nudged := out["prompt_update"]; nudged {
+		t.Fatalf("nudged after confirm: %+v", out)
+	}
+	c, _ = f.do(t, "GET", "/prompts/current", nil, "")
+	if c != 401 {
+		t.Fatalf("unauth prompt pull should 401, got %d", c)
+	}
+	// Admin peers view surfaces prompt_version.
+	admin := f.adminLogin(t)
+	c, out = f.doAuth(t, "GET", "/admin/peers", nil, admin)
+	if c != 200 {
+		t.Fatalf("admin peers: %d", c)
+	}
+	found := false
+	for _, it := range out["peers"].([]any) {
+		m := it.(map[string]any)
+		if m["id"] == "alice" && m["prompt_version"] == float64(ver) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("admin peers missing prompt_version: %+v", out)
+	}
+}

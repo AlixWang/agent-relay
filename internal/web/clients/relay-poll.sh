@@ -6,9 +6,13 @@
 #   ~/workspace/task-relay/identity   single line, e.g. muse-a
 #   ~/workspace/task-relay/.token     single line, chmod 600
 #   ~/workspace/task-relay/.last_seq  sync cursor (server seq)
+#   ~/workspace/task-relay/.prompt_version  confirmed worker-instruction rev (§8.6)
+#   ~/workspace/task-relay/prompt-update.md  latest pulled instructions (if any)
 #
 # Behaviour per poll:
-#   1. POST /heartbeat (best-effort)
+#   1. POST /heartbeat (best-effort) carrying prompt_version;
+#      prompt_update=true → GET /prompts/current, save to prompt-update.md,
+#      and wake the assistant with a prompt_update event.
 #   2. GET /messages?for=<id>&since=<seq>
 #   3. Empty → exit silently, persisting next_since.
 #      Non-empty → print items as JSON to stdout (the hook/cron wakes the
@@ -21,6 +25,8 @@ BASE="${BASE:-$HOME/workspace/task-relay}"
 TOKEN_FILE="$BASE/.token"
 ID_FILE="$BASE/identity"
 SEQ_FILE="$BASE/.last_seq"
+PROMPT_VER_FILE="$BASE/.prompt_version"
+PROMPT_UPDATE_FILE="$BASE/prompt-update.md"
 
 # Sandbox tunnel proxy (Muse sandbox quirk): if HTTPS_PROXY is set, the
 # tailnet address must go through ${HTTPS_PROXY%:*}:3130.
@@ -42,19 +48,45 @@ if [[ -z "$token" ]]; then
 fi
 since="$(cat "$SEQ_FILE" 2>/dev/null || echo 0)"
 [[ "$since" =~ ^[0-9]+$ ]] || since=0
+prompt_ver="$(cat "$PROMPT_VER_FILE" 2>/dev/null || echo 0)"
+[[ "$prompt_ver" =~ ^[0-9]+$ ]] || prompt_ver=0
 
 auth=(-H "Authorization: Bearer $token")
 
-# 1. heartbeat (best-effort, never blocks the poll)
+# 1. heartbeat (best-effort, never blocks the poll). Carries our confirmed
+# prompt_version; the server answers prompt_update=true when newer worker
+# instructions exist (§8.6).
+hb_file="$(mktemp)"
+trap 'rm -f "$hb_file" "$resp_file"' EXIT
 curl --fail --silent --max-time 10 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "${auth[@]}" \
   -X POST "$RELAY/heartbeat" \
   -H 'Content-Type: application/json' \
-  -d "{\"id\":\"$ident\"}" >/dev/null 2>&1 || true
+  -d "{\"id\":\"$ident\",\"prompt_version\":$prompt_ver}" -o "$hb_file" 2>/dev/null || true
+
+# 1b. prompt update available → pull full current instructions and stage
+# them for the assistant. The assistant applies them and confirms by
+# reporting the new version in its next heartbeat (UpdatePeerPrompt).
+update_event=""
+if jq -e '.prompt_update == true' "$hb_file" >/dev/null 2>&1; then
+  new_ver="$(jq -r '.prompt_version // 0' "$hb_file" 2>/dev/null || echo 0)"
+  if [[ "$new_ver" =~ ^[0-9]+$ ]] && [[ "$new_ver" -gt "$prompt_ver" ]]; then
+    pu_file="$(mktemp)"
+    if curl --fail --silent --max-time 20 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "${auth[@]}" \
+        -o "$pu_file" "$RELAY/prompts/current" 2>/dev/null; then
+      body="$(jq -r '.prompt // empty' "$pu_file" 2>/dev/null || true)"
+      if [[ -n "$body" ]]; then
+        printf '%s' "$body" > "$PROMPT_UPDATE_FILE"
+        printf '%s' "$new_ver" > "$PROMPT_VER_FILE.staged"
+        update_event="$(jq -nc --arg v "$new_ver" '{prompt_update: true, version: ($v | tonumber)}')"
+      fi
+    fi
+    rm -f "$pu_file"
+  fi
+fi
 
 # 2. incremental pull
 http_code="000"
 resp_file="$(mktemp)"
-trap 'rm -f "$resp_file"' EXIT
 http_code="$(curl --silent --max-time 15 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "${auth[@]}" \
   -o "$resp_file" -w '%{http_code}' \
   "$RELAY/messages?for=$ident&since=$since" 2>/dev/null || echo 000)"
@@ -81,9 +113,15 @@ next_since="$(jq -r '.next_since // 0' "$resp_file" 2>/dev/null || echo "$since"
 printf '%s' "$next_since" > "$SEQ_FILE"
 
 count="$(jq -r '.items | length' "$resp_file" 2>/dev/null || echo 0)"
-if [[ "$count" == "0" ]]; then
+# Staged prompt update with no message traffic still needs to wake the
+# assistant — otherwise new instructions sit unread until the next task.
+if [[ "$count" == "0" && -z "$update_event" ]]; then
   exit 0
 fi
 
 # Work present: hand the full items to the waker.
-jq -c '{tasks: [.items[]?]}' "$resp_file"
+if [[ -n "$update_event" ]]; then
+  jq -c --argjson pu "$update_event" '{tasks: [.items[]?], prompt_update: $pu}' "$resp_file"
+else
+  jq -c '{tasks: [.items[]?]}' "$resp_file"
+fi

@@ -28,7 +28,7 @@ func TestBeatAndList(t *testing.T) {
 	}
 	s := New(st, 300, "")
 	now := int64(2000)
-	if err := s.Beat("a", 1, `{"shell":true}`, now); err != nil {
+	if err := s.Beat("a", 1, `{"shell":true}`, 0, now); err != nil {
 		t.Fatalf("beat: %v", err)
 	}
 	views, err := s.List(now)
@@ -105,7 +105,7 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 		t.Fatal("duplicate audit")
 	}
 	// Heartbeat then sweep: online again, no event; next drop fires again.
-	if err := s.Beat("a", 0, "", 2500); err != nil {
+	if err := s.Beat("a", 0, "", 0, 2500); err != nil {
 		t.Fatal(err)
 	}
 	s.Sweep(2550)
@@ -115,5 +115,42 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 	s.Sweep(2900)
 	if calls.Load() != 2 {
 		t.Fatalf("second transition should fire: %d", calls.Load())
+	}
+}
+
+func TestPromptVersionForwardOnly(t *testing.T) {
+	st := openTest(t)
+	if err := st.CreatePeer(&store.Peer{ID: "a", AgentType: "muse", Status: "active", CreatedAt: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, 300, "")
+	now := int64(3000)
+	if err := s.Beat("a", 0, "", 2, now); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := st.GetPeer("a")
+	if p.PromptVersion != 2 || p.PromptUpdatedAt != now {
+		t.Fatalf("prompt not recorded: %+v", p)
+	}
+	// Stale replay must not clobber.
+	if err := s.Beat("a", 0, "", 1, now+10); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = st.GetPeer("a")
+	if p.PromptVersion != 2 || p.PromptUpdatedAt != now {
+		t.Fatalf("stale clobbered: %+v", p)
+	}
+	// Zero means "not reporting": untouched.
+	if err := s.Beat("a", 0, "", 0, now+20); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = st.GetPeer("a")
+	if p.PromptVersion != 2 {
+		t.Fatalf("zero clobbered: %+v", p)
+	}
+	// List surfaces the fields.
+	views, _ := s.List(now + 20)
+	if len(views) != 1 || views[0].PromptVersion != 2 {
+		t.Fatalf("list: %+v", views)
 	}
 }

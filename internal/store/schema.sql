@@ -12,6 +12,12 @@ CREATE TABLE IF NOT EXISTS peers (
     created_at    INTEGER NOT NULL,
     last_seen     INTEGER DEFAULT 0
 );
+-- Prompt distribution (§8.6): prompt_version tracks which worker-instruction
+-- revision each peer runs. Bumped server-side on template change; peers
+-- report theirs in heartbeat and pull the delta via /prompts/current.
+-- ALTERs so pre-existing databases migrate on boot like the §6.5 columns.
+ALTER TABLE peers ADD COLUMN prompt_version INTEGER DEFAULT 0;
+ALTER TABLE peers ADD COLUMN prompt_updated_at INTEGER DEFAULT 0;
 -- NOTE: tokens.peer_id intentionally has NO foreign key to peers(id).
 -- Tokens outlive peers by design (DESIGN §10.2): peers are pruned after
 -- peer_prune_after_days, tokens persist until revoked so a returning

@@ -19,14 +19,16 @@ var schemaSQL string
 // ---- Domain types (DESIGN §5.1) ----
 
 type Peer struct {
-	ID           string
-	DisplayName  string
-	AgentType    string
-	ProtocolVer  int
-	Capabilities string // JSON
-	Status       string // pending|verifying|active|suspended|failed
-	CreatedAt    int64
-	LastSeen     int64
+	ID              string
+	DisplayName     string
+	AgentType       string
+	ProtocolVer     int
+	Capabilities    string // JSON
+	Status          string // pending|verifying|active|suspended|failed
+	CreatedAt       int64
+	LastSeen        int64
+	PromptVersion   int   // worker-instruction revision the peer runs (§8.6)
+	PromptUpdatedAt int64 // when the peer confirmed the current revision
 }
 
 type TokenRow struct {
@@ -110,6 +112,9 @@ type Store interface {
 	UpdatePeerStatus(id, status string) error
 	UpdatePeerMeta(id, displayName string) error
 	UpdatePeerCapabilities(id string, protocolVer int, caps string) error
+	// UpdatePeerPrompt records a peer's confirmed worker-instruction
+	// revision (§8.6). Only moves forward: stale replays are ignored.
+	UpdatePeerPrompt(id string, promptVersion int, ts int64) error
 	TouchPeer(id string, ts int64) error
 	PrunePeers(olderThan int64) (int64, error)
 	// DeletePeer removes the peer row, revokes all its tokens and clears
@@ -284,8 +289,10 @@ func (s *sqliteStore) CreatePeer(p *Peer) error {
 
 func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 	var p Peer
-	err := s.db.QueryRow(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen FROM peers WHERE id=?`, id).
-		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen)
+	err := s.db.QueryRow(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen,
+		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0) FROM peers WHERE id=?`, id).
+		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
+			&p.PromptVersion, &p.PromptUpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -296,7 +303,8 @@ func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 }
 
 func (s *sqliteStore) ListPeers() ([]*Peer, error) {
-	rows, err := s.db.Query(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen FROM peers ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen,
+		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0) FROM peers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +312,8 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 	var out []*Peer
 	for rows.Next() {
 		var p Peer
-		if err := rows.Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen); err != nil {
+		if err := rows.Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
+			&p.PromptVersion, &p.PromptUpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
@@ -324,6 +333,14 @@ func (s *sqliteStore) UpdatePeerMeta(id, displayName string) error {
 
 func (s *sqliteStore) UpdatePeerCapabilities(id string, protocolVer int, caps string) error {
 	_, err := s.db.Exec(`UPDATE peers SET protocol_ver=?, capabilities=? WHERE id=?`, protocolVer, caps, id)
+	return err
+}
+
+func (s *sqliteStore) UpdatePeerPrompt(id string, promptVersion int, ts int64) error {
+	// Forward-only: a delayed heartbeat carrying an older revision must not
+	// clobber a newer confirmation.
+	_, err := s.db.Exec(`UPDATE peers SET prompt_version=?, prompt_updated_at=?
+		WHERE id=? AND COALESCE(prompt_version,0)<=?`, promptVersion, ts, id, promptVersion)
 	return err
 }
 

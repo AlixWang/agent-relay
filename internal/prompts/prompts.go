@@ -97,5 +97,12 @@ func Render(agentType string, d Data) (string, error) {
 	return buf.String(), nil
 }
 
+// PromptVersion is the current worker-instruction revision (§8.6).
+// Bump on ANY template change (B-side or A-side contract wording counts).
+// Peers report theirs in heartbeat; the server tells laggards to pull
+// /prompts/current. Independent from protocol_version: instruction updates
+// must not force re-registration.
+const PromptVersion = 2
+
 // Types returns the supported agent types for the UI picker.
 func Types() []string { return []string{"muse", "hermes", "claw", "generic"} }

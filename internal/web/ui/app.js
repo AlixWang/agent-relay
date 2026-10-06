@@ -22,6 +22,14 @@ const statusBadge = (st) => {
   const cls = st === 'active' ? 'ok' : (st === 'suspended' || st === 'failed' ? 'bad' : 'warn');
   return `<span class="badge ${cls}">${esc(st)}</span>`;
 };
+/* ---------- 指令版本徽章（§8.6）：服务端版本由 /admin/stats 透出 ---------- */
+let serverPromptVersion = 0;
+const promptBadge = (p) => {
+  const v = p.prompt_version ?? 0;
+  if (!serverPromptVersion || v >= serverPromptVersion) return `<span class="badge ok">v${v}</span>`;
+  const when = p.prompt_updated_at ? fmtTime(p.prompt_updated_at) : '从未';
+  return `<span class="badge warn" title="确认于 ${esc(when)}">v${v} → v${serverPromptVersion}</span>`;
+};
 const caps = (c) => {
   if (!c || typeof c !== 'object') return '<span class="muted small">—</span>';
   const keys = Object.keys(c).filter((k) => c[k]);
@@ -101,6 +109,7 @@ async function refreshStats() {
     const s = await api('/admin/stats');
     $('ver').textContent = `v2 · protocol ${s.protocol} · ${(s.db_bytes / 1024).toFixed(0)} KiB · seq ${s.max_seq}`;
     $('dbinfo').textContent = `在线 ${s.peers_online}/${s.peers_total}`;
+    if (s.prompt_version) serverPromptVersion = s.prompt_version;
     showApp();
     return true;
   } catch {
@@ -126,6 +135,7 @@ async function refreshPeers() {
     <td><span class="dot ${p.online ? 'on' : 'off'}"></span>${p.online ? '在线' : '离线' + (p.offline_secs ? ' ' + Math.floor(p.offline_secs / 60) + 'm' : '')}</td>
     <td>${esc(ago(p.last_seen))}</td>
     <td>v${p.protocol_version ?? '?'}</td>
+    <td>${promptBadge(p)}</td>
     <td>${caps(p.capabilities)}</td>
     <td class="td-actions">
       <button class="btn btn-ghost btn-sm" data-act="suspend" data-id="${esc(p.id)}">${p.status === 'suspended' ? '解封' : '停用'}</button>

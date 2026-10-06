@@ -73,6 +73,9 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("POST /heartbeat", s.handleHeartbeat)
 	mux.HandleFunc("GET /peers", s.handlePeers)
 	mux.HandleFunc("POST /verify/smoke", s.handleSmoke)
+	// Prompt distribution (§8.6): peers pull worker-instruction updates
+	// here when heartbeat signals prompt_update. Authed, per-identity.
+	mux.HandleFunc("GET /prompts/current", s.handlePromptCurrent)
 
 	mux.HandleFunc("POST /admin/login", s.handleAdminLogin)
 	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)
@@ -404,6 +407,10 @@ type heartbeatReq struct {
 	ID              string `json:"id"`
 	ProtocolVersion int    `json:"protocol_version"`
 	Capabilities    string `json:"capabilities"`
+	// PromptVersion is the peer's confirmed worker-instruction revision
+	// (§8.6). The response carries prompt_update=true when the server
+	// runs a newer revision and the peer should pull /prompts/current.
+	PromptVersion int `json:"prompt_version"`
 }
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -430,7 +437,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if caps == "" {
 		caps = peer.Capabilities
 	}
-	if err := s.presence.Beat(peer.ID, pv, caps, time.Now().Unix()); err != nil {
+	if err := s.presence.Beat(peer.ID, pv, caps, req.PromptVersion, time.Now().Unix()); err != nil {
 		writeErr(w, 500, "heartbeat failed")
 		return
 	}
@@ -438,7 +445,12 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if p2 != nil && !s.checkVersion(w, p2) {
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true})
+	resp := map[string]any{"ok": true}
+	if p2 != nil && p2.PromptVersion < prompts.PromptVersion {
+		resp["prompt_update"] = true
+		resp["prompt_version"] = prompts.PromptVersion
+	}
+	writeJSON(w, 200, resp)
 }
 
 func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
@@ -455,6 +467,35 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "peers": views})
+}
+
+// handlePromptCurrent serves the worker-instruction delta (§8.6).
+// The peer pulls this when heartbeat signals prompt_update, applies the
+// instructions, and confirms by reporting the new prompt_version in its
+// next heartbeat. The payload is the full current worker section for the
+// peer's type (small, self-contained) — not a diff — so application is
+// "replace your §6.x with this text", idempotent on re-pull.
+func (s *Server) handlePromptCurrent(w http.ResponseWriter, r *http.Request) {
+	peer, _ := s.authed(w, r)
+	if peer == nil {
+		return
+	}
+	if !s.checkVersion(w, peer) {
+		return
+	}
+	prompt, err := prompts.Render(peer.AgentType, prompts.Data{
+		ServerAddr: s.serverAddr, PeerID: peer.ID,
+		ProtocolVersion: s.cfg.Protocol, IsReconfigure: true,
+		NetworkNote: prompts.NetworkNoteFor(s.cfg.BehindProxy, s.cfg.PublicAddr, s.cfg.Public),
+	})
+	if err != nil {
+		writeErr(w, 500, "render failed")
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "prompt_version": prompts.PromptVersion,
+		"agent_type": peer.AgentType, "prompt": prompt,
+	})
 }
 
 func (s *Server) handleSmoke(w http.ResponseWriter, r *http.Request) {
@@ -1042,6 +1083,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "db_bytes": size, "max_seq": maxSeq,
 		"peers_total": len(peers), "peers_online": online,
 		"protocol": s.cfg.Protocol, "min_client": s.cfg.MinClient,
+		"prompt_version": prompts.PromptVersion,
 	})
 }
 

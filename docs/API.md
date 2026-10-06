@@ -12,7 +12,9 @@ POST   /messages    { id, to, from, kind, in_reply_to, requires_approval, payloa
 GET    /messages?for=<id>&since=<seq>
                                    → { ok, items: [...], next_since }
 POST   /ack         { message_id, by }                        → { ok }
-POST   /heartbeat   { id, protocol_version?, capabilities? }   → { ok }
+POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version? }
+                                   → { ok, prompt_update?, prompt_version? }（有新指令时提醒拉取）
+GET    /prompts/current           → { ok, prompt_version, agent_type, prompt }（§8.6 指令下发，需鉴权）
 GET    /peers                         → { ok, peers: [{ id, display_name, agent_type, status,
                                             online, last_seen, protocol_version, capabilities }] }
 POST   /verify/smoke (as self)        → { ok, seq, smoke_id }

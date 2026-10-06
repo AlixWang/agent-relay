@@ -483,6 +483,24 @@ Only `active` peers receive broadcasts and appear as assignable in the UI. This 
 - Clients report `protocol_version` at registration and (optionally) per-heartbeat.
 - If a client's version is below `min_client`, protocol endpoints return `426 Upgrade Required` with a message directing its user to re-run the current onboarding prompt. The UI lists each peer's reported version so drift is visible before it breaks.
 
+### 8.6 Prompt distribution (worker-instruction updates without re-onboarding)
+
+`protocol_version` gates breaking changes (new required fields, removed endpoints) and forces
+re-registration. Worker-instruction wording (the §6.x守则, handshake contracts) changes far more
+often and must not force re-onboarding. They are versioned separately:
+
+- `prompts.PromptVersion` (int, bump on ANY template change) is the server's current revision.
+- Peers report their confirmed revision in every heartbeat (`prompt_version`); the heartbeat
+  response carries `prompt_update=true` + `prompt_version` when the server is newer.
+- The poller then pulls `GET /prompts/current` (authed, per-identity: full current worker text
+  for the peer's type, idempotent re-pull), stages it to `prompt-update.md` + `.prompt_version.staged`,
+  and wakes the assistant with a `prompt_update` event even when no message traffic exists.
+- The assistant applies the instructions (replace its §6.x) and confirms by moving
+  `.prompt_version.staged` → `.prompt_version`; the next heartbeat reports the new revision and
+  the server stops nudging. Unconfirmed peers are re-woken every poll; the UI shows `v<peer> →
+  v<server>` badges. Forward-only recording: stale replays never clobber a newer confirmation.
+- Ongoing tasks continue under their original scope; new instructions apply to new tasks only.
+
 ---
 
 ## 9. Web UI Design

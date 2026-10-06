@@ -23,6 +23,10 @@ type PeerView struct {
 	ProtocolVer  int    `json:"protocol_version"`
 	Capabilities any    `json:"capabilities,omitempty"`
 	OfflineSecs  int64  `json:"offline_secs,omitempty"`
+	// Prompt distribution (§8.6): which instruction revision the peer runs
+	// and when it confirmed. UI shows laggards; server nudges via heartbeat.
+	PromptVersion   int   `json:"prompt_version"`
+	PromptUpdatedAt int64 `json:"prompt_updated_at,omitempty"`
 }
 
 // Service tracks last-seen and fires offline transitions.
@@ -52,7 +56,9 @@ func New(st store.Store, onlineTimeoutSecs int64, webhookURL string) *Service {
 
 // Beat records a heartbeat and refreshes reported version/capabilities.
 // The wasOnline baseline suppresses a spurious offline event on first sight.
-func (s *Service) Beat(peerID string, protocolVer int, capabilities string, now int64) error {
+// promptVersion is the peer's confirmed worker-instruction revision (§8.6);
+// <=0 means "not reporting" (old client) and leaves the stored value alone.
+func (s *Service) Beat(peerID string, protocolVer int, capabilities string, promptVersion int, now int64) error {
 	if err := s.st.TouchPeer(peerID, now); err != nil {
 		return err
 	}
@@ -68,6 +74,9 @@ func (s *Service) Beat(peerID string, protocolVer int, capabilities string, now 
 			capabilities = peer.Capabilities
 		}
 		_ = s.st.UpdatePeerCapabilities(peerID, protocolVer, capabilities)
+	}
+	if promptVersion > 0 {
+		_ = s.st.UpdatePeerPrompt(peerID, promptVersion, now)
 	}
 	// First sighting: mark online baseline so we don't fire a spurious
 	// offline event before the first timeout window passes.
@@ -91,7 +100,8 @@ func (s *Service) List(now int64) ([]*PeerView, error) {
 		v := &PeerView{
 			ID: p.ID, DisplayName: p.DisplayName, AgentType: p.AgentType,
 			Status: p.Status, LastSeen: p.LastSeen, Online: online,
-			ProtocolVer: p.ProtocolVer,
+			ProtocolVer:   p.ProtocolVer,
+			PromptVersion: p.PromptVersion, PromptUpdatedAt: p.PromptUpdatedAt,
 		}
 		var caps any
 		if err := json.Unmarshal([]byte(orEmptyJSON(p.Capabilities)), &caps); err == nil {

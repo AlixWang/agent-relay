@@ -1,5 +1,5 @@
 -- agent-relay schema v1 (DESIGN §5.1 + §6.1 fuse watermarks + §8.4 verify
--- + §6.5 permission handshake).
+-- + §6.5 permission handshake + §8.6 prompt distribution).
 -- Human-readable reference; the binary executes internal/store/schema.sql,
 -- which must be kept identical to this file.
 
@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS peers (
     created_at    INTEGER NOT NULL,
     last_seen     INTEGER DEFAULT 0
 );
+-- Prompt distribution (§8.6).
+ALTER TABLE peers ADD COLUMN prompt_version INTEGER DEFAULT 0;
+ALTER TABLE peers ADD COLUMN prompt_updated_at INTEGER DEFAULT 0;
 -- NOTE: tokens.peer_id intentionally has NO foreign key to peers(id).
 -- Tokens outlive peers by design (DESIGN §10.2): peers are pruned after
 -- peer_prune_after_days, tokens persist until revoked so a returning
