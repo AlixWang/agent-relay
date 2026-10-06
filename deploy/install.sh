@@ -116,6 +116,34 @@ latest_tag() {
   printf '%s' "$tag"
 }
 
+# issue_cert $domain — certbot standalone 申请 + 自动续期（需 root）。
+# 要求：域名已解析到本机公网 IP，且 80 端口空闲（standalone 会临时占用）。
+issue_cert() {
+  local domain="$1" pub_ip resolved
+  command -v certbot >/dev/null || {
+    log "安装 certbot…"
+    apt-get update -qq && apt-get install -y -qq certbot || die "certbot 安装失败"
+  }
+  pub_ip="$(curl -s --max-time 10 https://api.ipify.org || true)"
+  resolved="$(getent hosts "$domain" | awk '{print $1}' | head -1 || true)"
+  log "本机公网 IP: ${pub_ip:-未知}，$domain 解析到: ${resolved:-未知}"
+  if [ -n "$pub_ip" ] && [ -n "$resolved" ] && [ "$pub_ip" != "$resolved" ]; then
+    warn "$domain 未解析到本机（$resolved vs $pub_ip）"
+    warn "若域名走了 CDN 代理（如 Cloudflare 小云朵），standalone 验证会失败："
+    warn "  1) 去 DNS 把 $domain 切到『仅 DNS』（灰云），等生效；或"
+    warn "  2) 用 DNS 验证：certbot certonly --manual --preferred-challenges dns -d $domain"
+    die "域名未指向本机，停止申请（避免 LE 限流）"
+  fi
+  log "申请证书：$domain（standalone，需 80 端口空闲）…"
+  certbot certonly --standalone --non-interactive --agree-tos \
+    --register-unsafely-without-email -d "$domain" || die "证书申请失败（常见：80 端口被占 / 域名未解析到本机）"
+  # 自动续期：certbot 自带 systemd timer，一般已启用；双保险加一条 cron
+  if ! crontab -l 2>/dev/null | grep -q "certbot renew"; then
+    (crontab -l 2>/dev/null; echo "17 3 * * * certbot renew --quiet --deploy-hook 'systemctl reload-or-restart agent-relay' # agent-relay") | crontab - \
+      && log "已加 cron 自动续期（每天 3:17，续期后 reload 服务）" || warn "cron 写入失败，请手动配续期"
+  fi
+}
+
 # ---- 1. 版本 ----
 if [ -z "$VERSION" ]; then
   if [ "$YES" -eq 1 ]; then VERSION="$(latest_tag)"; log "使用最新版本 $VERSION"
@@ -153,24 +181,32 @@ case "$NET" in
     fi
     ;;
   public)
-    [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ] || {
-      [ "$YES" -eq 1 ] && die "公网模式需 --tls-cert/--tls-key"
-      cat >&2 <<'EOF'
-公网模式需要：一个已解析到本机公网 IP 的域名 + TLS 证书文件。
-还没有证书？先申请（Debian/Ubuntu，要求域名已解析到本机）：
-  sudo apt install certbot
-  sudo certbot certonly --standalone -d relay.example.com
-证书一般在 /etc/letsencrypt/live/<域名>/ 下：
-  fullchain.pem（证书）、privkey.pem（私钥）
-还没有域名？直接重跑本脚本选 tailscale 内网模式（选项 1，无需证书）。
-注意：公网暴露面更大，务必设置强 admin 密码并及时续期证书。
-EOF
-      TLS_CERT="$(ask "TLS 证书路径" "")"
-      TLS_KEY="$(ask "TLS 私钥路径" "")"
-      [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ] || die "公网模式必须提供证书（或重跑脚本选 tailscale 模式）"
-    }
-    [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ] || die "证书文件不存在"
-    LISTEN="0.0.0.0"
+    if [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; then
+      [ "$YES" -eq 1 ] && die "公网模式需 --tls-cert/--tls-key（或交互运行走申请向导）"
+      echo "证书：1) 我已有证书文件，手动填路径  2) 用域名自动申请（certbot，需 80 端口空闲）  3) 回到 tailscale 内网模式" >&2
+      CERT_CHOICE="$(ask "选 [1/2/3]" "2")"
+      case "$CERT_CHOICE" in
+        1)
+          TLS_CERT="$(ask "TLS 证书路径（fullchain.pem）" "")"
+          TLS_KEY="$(ask "TLS 私钥路径（privkey.pem）" "")"
+          [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ] || die "证书路径不能为空"
+          ;;
+        3) NET=tailscale; LISTEN="auto"
+          log "已切回 tailscale 模式"
+          ;;
+        *)
+          DOMAIN="$(ask "域名（如 relay.example.com）" "")"
+          [ -n "$DOMAIN" ] || die "域名不能为空"
+          issue_cert "$DOMAIN"
+          TLS_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+          TLS_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+          ;;
+      esac
+    fi
+    if [ "$NET" = "public" ]; then
+      [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ] || die "证书文件不存在：$TLS_CERT / $TLS_KEY"
+      LISTEN="0.0.0.0"
+    fi
     ;;
   loopback) LISTEN="127.0.0.1";;
   *) die "--net 只能是 tailscale|public|loopback";;
