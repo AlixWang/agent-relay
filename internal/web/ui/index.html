@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-relay · 运维控制台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>agent-relay <span id="ver"></span></h1>
+  <div id="loginbar">
+    <input id="pw" type="password" placeholder="admin password" autocomplete="current-password">
+    <button id="loginbtn">登录</button>
+    <button id="logoutbtn" hidden>退出</button>
+    <span id="dbinfo"></span>
+  </div>
+</header>
+<nav>
+  <button data-tab="members" class="active">成员</button>
+  <button data-tab="prompts">邀请 &amp; Prompt</button>
+  <button data-tab="threads">消息 &amp; 线程</button>
+  <button data-tab="audit">审计 &amp; Token</button>
+</nav>
+<main>
+  <section id="tab-members">
+    <div class="row">
+      <button id="refreshPeers">刷新</button>
+      <span id="peerSummary"></span>
+    </div>
+    <table id="peerTable">
+      <thead><tr><th>身份</th><th>类型</th><th>状态</th><th>在线</th><th>最后在线</th><th>协议</th><th>能力</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+  <section id="tab-prompts" hidden>
+    <div class="card">
+      <h2>生成邀请 &amp; Onboarding Prompt</h2>
+      <label>类型
+        <select id="pType">
+          <option value="muse">muse</option>
+          <option value="hermes">hermes</option>
+          <option value="claw">claw</option>
+          <option value="generic">generic</option>
+        </select>
+      </label>
+      <label>预设身份（可选） <input id="pPeer" placeholder="muse-c"></label>
+      <button id="genPrompt">生成邀请 &amp; Prompt</button>
+      <p class="hint">流程：生成 → 把 prompt 粘贴给新助手 → 等成员表状态变 <b>active</b>（冒烟验证通过）。</p>
+      <div id="promptOut" hidden>
+        <p>邀请码：<code id="inviteCode"></code>（一次有效，请即刻使用）</p>
+        <button id="copyPrompt">复制 Prompt</button>
+        <pre id="promptText"></pre>
+      </div>
+    </div>
+    <div class="card">
+      <h2>已有成员重配 Prompt（协议升级用）</h2>
+      <label>身份 <input id="rPeer" placeholder="muse-a"></label>
+      <button id="genReconf">生成重配 Prompt（沿用原 token）</button>
+      <pre id="reconfText"></pre>
+    </div>
+  </section>
+  <section id="tab-threads" hidden>
+    <div class="row">
+      <button id="refreshThreads">刷新线程</button>
+      <span class="hint">熔断线程可一键 reset（保留历史，从当前 max seq 重计）。</span>
+    </div>
+    <div class="row">
+      <input id="qSearch" placeholder="搜索 payload 全文" style="flex:1">
+      <button id="qBtn">搜索</button>
+    </div>
+    <div id="searchOut"></div>
+    <table id="threadTable">
+      <thead><tr><th>root_id</th><th>条数</th><th>参与者</th><th>holds</th><th>熔断</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3 id="threadTitle"></h3>
+    <div id="threadMsgs"></div>
+  </section>
+  <section id="tab-audit" hidden>
+    <div class="row">
+      <input id="aActor" placeholder="actor 过滤">
+      <input id="aAction" placeholder="action 过滤">
+      <button id="refreshAudit">查询审计</button>
+      <button id="exportAudit">导出 JSON</button>
+    </div>
+    <table id="auditTable">
+      <thead><tr><th>seq</th><th>时间</th><th>actor</th><th>action</th><th>detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3>Retention 与 Guard 策略 <span class="hint">（改动走 config.toml + 重启）</span></h3>
+    <div class="row"><button id="refreshConfig">查看当前策略</button><span id="configOut" class="hint"></span></div>
+    <h3>Tokens</h3>
+    <div class="row"><button id="refreshTokens">刷新 Tokens</button></div>
+    <table id="tokenTable">
+      <thead><tr><th>id</th><th>peer</th><th>hash 前缀</th><th>label</th><th>创建时间</th><th>最后使用</th><th>IP</th><th>撤销</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="card">
+      <h3>签发 Token（轮换）</h3>
+      <input id="rotPeer" placeholder="peer id">
+      <input id="rotLabel" placeholder="label">
+      <button id="rotBtn">签发新 token（显示一次）</button>
+      <pre id="rotOut"></pre>
+    </div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

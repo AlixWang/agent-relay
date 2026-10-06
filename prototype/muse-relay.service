@@ -1,0 +1,17 @@
+[Unit]
+Description=Muse cross-assistant task relay
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=MUSE_RELAY_TOKEN=__GENERATE_ME__
+Environment=MUSE_RELAY_PORT=18789
+Environment=MUSE_RELAY_DATA=/var/lib/muse-relay
+ExecStartPre=/bin/mkdir -p /var/lib/muse-relay
+ExecStart=/usr/bin/python3 /opt/muse-relay/relay.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

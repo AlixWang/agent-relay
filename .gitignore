@@ -1,0 +1,7 @@
+agent-relay
+*.db
+*.db-wal
+*.db-shm
+/var/lib/agent-relay/
+.idea/
+.vscode/

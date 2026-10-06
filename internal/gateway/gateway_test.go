@@ -1,0 +1,550 @@
+package gateway
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/AlixWang/agent-relay/internal/auth"
+	"github.com/AlixWang/agent-relay/internal/config"
+	"github.com/AlixWang/agent-relay/internal/guard"
+	"github.com/AlixWang/agent-relay/internal/presence"
+	"github.com/AlixWang/agent-relay/internal/queue"
+	"github.com/AlixWang/agent-relay/internal/store"
+	"github.com/AlixWang/agent-relay/internal/verify"
+	"golang.org/x/crypto/bcrypt"
+)
+
+type fixture struct {
+	srv *Server
+	mux http.Handler
+	tok map[string]string // peer -> plaintext token
+}
+
+func newFixture(t *testing.T) *fixture {
+	t.Helper()
+	cfg := config.Default()
+	cfg.MinClient = 1
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	au := auth.New(st, 3600)
+	g := guard.New(st, guard.Limits{FuseMaxMessages: 50, FuseMaxAgeSecs: 86400, RatePerMinute: 60})
+	q := queue.New(st, g)
+	p := presence.New(st, 300, "")
+	v := verify.New(st, 600)
+	srv := New(cfg, st, au, q, p, v, "http://127.0.0.1:18789")
+	srv.SetGuard(g)
+	hash, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
+	srv.SetAdminHash(hash)
+	return &fixture{srv: srv, mux: srv.Handler(nil), tok: map[string]string{}}
+}
+
+func (f *fixture) registerPeer(t *testing.T, id, agentType string) {
+	t.Helper()
+	// Use wall-clock time: handlers validate invite expiry against time.Now().
+	now := time.Now().Unix()
+	code, _, err := f.srv.auth.CreateInvite(id, agentType, "admin", now)
+	if err != nil {
+		t.Fatalf("invite: %v", err)
+	}
+	_, plaintext, err := f.srv.auth.Register(code, id, agentType, 1, `{"shell":true}`, now)
+	if err != nil {
+		t.Fatalf("register %s: %v", id, err)
+	}
+	f.tok[id] = plaintext
+}
+
+func (f *fixture) do(t *testing.T, method, path string, body any, token string) (int, map[string]any) {
+	t.Helper()
+	var rdr *bytes.Reader
+	if body == nil {
+		rdr = bytes.NewReader(nil)
+	} else {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rdr = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out == nil {
+		out = map[string]any{"_raw": rec.Body.String()}
+	}
+	return rec.Code, out
+}
+
+func TestRegisterValidation(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now().Unix()
+	code, _, _ := f.srv.auth.CreateInvite("alice", "muse", "admin", now)
+
+	// Bad invite code.
+	c, out := f.do(t, "POST", "/register", map[string]any{"code": "inv_nope", "id": "x", "protocol_version": 1}, "")
+	if c != 400 || !strings.Contains(out["error"].(string), "invalid_code") {
+		t.Fatalf("bad code: %d %+v", c, out)
+	}
+	// Bound identity mismatch.
+	c, out = f.do(t, "POST", "/register", map[string]any{"code": code, "id": "mallory", "protocol_version": 1}, "")
+	if c != 400 || !strings.Contains(out["error"].(string), "id_mismatch") {
+		t.Fatalf("mismatch: %d %+v", c, out)
+	}
+	// Happy path.
+	c, out = f.do(t, "POST", "/register",
+		map[string]any{"code": code, "id": "alice", "agent_type": "muse", "protocol_version": 1}, "")
+	if c != 200 || out["token"] == nil {
+		t.Fatalf("register: %d %+v", c, out)
+	}
+	// Single-use enforced.
+	c, _ = f.do(t, "POST", "/register",
+		map[string]any{"code": code, "id": "alice2", "protocol_version": 1}, "")
+	if c != 400 {
+		t.Fatalf("reuse should 400, got %d", c)
+	}
+}
+
+func TestIdentityBinding403(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "muse")
+
+	// from-spoof on send.
+	c, _ := f.do(t, "POST", "/messages",
+		map[string]any{"id": "s1", "to": "bob", "from": "bob", "payload": "spoof"},
+		f.tok["alice"])
+	if c != 403 {
+		t.Fatalf("from-spoof should 403, got %d", c)
+	}
+	// from defaults to self and works.
+	c, out := f.do(t, "POST", "/messages",
+		map[string]any{"id": "ok1", "to": "bob", "payload": "hi"},
+		f.tok["alice"])
+	if c != 200 || out["seq"] == nil {
+		t.Fatalf("send: %d %+v", c, out)
+	}
+	// cross pull.
+	c, _ = f.do(t, "GET", "/messages?for=bob&since=0", nil, f.tok["alice"])
+	if c != 403 {
+		t.Fatalf("cross-pull should 403, got %d", c)
+	}
+	// cross ack.
+	c, _ = f.do(t, "POST", "/ack",
+		map[string]any{"message_id": "ok1", "by": "bob"}, f.tok["alice"])
+	if c != 403 {
+		t.Fatalf("cross-ack should 403, got %d", c)
+	}
+	// cross heartbeat.
+	c, _ = f.do(t, "POST", "/heartbeat",
+		map[string]any{"id": "bob"}, f.tok["alice"])
+	if c != 403 {
+		t.Fatalf("cross-heartbeat should 403, got %d", c)
+	}
+	// unauthenticated.
+	c, _ = f.do(t, "GET", "/peers", nil, "")
+	if c != 401 {
+		t.Fatalf("no token should 401, got %d", c)
+	}
+}
+
+func TestSendPullAckFlow(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "claw")
+
+	c, out := f.do(t, "POST", "/messages",
+		map[string]any{"id": "t1", "to": "bob", "from": "alice", "payload": "do work"}, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("send: %d %+v", c, out)
+	}
+	c, out = f.do(t, "GET", "/messages?for=bob&since=0", nil, f.tok["bob"])
+	if c != 200 {
+		t.Fatalf("pull: %d %+v", c, out)
+	}
+	items := out["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("items: %+v", out)
+	}
+	first := items[0].(map[string]any)
+	if first["payload"] != "do work" || first["thread"] == nil {
+		t.Fatalf("envelope: %+v", first)
+	}
+	next := int64(out["next_since"].(float64))
+	// Ack then invisible.
+	c, _ = f.do(t, "POST", "/ack",
+		map[string]any{"message_id": "t1", "by": "bob"}, f.tok["bob"])
+	if c != 200 {
+		t.Fatalf("ack: %d", c)
+	}
+	c, out = f.do(t, "GET", "/messages?for=bob&since=0", nil, f.tok["bob"])
+	if len(out["items"].([]any)) != 0 {
+		t.Fatalf("acked still visible: %+v", out)
+	}
+	// since cursor honored.
+	if next == 0 {
+		t.Fatal("next_since not advanced")
+	}
+	// Duplicate rejected.
+	c, _ = f.do(t, "POST", "/messages",
+		map[string]any{"id": "t1", "to": "bob", "from": "alice", "payload": "again"}, f.tok["alice"])
+	if c != 409 {
+		t.Fatalf("dup should 409, got %d", c)
+	}
+}
+
+func TestApprovalHoldAndAdminApprove(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "muse")
+
+	c, out := f.do(t, "POST", "/messages",
+		map[string]any{"id": "h1", "to": "bob", "from": "alice", "payload": "rm -rf /", "requires_approval": true},
+		f.tok["alice"])
+	if c != 202 || out["held"] != true {
+		t.Fatalf("hold: %d %+v", c, out)
+	}
+	c, out = f.do(t, "GET", "/messages?for=bob&since=0", nil, f.tok["bob"])
+	if len(out["items"].([]any)) != 0 {
+		t.Fatalf("held visible early: %+v", out)
+	}
+
+	admin := f.adminLogin(t)
+	// Find seq through thread endpoint: held msg lives in alice/h1.
+	c2, detail := f.doAuth(t, "GET", "/admin/messages?thread=alice/h1", nil, admin)
+	if c2 != 200 {
+		t.Fatalf("thread: %d %+v", c2, detail)
+	}
+	mseq := int64(detail["items"].([]any)[0].(map[string]any)["seq"].(float64))
+	c3, _ := f.doAuth(t, "POST", "/admin/messages/approve",
+		map[string]any{"seq": mseq, "approve": true}, admin)
+	_ = c3
+	if c3 != 200 {
+		t.Fatalf("approve: %d", c3)
+	}
+	c, out = f.do(t, "GET", "/messages?for=bob&since=0", nil, f.tok["bob"])
+	if len(out["items"].([]any)) != 1 {
+		t.Fatalf("approved not visible: %+v", out)
+	}
+}
+
+func TestVersionNegotiation426(t *testing.T) {
+	f := newFixture(t)
+	f.srv.cfg.MinClient = 2 // everyone is now stale
+	f.registerPeer(t, "old", "generic")
+	c, out := f.do(t, "GET", "/peers", nil, f.tok["old"])
+	if c != 426 || !strings.Contains(out["error"].(string), "upgrade") {
+		t.Fatalf("426: %d %+v", c, out)
+	}
+	c, _ = f.do(t, "POST", "/messages",
+		map[string]any{"id": "x", "to": "old", "payload": "y"}, f.tok["old"])
+	if c != 426 {
+		t.Fatalf("send should 426, got %d", c)
+	}
+}
+
+func TestSmokeVerifyFlow(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "newbie", "muse")
+
+	c, out := f.do(t, "POST", "/verify/smoke", nil, f.tok["newbie"])
+	if c != 200 || out["smoke_id"] == nil {
+		t.Fatalf("smoke: %d %+v", c, out)
+	}
+	smokeID := out["smoke_id"].(string)
+	// Poll sees the system message.
+	c, out = f.do(t, "GET", "/messages?for=newbie&since=0", nil, f.tok["newbie"])
+	found := false
+	for _, it := range out["items"].([]any) {
+		if it.(map[string]any)["id"] == smokeID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("smoke not visible: %+v", out)
+	}
+	// Result + ack flips to active.
+	f.do(t, "POST", "/messages",
+		map[string]any{"id": "r1", "to": "system", "from": "newbie", "kind": "result",
+			"in_reply_to": smokeID, "payload": "收到"}, f.tok["newbie"])
+	f.do(t, "POST", "/ack",
+		map[string]any{"message_id": smokeID, "by": "newbie"}, f.tok["newbie"])
+	p, _ := f.srv.st.GetPeer("newbie")
+	if p.Status != "active" {
+		t.Fatalf("status: %s", p.Status)
+	}
+}
+
+func TestRegisterRejectsStaleProtocol(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now().Unix()
+	code, _, _ := f.srv.auth.CreateInvite("stale", "muse", "admin", now)
+	c, out := f.do(t, "POST", "/register",
+		map[string]any{"code": code, "id": "stale", "protocol_version": 0}, "")
+	if c != 426 {
+		t.Fatalf("stale register should 426, got %d %+v", c, out)
+	}
+	// Invite must NOT be consumed by the rejected attempt.
+	c, out = f.do(t, "POST", "/register",
+		map[string]any{"code": code, "id": "stale", "protocol_version": 1}, "")
+	if c != 200 {
+		t.Fatalf("retry with current protocol: %d %+v", c, out)
+	}
+}
+
+func TestAdminInviteRevokeFlow(t *testing.T) {
+	f := newFixture(t)
+	admin := f.adminLogin(t)
+	c, out := f.doAuth(t, "POST", "/admin/invites",
+		map[string]any{"intended_id": "z1", "agent_type": "claw"}, admin)
+	if c != 200 || out["code"] == nil {
+		t.Fatalf("invite: %d %+v", c, out)
+	}
+	c, out = f.doAuth(t, "GET", "/admin/invites", nil, admin)
+	if c != 200 || len(out["invites"].([]any)) != 1 {
+		t.Fatalf("list invites: %d %+v", c, out)
+	}
+	// Admin API without session → 401.
+	c, _ = f.do(t, "GET", "/admin/peers", nil, "")
+	if c != 401 {
+		t.Fatalf("admin w/o session should 401, got %d", c)
+	}
+	// Rotate + revoke.
+	f.registerPeer(t, "rot", "muse")
+	c, out = f.doAuth(t, "POST", "/admin/tokens/rotate",
+		map[string]any{"peer_id": "rot", "label": "r2"}, admin)
+	if c != 200 || out["token"] == nil {
+		t.Fatalf("rotate: %d %+v", c, out)
+	}
+	c, out = f.doAuth(t, "GET", "/admin/tokens", nil, admin)
+	if c != 200 || len(out["tokens"].([]any)) != 2 {
+		t.Fatalf("tokens: %d %+v", c, out)
+	}
+	toks := out["tokens"].([]any)
+	firstID := int64(toks[0].(map[string]any)["id"].(float64))
+	c, _ = f.doAuth(t, "DELETE", "/admin/tokens/"+itoa(firstID), nil, admin)
+	if c != 200 {
+		t.Fatalf("revoke: %d", c)
+	}
+}
+
+func TestAdminRotateUnknownPeer404(t *testing.T) {
+	f := newFixture(t)
+	admin := f.adminLogin(t)
+	c, _ := f.doAuth(t, "POST", "/admin/tokens/rotate",
+		map[string]any{"peer_id": "ghost", "label": "x"}, admin)
+	if c != 404 {
+		t.Fatalf("rotate unknown peer should 404, got %d", c)
+	}
+}
+
+func TestAdminExportThread(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "muse")
+	f.do(t, "POST", "/messages",
+		map[string]any{"id": "e1", "to": "bob", "from": "alice", "payload": "hello"}, f.tok["alice"])
+	admin := f.adminLogin(t)
+	c, out := f.doAuth(t, "GET", "/admin/messages/export?thread=alice/e1&format=jsonl", nil, admin)
+	_ = c
+	_ = out
+	// Export streams raw body, not JSON: exercise via mux directly.
+	req := httptest.NewRequest("GET", "/admin/messages/export?thread=alice/e1&format=jsonl", nil)
+	req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: admin})
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "jsonl") {
+		t.Fatalf("jsonl: %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(rec.Body.String(), `"payload":"hello"`) {
+		t.Fatalf("jsonl body: %s", rec.Body.String())
+	}
+	req = httptest.NewRequest("GET", "/admin/messages/export?thread=alice/e1&format=markdown", nil)
+	req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: admin})
+	rec = httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "# thread alice/e1") {
+		t.Fatalf("markdown: %d %.100s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest("GET", "/admin/messages/export?thread=alice/e1&format=xml", nil)
+	req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: admin})
+	rec = httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("bad format should 400, got %d", rec.Code)
+	}
+}
+
+func TestAdminConfigSnapshot(t *testing.T) {
+	f := newFixture(t)
+	admin := f.adminLogin(t)
+	c, out := f.doAuth(t, "GET", "/admin/config", nil, admin)
+	if c != 200 {
+		t.Fatalf("config: %d", c)
+	}
+	for _, key := range []string{"retention", "guard", "presence"} {
+		if _, ok := out[key].(map[string]any); !ok {
+			t.Fatalf("config missing %s: %+v", key, out)
+		}
+	}
+	c, _ = f.do(t, "GET", "/admin/config", nil, "")
+	if c != 401 {
+		t.Fatalf("config w/o session should 401, got %d", c)
+	}
+}
+
+func TestAdminPromptsReconfigure(t *testing.T) {
+	f := newFixture(t)
+	admin := f.adminLogin(t)
+	f.registerPeer(t, "vet", "muse")
+
+	// Reconfigure: no invite minted, token reused, registration skipped.
+	before, _ := f.srv.st.ListInvites()
+	c, out := f.doAuth(t, "POST", "/admin/prompts",
+		map[string]any{"agent_type": "muse", "peer_id": "vet", "reconfigure": true}, admin)
+	if c != 200 {
+		t.Fatalf("reconfigure: %d %+v", c, out)
+	}
+	if _, hasCode := out["code"]; hasCode {
+		t.Fatal("reconfigure must not mint an invite")
+	}
+	after, _ := f.srv.st.ListInvites()
+	if len(after) != len(before) {
+		t.Fatal("reconfigure minted an invite row")
+	}
+	prompt := out["prompt"].(string)
+	if !strings.Contains(prompt, "vet") || strings.Contains(prompt, "$RELAY/register") {
+		t.Fatal("reconfigure prompt wrong")
+	}
+	// Reconfigure requires a peer_id.
+	c, _ = f.doAuth(t, "POST", "/admin/prompts",
+		map[string]any{"agent_type": "muse", "reconfigure": true}, admin)
+	if c != 400 {
+		t.Fatalf("reconfigure w/o peer should 400, got %d", c)
+	}
+	// Unknown agent_type rejected.
+	c, _ = f.doAuth(t, "POST", "/admin/prompts",
+		map[string]any{"agent_type": "nope", "peer_id": "vet", "create_invite": true}, admin)
+	if c != 400 {
+		t.Fatalf("unknown type should 400, got %d", c)
+	}
+}
+
+func (f *fixture) adminLogin(t *testing.T) string {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/admin/login",
+		bytes.NewReader([]byte(`{"password":"secret"}`)))
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("admin login: %d %s", rec.Code, rec.Body.String())
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "agent_relay_admin" {
+			return c.Value
+		}
+	}
+	t.Fatal("no session cookie")
+	return ""
+}
+
+func (f *fixture) doAuth(t *testing.T, method, path string, body any, cookie string) (int, map[string]any) {
+	return f.doCookie(t, method, path, body, cookie)
+}
+
+func itoa(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	s := ""
+	for n > 0 {
+		s = string(rune('0'+n%10)) + s
+		n /= 10
+	}
+	return s
+}
+
+func (f *fixture) doCookie(t *testing.T, method, path string, body any, cookie string) (int, map[string]any) {
+	t.Helper()
+	var rdr *bytes.Reader
+	if body == nil {
+		rdr = bytes.NewReader(nil)
+	} else {
+		b, _ := json.Marshal(body)
+		rdr = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: cookie})
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out == nil {
+		out = map[string]any{}
+	}
+	return rec.Code, out
+}
+
+func TestFuseTripAndReset(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "muse")
+	// Fuse limit is 50 in the fixture; fill the alice/seed thread with
+	// distinct long payloads so the loop heuristic can't fire first.
+	c, _ := f.do(t, "POST", "/messages",
+		map[string]any{"id": "seed", "to": "bob", "from": "alice",
+			"payload": "seed task opening the thread with enough length to be unique payload number zero padding xxxxxxxxxxxxxxxxx"},
+		f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("seed: %d", c)
+	}
+	for i := 0; i < 49; i++ {
+		body := map[string]any{
+			"id":          "fill" + itoa(int64(i)),
+			"to":          "bob",
+			"from":        "alice",
+			"in_reply_to": "seed",
+			"payload":     "filler task with distinct long content index to avoid dup detection entirely " + itoa(int64(i)) + strings.Repeat("x", 40),
+		}
+		c, _ := f.do(t, "POST", "/messages", body, f.tok["alice"])
+		if c != 200 {
+			t.Fatalf("fill %d: %d", i, c)
+		}
+	}
+	// 51st trips the fuse.
+	c, out := f.do(t, "POST", "/messages",
+		map[string]any{"id": "over", "to": "bob", "from": "alice",
+			"in_reply_to": "seed", "payload": "one past the limit with completely fresh wording and padding " + strings.Repeat("y", 40)},
+		f.tok["alice"])
+	if c != 409 || !strings.Contains(out["error"].(string), "loop_fuse_tripped") {
+		t.Fatalf("fuse: %d %+v", c, out)
+	}
+	// Admin reset reopens the thread without deleting history.
+	admin := f.adminLogin(t)
+	c, _ = f.doAuth(t, "POST", "/admin/fuse/reset", map[string]any{"root_id": "alice/seed"}, admin)
+	if c != 200 {
+		t.Fatalf("reset: %d", c)
+	}
+	c, _ = f.do(t, "POST", "/messages",
+		map[string]any{"id": "after", "to": "bob", "from": "alice",
+			"in_reply_to": "seed", "payload": "post-reset message with fresh distinct long wording " + strings.Repeat("z", 40)},
+		f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("after reset: %d", c)
+	}
+}

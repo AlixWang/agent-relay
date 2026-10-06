@@ -1,0 +1,45 @@
+# agent-relay configuration. See docs/CONFIG.md for field reference.
+# Copy to /etc/agent-relay/config.toml on the server.
+
+# "auto" = bind the Tailscale IPv4 (tailscale ip -4), fallback 127.0.0.1.
+# Any other value is used verbatim, e.g. "127.0.0.1" or "0.0.0.0" (public only).
+listen_addr = "auto"
+port = 18789
+data_dir = "/var/lib/agent-relay"
+
+# Public HTTPS mode. Requires tls_cert + tls_key (Let's Encrypt or provided).
+# Never expose plain HTTP on a public interface (DESIGN §7.3).
+public = false
+tls_cert = ""
+tls_key = ""
+
+# bcrypt hash for the admin UI session login. Generate with:
+#   agent-relay -hash 'your-strong-password'
+# If empty, the server prints a one-time random password on startup
+# (lost on restart — set a real hash for production).
+admin_password_hash = ""
+
+# Protocol contract (DESIGN §8.5).
+protocol = 1
+min_client = 1
+
+# Presence & verification (DESIGN §4.5, §8.4).
+online_timeout_secs = 300
+verify_timeout_secs = 600
+
+# Guard fuses (DESIGN §6.1).
+fuse_max_messages = 50
+fuse_max_age_secs = 86400
+rate_per_minute = 60
+
+# Retention (DESIGN §10.2).
+message_ttl_days = 30
+peer_prune_after_days = 7
+audit_retention_days = 90
+
+# Optional generic POST webhook for peer offline transitions:
+# {"peer_id": "...", "offline_secs": 1234, "ts": 1728...}
+offline_webhook_url = ""
+
+# Max request body bytes (default 1 MiB).
+max_body_bytes = 1048576
