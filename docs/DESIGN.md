@@ -516,11 +516,19 @@ often and must not force re-onboarding. They are versioned separately:
 - The poller then pulls `GET /prompts/current` (authed, per-identity: full current worker text
   for the peer's type, idempotent re-pull), stages it to `prompt-update.md` + `.prompt_version.staged`,
   and wakes the assistant with a `prompt_update` event even when no message traffic exists.
+- The response also carries `changes`: the ChangeLog entries newer than the peer's reported
+  version (section numbers + required actions). The scripts save it to `prompt-changes.json`
+  and summarize it into the wake event, so assistants patch incrementally: read changes first,
+  verify against the full text, then confirm. Unknown (v0) peers get the full log.
 - The assistant applies the instructions (replace its §6.x) and confirms by moving
   `.prompt_version.staged` → `.prompt_version`; the next heartbeat reports the new revision and
   the server stops nudging. Unconfirmed peers are re-woken every poll; the UI shows `v<peer> →
   v<server>` badges. Forward-only recording: stale replays never clobber a newer confirmation.
 - Ongoing tasks continue under their original scope; new instructions apply to new tasks only.
+- Init and distribution render from the same templates: `/prompts/current` (IsReconfigure=true)
+  differs only in the credential block (no invite, token reuse). A regression test
+  (`TestDistributionMatchesInit`) fails the build if a worker section (SSE choice, update
+  flow, profile) ever drifts out of the distributed text again.
 
 ### 8.7 Assistant profile (self-intro for routing unassigned work)
 

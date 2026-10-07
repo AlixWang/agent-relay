@@ -593,9 +593,13 @@ func (s *Server) handlePromptCurrent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "render failed")
 		return
 	}
+	// Upgrade guide (§8.6): only the entries newer than the peer's
+	// reported version, so assistants upgrade incrementally. Unknown (0)
+	// gets the full log — same cost as reading the full text once.
 	writeJSON(w, 200, map[string]any{
 		"ok": true, "prompt_version": prompts.PromptVersion,
 		"agent_type": peer.AgentType, "prompt": prompt,
+		"changes": prompts.ChangesSince(peer.PromptVersion),
 	})
 }
 

@@ -66,6 +66,10 @@ curl --fail --silent --max-time 10 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "${auth[@
 # 1b. prompt update available → pull full current instructions and stage
 # them for the assistant. The assistant applies them and confirms by
 # reporting the new version in its next heartbeat (UpdatePeerPrompt).
+# The `changes` array is the upgrade guide (§8.6): only the entries newer
+# than our version, so the assistant patches incrementally. Saved to
+# prompt-changes.json; summarized into the wake event.
+PROMPT_CHANGES_FILE="$BASE/prompt-changes.json"
 update_event=""
 if jq -e '.prompt_update == true' "$hb_file" >/dev/null 2>&1; then
   new_ver="$(jq -r '.prompt_version // 0' "$hb_file" 2>/dev/null || echo 0)"
@@ -76,8 +80,10 @@ if jq -e '.prompt_update == true' "$hb_file" >/dev/null 2>&1; then
       body="$(jq -r '.prompt // empty' "$pu_file" 2>/dev/null || true)"
       if [[ -n "$body" ]]; then
         printf '%s' "$body" > "$PROMPT_UPDATE_FILE"
+        jq -c '.changes // []' "$pu_file" 2>/dev/null > "$PROMPT_CHANGES_FILE" || echo '[]' > "$PROMPT_CHANGES_FILE"
         printf '%s' "$new_ver" > "$PROMPT_VER_FILE.staged"
-        update_event="$(jq -nc --arg v "$new_ver" '{prompt_update: true, version: ($v | tonumber)}')"
+        changes_sum="$(jq -r '[.[].summary] | join(" | ")' "$PROMPT_CHANGES_FILE" 2>/dev/null || true)"
+        update_event="$(jq -nc --arg v "$new_ver" --arg c "$changes_sum" '{prompt_update: true, version: ($v | tonumber), changes: $c}')"
       fi
     fi
     rm -f "$pu_file"

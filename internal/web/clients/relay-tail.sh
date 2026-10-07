@@ -65,8 +65,10 @@ read_seq() {
 # heartbeat_once — one heartbeat round: report prompt_version, stage prompt
 # updates, print a prompt_update wake event when staged. Mirrors the
 # relay-poll.sh §1b logic so both scripts confirm identically.
+# The `changes` upgrade guide (§8.6) is saved to prompt-changes.json.
+PROMPT_CHANGES_FILE="$BASE/prompt-changes.json"
 heartbeat_once() {
-  local prompt_ver hb new_ver body
+  local prompt_ver hb new_ver pu_json body changes_sum
   prompt_ver="$(cat "$PROMPT_VER_FILE" 2>/dev/null || echo 0)"
   [[ "$prompt_ver" =~ ^[0-9]+$ ]] || prompt_ver=0
   hb="$(curl --fail --silent --max-time 10 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "${auth[@]}" \
@@ -81,12 +83,15 @@ heartbeat_once() {
   if ! [[ "$new_ver" =~ ^[0-9]+$ ]] || [[ "$new_ver" -le "$prompt_ver" ]]; then
     return 0
   fi
-  body="$(curl --fail --silent --max-time 20 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "${auth[@]}" \
-    "$RELAY/prompts/current" 2>/dev/null | jq -r '.prompt // empty' 2>/dev/null || true)"
+  pu_json="$(curl --fail --silent --max-time 20 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "${auth[@]}" \
+    "$RELAY/prompts/current" 2>/dev/null || true)"
+  body="$(echo "$pu_json" | jq -r '.prompt // empty' 2>/dev/null || true)"
   if [[ -n "$body" ]]; then
     printf '%s' "$body" > "$PROMPT_UPDATE_FILE"
+    echo "$pu_json" | jq -c '.changes // []' 2>/dev/null > "$PROMPT_CHANGES_FILE" || echo '[]' > "$PROMPT_CHANGES_FILE"
     printf '%s' "$new_ver" > "$PROMPT_VER_FILE.staged"
-    jq -nc --arg v "$new_ver" '{prompt_update: true, version: ($v | tonumber)}'
+    changes_sum="$(jq -r '[.[].summary] | join(" | ")' "$PROMPT_CHANGES_FILE" 2>/dev/null || true)"
+    jq -nc --arg v "$new_ver" --arg c "$changes_sum" '{prompt_update: true, version: ($v | tonumber), changes: $c}'
   fi
 }
 

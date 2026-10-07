@@ -38,8 +38,7 @@ curl -s $RELAY/health
 ## 4. 搭建步骤
 1. 确认连通：`curl -s {{.ServerAddr}}/health` 应返回 `{"ok":true,...}`。
    内网地址走 tailnet（公网地址直连即可）；沙盒需走 tunnel 代理时：`tunnel_proxy="${HTTPS_PROXY%:*}:3130"; curl --proxy "$tunnel_proxy" ...`。
-{{if .IsReconfigure}}2. 跳过注册，直接用已有 token 验证：`curl -s {{.ServerAddr}}/peers -H "Authorization: Bearer $TOKEN"` 应返回你的身份。
-3. 把轮询脚本更新到服务端最新版（命令见下，不要自己发明协议细节）。{{else}}2. 调用 /register 注册，保存 token（chmod 600）。
+{{if .IsReconfigure}}2. 已是成员：用已有 token 验证连通即可（`curl -s {{.ServerAddr}}/peers -H "Authorization: Bearer $TOKEN"` 应返回你的身份）。{{else}}2. 调用 /register 注册，保存 token（chmod 600）。{{end}}
 3. 从服务端下载接收脚本（二选一，版本与服务端一致，不要自己发明协议细节）：
 ```bash
 mkdir -p ~/workspace/task-relay/bin
@@ -56,7 +55,7 @@ chmod +x ~/workspace/task-relay/bin/relay-poll.sh
 # 逻辑：常驻 GET /messages/stream?for=身份&since=本地游标，有新消息服务端即推；
 # 断线自动退避重连（1s→60s），游标续传不丢消息。两个脚本只用其一。
 ```
-4. 调用 `POST /verify/smoke` 触发冒烟验证（服务端下发已知 id 的冒烟任务）。{{end}}
+{{if .IsReconfigure}}4. 已验证过跳过；换了接收脚本可跑一次 `POST /verify/smoke` 自测。{{else}}4. 调用 `POST /verify/smoke` 触发冒烟验证（服务端下发已知 id 的冒烟任务）。{{end}}
 
 ## 5. 自验证
 1. `POST /verify/smoke` 后用轮询拉到 sender=system 的冒烟任务。
@@ -108,9 +107,13 @@ chmod +x ~/workspace/task-relay/bin/relay-poll.sh
 ## 7.5 指令更新（服务端动态下发，无需重跑 prompt）
 - 轮询脚本每次 heartbeat 会上报你的指令版本（`~/workspace/task-relay/.prompt_version`）。
   服务端有新 worker 指令时，heartbeat 返回 `prompt_update=true`，脚本自动拉取全文存到
-  `~/workspace/task-relay/prompt-update.md` 并随唤醒事件告诉你（`prompt_update.version`）。
-- 被唤醒处理指令更新时：读 `prompt-update.md`，用它替换你上面的 §6 常驻守则
-  （§6.5 远端代批、§6.6 发送方守则以新文件为准），然后执行确认：
+  `~/workspace/task-relay/prompt-update.md`、升级指引存到 `prompt-changes.json`，
+  并随唤醒事件告诉你（`prompt_update.version` + `prompt_update.changes` 摘要）。
+- 被唤醒处理指令更新时按三步走：
+  1. 先读 `prompt-changes.json`（只含你落后版本之后的新条目）：看动了哪几节、要你做什么。
+  2. 再读 `prompt-update.md` 全文核对（下发即初始化全文除注册块外逐字一致，
+     含 SSE 二选一；对照本地只改 changes 指出的节）。
+  3. 改完执行确认：
 ```bash
 mv ~/workspace/task-relay/.prompt_version.staged ~/workspace/task-relay/.prompt_version
 ```

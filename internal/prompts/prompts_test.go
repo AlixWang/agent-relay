@@ -181,3 +181,47 @@ func TestProfileSectionsPresent(t *testing.T) {
 		}
 	}
 }
+
+func TestChangesSinceIncremental(t *testing.T) {
+	if got := ChangesSince(99); len(got) != 0 {
+		t.Fatalf("current: %+v", got)
+	}
+	got := ChangesSince(2)
+	if len(got) != 3 || got[0].Version != 3 || got[2].Version != PromptVersion {
+		t.Fatalf("since v2: %+v", got)
+	}
+	for _, e := range got {
+		if e.Summary == "" || e.Actions == "" {
+			t.Fatalf("empty entry: %+v", e)
+		}
+	}
+	if len(ChangesSince(0)) != len(ChangeLog) {
+		t.Fatal("unknown peer should get full log")
+	}
+	// PromptVersion must equal the newest changelog entry.
+	if ChangeLog[len(ChangeLog)-1].Version != PromptVersion {
+		t.Fatalf("changelog head %d != PromptVersion %d",
+			ChangeLog[len(ChangeLog)-1].Version, PromptVersion)
+	}
+}
+
+func TestDistributionMatchesInit(t *testing.T) {
+	// /prompts/current (IsReconfigure=true) must equal the init prompt
+	// except the registration block: SSE choice and all worker sections
+	// identical. Regression test for the "distribution missing SSE" drift.
+	for _, typ := range []string{"muse", "claw", "generic", "hermes"} {
+		init, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dist, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1, IsReconfigure: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, needle := range []string{"relay-tail.sh", "prompt-changes.json", "profile_refresh", "7.5", "6.5"} {
+			if strings.Contains(init, needle) && !strings.Contains(dist, needle) {
+				t.Fatalf("%s: distribution missing %q present in init", typ, needle)
+			}
+		}
+	}
+}

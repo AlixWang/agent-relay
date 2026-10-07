@@ -1173,3 +1173,40 @@ func TestTransportSurfacedInPeers(t *testing.T) {
 		t.Fatalf("admin peers missing transport: %+v", out)
 	}
 }
+
+func TestPromptCurrentHasChanges(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	// Peer at v2: changes should list 3,4,5 (whatever is newer than 2).
+	_ = f.srv.st.UpdatePeerPrompt("alice", 2, time.Now().Unix())
+	c, out := f.do(t, "GET", "/prompts/current", nil, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("current: %d %+v", c, out)
+	}
+	if out["prompt"] == nil || out["prompt_version"] == nil {
+		t.Fatalf("shape: %+v", out)
+	}
+	// Full text: must contain the SSE choice (the reported drift).
+	if prompt, _ := out["prompt"].(string); !strings.Contains(prompt, "relay-tail.sh") {
+		t.Fatal("distribution missing SSE choice")
+	}
+	changes, _ := out["changes"].([]any)
+	if len(changes) == 0 {
+		t.Fatal("changes empty for stale peer")
+	}
+	for _, ch := range changes {
+		m := ch.(map[string]any)
+		if m["version"].(float64) <= 2 || m["summary"] == nil || m["actions"] == nil {
+			t.Fatalf("change entry: %+v", m)
+		}
+	}
+	// Current peer: no changes.
+	_ = f.srv.st.UpdatePeerPrompt("alice", 99, time.Now().Unix())
+	c, out = f.do(t, "GET", "/prompts/current", nil, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("current2: %d", c)
+	}
+	if changes, _ := out["changes"].([]any); len(changes) != 0 {
+		t.Fatalf("current peer should have no changes: %+v", changes)
+	}
+}

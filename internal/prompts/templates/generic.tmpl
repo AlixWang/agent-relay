@@ -81,8 +81,13 @@ curl -s $RELAY/health
 ## 7.5 指令更新（服务端动态下发，无需重跑 prompt）
 - 轮询脚本每次 heartbeat 会上报你的指令版本（`~/workspace/task-relay/.prompt_version`）。
   服务端有新 worker 指令时，heartbeat 返回 `prompt_update=true`，脚本自动拉取全文存到
-  `~/workspace/task-relay/prompt-update.md` 并随唤醒事件告诉你（`prompt_update.version`）。
-- 被唤醒处理指令更新时：读 `prompt-update.md`，用它替换你上面的 §6 常驻守则，然后执行确认：
+  `~/workspace/task-relay/prompt-update.md`、升级指引存到 `prompt-changes.json`，
+  并随唤醒事件告诉你（`prompt_update.version` + `prompt_update.changes` 摘要）。
+- 被唤醒处理指令更新时按三步走：
+  1. 先读 `prompt-changes.json`（只含你落后版本之后的新条目）：看动了哪几节、要你做什么。
+  2. 再读 `prompt-update.md` 全文核对（下发即初始化全文除注册块外逐字一致；
+     对照本地只改 changes 指出的节）。
+  3. 改完执行确认：
 ```bash
 mv ~/workspace/task-relay/.prompt_version.staged ~/workspace/task-relay/.prompt_version
 ```
