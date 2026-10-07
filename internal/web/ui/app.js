@@ -24,11 +24,20 @@ const statusBadge = (st) => {
 };
 /* ---------- 指令版本徽章（§8.6）：服务端版本由 /admin/stats 透出 ---------- */
 let serverPromptVersion = 0;
+let serverClientVersion = '';
 const promptBadge = (p) => {
   const v = p.prompt_version ?? 0;
   if (!serverPromptVersion || v >= serverPromptVersion) return `<span class="badge ok">v${v}</span>`;
   const when = p.prompt_updated_at ? fmtTime(p.prompt_updated_at) : '从未';
   return `<span class="badge warn" title="确认于 ${esc(when)}">v${v} → v${serverPromptVersion}</span>`;
+};
+/* ---------- 客户端版本徽章（§8.9）：relay-tail 二进制构建 tag ---------- */
+const clientBadge = (p) => {
+  const v = p.client_version || '';
+  if (!v) return '<span class="muted small">—</span>';
+  if (!serverClientVersion || v === serverClientVersion) return `<span class="badge ok">${esc(v)}</span>`;
+  const when = p.client_updated_at ? fmtTime(p.client_updated_at) : '未知';
+  return `<span class="badge warn" title="上报于 ${esc(when)} → 最新 ${esc(serverClientVersion)}">${esc(v)} → 新版</span>`;
 };
 /* ---------- 简介展示（§8.7）：自述能力 + 常干任务，供路由未指派任务 ---------- */
 const profileCell = (p) => {
@@ -122,6 +131,7 @@ async function refreshStats() {
     $('ver').textContent = `v2 · protocol ${s.protocol} · ${(s.db_bytes / 1024).toFixed(0)} KiB · seq ${s.max_seq}`;
     $('dbinfo').textContent = `在线 ${s.peers_online}/${s.peers_total}`;
     if (s.prompt_version) serverPromptVersion = s.prompt_version;
+    if (s.client_version) serverClientVersion = s.client_version;
     showApp();
     return true;
   } catch {
@@ -148,6 +158,7 @@ async function refreshPeers() {
     <td>${esc(ago(p.last_seen))}</td>
     <td>v${p.protocol_version ?? '?'}</td>
     <td>${promptBadge(p)}</td>
+    <td>${clientBadge(p)}</td>
     <td>${caps(p.capabilities)}</td>
     <td>${profileCell(p)}</td>
     <td>${transportBadge(p)}</td>

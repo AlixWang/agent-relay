@@ -31,6 +31,11 @@ type PeerView struct {
 	// for routing unassigned work. Shown in UI, searchable via /peers.
 	Profile          string `json:"profile,omitempty"`
 	ProfileUpdatedAt int64  `json:"profile_updated_at,omitempty"`
+	// Receiver client version (§8.9): which relay-tail build the peer runs
+	// ("" = not reporting, e.g. shell scripts). Shown in UI; the server
+	// nudges via heartbeat when a newer Release exists.
+	ClientVersion   string `json:"client_version,omitempty"`
+	ClientUpdatedAt int64  `json:"client_updated_at,omitempty"`
 	// Transport (§4.4b): how the peer currently receives messages.
 	// "sse" = holding a live /messages/stream; "poll" = short-polling
 	// (or offline/unknown). Computed from the stream hub, not stored.
@@ -68,7 +73,9 @@ func New(st store.Store, onlineTimeoutSecs int64, webhookURL string) *Service {
 // <=0 means "not reporting" (old client) and leaves the stored value alone.
 // profile is the peer's self-reported intro (§8.7); empty keeps the stored
 // value, non-empty overwrites with now as profile_updated_at.
-func (s *Service) Beat(peerID string, protocolVer int, capabilities string, promptVersion int, profile string, now int64) error {
+// clientVersion is the receiver client build (§8.9); empty keeps the stored
+// value (shell scripts don't report), non-empty overwrites.
+func (s *Service) Beat(peerID string, protocolVer int, capabilities string, promptVersion int, profile string, clientVersion string, now int64) error {
 	if err := s.st.TouchPeer(peerID, now); err != nil {
 		return err
 	}
@@ -90,6 +97,9 @@ func (s *Service) Beat(peerID string, protocolVer int, capabilities string, prom
 	}
 	if profile != "" {
 		_ = s.st.UpdatePeerProfile(peerID, profile, now)
+	}
+	if clientVersion != "" {
+		_ = s.st.UpdatePeerClient(peerID, clientVersion, now)
 	}
 	// First sighting: mark online baseline so we don't fire a spurious
 	// offline event before the first timeout window passes.
@@ -119,6 +129,7 @@ func (s *Service) List(now int64, live map[string]bool) ([]*PeerView, error) {
 			ProtocolVer:   p.ProtocolVer,
 			PromptVersion: p.PromptVersion, PromptUpdatedAt: p.PromptUpdatedAt,
 			Profile: p.Profile, ProfileUpdatedAt: p.ProfileUpdatedAt,
+			ClientVersion: p.ClientVersion, ClientUpdatedAt: p.ClientUpdatedAt,
 		}
 		var caps any
 		if err := json.Unmarshal([]byte(orEmptyJSON(p.Capabilities)), &caps); err == nil {

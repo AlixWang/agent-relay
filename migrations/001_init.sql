@@ -20,6 +20,12 @@ ALTER TABLE peers ADD COLUMN prompt_updated_at INTEGER DEFAULT 0;
 -- routing unassigned work. Set at register, refreshable via heartbeat.
 ALTER TABLE peers ADD COLUMN profile TEXT DEFAULT '';
 ALTER TABLE peers ADD COLUMN profile_updated_at INTEGER DEFAULT 0;
+-- Receiver client version (§8.9): which relay-tail binary the peer runs.
+-- Reported in heartbeat as client_version; empty = not reporting (shell
+-- scripts have no version). Server nudges on newer Release, same channel
+-- as prompt_update. Advisory only, never gates protocol access.
+ALTER TABLE peers ADD COLUMN client_version TEXT DEFAULT '';
+ALTER TABLE peers ADD COLUMN client_updated_at INTEGER DEFAULT 0;
 -- NOTE: tokens.peer_id intentionally has NO foreign key to peers(id).
 -- Tokens outlive peers by design (DESIGN §10.2): peers are pruned after
 -- peer_prune_after_days, tokens persist until revoked so a returning

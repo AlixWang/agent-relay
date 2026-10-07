@@ -1263,3 +1263,31 @@ func TestTailBinaryRedirect(t *testing.T) {
 		t.Fatalf("dev: %d %+v", code, out)
 	}
 }
+
+func TestHeartbeatClientVersion(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	// Report a client version: stored and surfaced in peers.
+	code, out := f.do(t, "POST", "/heartbeat",
+		map[string]any{"id": "alice", "client_version": "v0.7.0"}, f.tok["alice"])
+	if code != 200 {
+		t.Fatalf("beat: %d %+v", code, out)
+	}
+	p, _ := f.srv.st.GetPeer("alice")
+	if p.ClientVersion != "v0.7.0" {
+		t.Fatalf("not stored: %+v", p)
+	}
+	// Dev builds (BinaryVersion()=dev) never nudge.
+	if _, out := f.do(t, "POST", "/heartbeat",
+		map[string]any{"id": "alice", "client_version": "v0.7.0"}, f.tok["alice"]); out["client_update"] == true {
+		t.Fatalf("dev should not nudge: %+v", out)
+	}
+	// Empty report keeps the stored value.
+	if _, out := f.do(t, "POST", "/heartbeat",
+		map[string]any{"id": "alice"}, f.tok["alice"]); out["ok"] != true {
+		t.Fatalf("empty beat: %+v", out)
+	}
+	if p, _ := f.srv.st.GetPeer("alice"); p.ClientVersion != "v0.7.0" {
+		t.Fatalf("empty clobbered: %+v", p)
+	}
+}

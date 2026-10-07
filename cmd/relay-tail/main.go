@@ -31,6 +31,12 @@ var (
 	pollSecs  = flag.Int("interval", 5, "poll interval seconds (poll mode)")
 )
 
+// clientVersion is the receiver build tag (§8.9), baked at release time:
+// -ldflags "-X main.clientVersion=v0.7.0". Reported in every heartbeat;
+// the server nudges via client_update when a newer Release exists. Dev
+// builds report "" (= not reporting, never nudged).
+var clientVersion = ""
+
 type cfg struct {
 	relay      string
 	base       string
@@ -43,6 +49,10 @@ type cfg struct {
 	stagedPath string
 	updatePath string
 	changePath string
+	// clientVerPath stages a client_update wake (analogue of stagedPath
+	// for prompts): the reported version confirmed by the worker after
+	// upgrading the binary. Dedups the nudge to once per Release.
+	clientVerPath string
 }
 
 func main() {
@@ -92,12 +102,13 @@ func loadCfg() (*cfg, error) {
 	tr.Proxy = proxyForRelay(relay, os.Getenv("HTTPS_PROXY"))
 	return &cfg{
 		relay: relay, base: base, ident: ident, token: token,
-		http:       &http.Client{Transport: tr, Timeout: 30 * time.Second},
-		seqPath:    filepath.Join(base, ".last_seq"),
-		verPath:    filepath.Join(base, ".prompt_version"),
-		stagedPath: filepath.Join(base, ".prompt_version.staged"),
-		updatePath: filepath.Join(base, "prompt-update.md"),
-		changePath: filepath.Join(base, "prompt-changes.json"),
+		http:          &http.Client{Transport: tr, Timeout: 30 * time.Second},
+		seqPath:       filepath.Join(base, ".last_seq"),
+		verPath:       filepath.Join(base, ".prompt_version"),
+		stagedPath:    filepath.Join(base, ".prompt_version.staged"),
+		updatePath:    filepath.Join(base, "prompt-update.md"),
+		changePath:    filepath.Join(base, "prompt-changes.json"),
+		clientVerPath: filepath.Join(base, ".client_version"),
 	}, nil
 }
 
@@ -224,80 +235,127 @@ func (c *cfg) auth(r *http.Request) {
 
 // heartbeatOnce mirrors relay-poll.sh §1b: report prompt_version, stage
 // prompt-update.md + prompt-changes.json + .prompt_version.staged, return
-// the prompt_update wake event ("" when none). Best-effort: "" on any error.
+// the prompt_update wake event ("" when none). Also reports clientVersion
+// (§8.9) and returns a client_update wake event when the server has a
+// newer Release ("" when none). Best-effort: "" on any error.
 // Dedup: an already-staged version wakes only once — without this a peer
 // that hasn't confirmed yet gets re-woken every round (visible as
-// per-round spam in long-lived receivers).
-func (c *cfg) heartbeatOnce() string {
+// per-round spam in long-lived receivers). Same rule for client_update:
+// once .client_version matches the nudged release, stay silent; the worker
+// confirms by upgrading the binary (which reports the new version).
+func (c *cfg) heartbeatOnce() (promptEvent, clientEvent string) {
 	ver := c.readVer()
-	body, _ := json.Marshal(map[string]any{"id": c.ident, "prompt_version": ver})
+	body, _ := json.Marshal(map[string]any{
+		"id": c.ident, "prompt_version": ver, "client_version": clientVersion,
+	})
 	req, _ := http.NewRequest("POST", c.relay+"/heartbeat", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	c.auth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer resp.Body.Close()
 	var hb struct {
-		PromptUpdate  bool `json:"prompt_update"`
-		PromptVersion int  `json:"prompt_version"`
+		PromptUpdate  bool   `json:"prompt_update"`
+		PromptVersion int    `json:"prompt_version"`
+		ClientUpdate  bool   `json:"client_update"`
+		ClientVersion string `json:"client_version"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&hb) != nil {
-		return ""
+		return "", ""
 	}
 	if !hb.PromptUpdate || hb.PromptVersion <= ver {
-		return ""
+		promptEvent = ""
+	} else if staged := c.readStaged(); staged == hb.PromptVersion {
+		promptEvent = "" // already staged, worker hasn't confirmed yet
+	} else {
+		req2, _ := http.NewRequest("GET", c.relay+"/prompts/current", nil)
+		c.auth(req2)
+		resp2, err := c.http.Do(req2)
+		if err != nil {
+			return "", ""
+		}
+		defer resp2.Body.Close()
+		var pu struct {
+			Prompt  string           `json:"prompt"`
+			Changes []map[string]any `json:"changes"`
+		}
+		if json.NewDecoder(resp2.Body).Decode(&pu) != nil || pu.Prompt == "" {
+			return "", ""
+		}
+		_ = os.WriteFile(c.updatePath, []byte(pu.Prompt), 0o644)
+		ch, _ := json.Marshal(pu.Changes)
+		if ch == nil {
+			ch = []byte("[]")
+		}
+		_ = os.WriteFile(c.changePath, ch, 0o644)
+		_ = os.WriteFile(c.stagedPath, []byte(strconv.Itoa(hb.PromptVersion)), 0o644)
+		var sums []string
+		for _, e := range pu.Changes {
+			if s, ok := e["summary"].(string); ok {
+				sums = append(sums, s)
+			}
+		}
+		ev, _ := json.Marshal(map[string]any{
+			"prompt_update": true, "version": hb.PromptVersion,
+			"changes": strings.Join(sums, " | "),
+		})
+		promptEvent = string(ev)
 	}
-	if staged := c.readStaged(); staged == hb.PromptVersion {
-		return "" // already staged, worker hasn't confirmed yet: stay silent
+	// Receiver client nudge (§8.9): wake once per Release. Dedup via
+	// .client_version: the worker confirms by upgrading the binary (which
+	// then reports the new version and the nudge stops). Stale .client
+	// files from a downgrade are overwritten below.
+	if hb.ClientUpdate && hb.ClientVersion != "" && hb.ClientVersion != clientVersion {
+		if confirmed := c.readConfirmedClient(); confirmed != hb.ClientVersion {
+			_ = os.WriteFile(c.clientVerPath, []byte(hb.ClientVersion), 0o644)
+			ce, _ := json.Marshal(map[string]any{
+				"client_update": true, "version": hb.ClientVersion,
+				"download": "/clients/relay-tail?arch=<amd64|arm64>",
+			})
+			clientEvent = string(ce)
+		}
 	}
-	req2, _ := http.NewRequest("GET", c.relay+"/prompts/current", nil)
-	c.auth(req2)
-	resp2, err := c.http.Do(req2)
+	return promptEvent, clientEvent
+}
+
+// readConfirmedClient returns the staged client_update version (unconfirmed
+// nudge), or "" when none.
+func (c *cfg) readConfirmedClient() string {
+	b, err := os.ReadFile(c.clientVerPath)
 	if err != nil {
 		return ""
 	}
-	defer resp2.Body.Close()
-	var pu struct {
-		Prompt  string           `json:"prompt"`
-		Changes []map[string]any `json:"changes"`
-	}
-	if json.NewDecoder(resp2.Body).Decode(&pu) != nil || pu.Prompt == "" {
-		return ""
-	}
-	_ = os.WriteFile(c.updatePath, []byte(pu.Prompt), 0o644)
-	ch, _ := json.Marshal(pu.Changes)
-	if ch == nil {
-		ch = []byte("[]")
-	}
-	_ = os.WriteFile(c.changePath, ch, 0o644)
-	_ = os.WriteFile(c.stagedPath, []byte(strconv.Itoa(hb.PromptVersion)), 0o644)
-	var sums []string
-	for _, e := range pu.Changes {
-		if s, ok := e["summary"].(string); ok {
-			sums = append(sums, s)
-		}
-	}
-	ev, _ := json.Marshal(map[string]any{
-		"prompt_update": true, "version": hb.PromptVersion,
-		"changes": strings.Join(sums, " | "),
-	})
-	return string(ev)
+	return strings.TrimSpace(string(b))
 }
 
-// emitWake prints one normalized wake line: {tasks:[...]} plus the optional
-// prompt_update event. Same shape as the shell scripts so the thin wake
-// shell needs no change. Returns false when there is nothing to wake on.
-func emitWake(tasks []map[string]any, updateEvent string) bool {
-	if len(tasks) == 0 && updateEvent == "" {
+// emitWake prints one normalized wake line: {tasks:[...]} plus optional
+// prompt_update / client_update events. Same shape as the shell scripts so
+// the thin wake shell needs no change. Returns false when there is nothing
+// to wake on.
+func emitWake(tasks []map[string]any, events ...string) bool {
+	hasEvent := false
+	for _, e := range events {
+		if e != "" {
+			hasEvent = true
+			break
+		}
+	}
+	if len(tasks) == 0 && !hasEvent {
 		return false
 	}
 	out := map[string]any{"tasks": tasks}
-	if updateEvent != "" {
-		var pu any
-		if json.Unmarshal([]byte(updateEvent), &pu) == nil {
-			out["prompt_update"] = pu
+	for _, e := range events {
+		if e == "" {
+			continue
+		}
+		var v map[string]any
+		if json.Unmarshal([]byte(e), &v) != nil {
+			continue
+		}
+		for k, val := range v {
+			out[k] = val
 		}
 	}
 	b, _ := json.Marshal(out)
@@ -313,7 +371,7 @@ func (c *cfg) runPoll() int {
 		interval = 5
 	}
 	for {
-		updateEvent := c.heartbeatOnce()
+		promptEvent, clientEvent := c.heartbeatOnce()
 		since := c.readSeq()
 		req, _ := http.NewRequest("GET",
 			fmt.Sprintf("%s/messages?for=%s&since=%d", c.relay, c.ident, since), nil)
@@ -342,7 +400,7 @@ func (c *cfg) runPoll() int {
 			continue
 		}
 		c.writeSeq(pr.NextSince)
-		emitWake(pr.Items, updateEvent)
+		emitWake(pr.Items, promptEvent, clientEvent)
 		time.Sleep(time.Duration(interval) * time.Second)
 	}
 }
@@ -354,11 +412,11 @@ func (c *cfg) runSSE() int {
 	go c.heartbeatLoop()
 	for {
 		since := c.readSeq()
-		rc := c.heartbeatOnce()
-		if rc != "" {
-			// Surface staged instructions without killing the stream:
-			// same wake line the shell heartbeat used to emit.
-			emitWake(nil, rc)
+		promptEvent, clientEvent := c.heartbeatOnce()
+		if promptEvent != "" || clientEvent != "" {
+			// Surface staged instructions / client nudges without killing
+			// the stream: same wake line the shell heartbeat used to emit.
+			emitWake(nil, promptEvent, clientEvent)
 		}
 		code := c.holdStream(since)
 		switch code {
@@ -384,8 +442,8 @@ func (c *cfg) runSSE() int {
 func (c *cfg) heartbeatLoop() {
 	for {
 		time.Sleep(60 * time.Second)
-		if ev := c.heartbeatOnce(); ev != "" {
-			emitWake(nil, ev)
+		if pe, ce := c.heartbeatOnce(); pe != "" || ce != "" {
+			emitWake(nil, pe, ce)
 		}
 	}
 }

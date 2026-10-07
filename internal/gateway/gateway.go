@@ -529,6 +529,10 @@ type heartbeatReq struct {
 	// usual tasks, distilled from its own memory. Empty keeps the stored
 	// value; the server nudges a refresh when it goes stale.
 	Profile string `json:"profile"`
+	// ClientVersion is the receiver client build tag (§8.9), e.g. the
+	// relay-tail binary release. Empty = not reporting (shell scripts
+	// have no version); the server nudges when a newer Release exists.
+	ClientVersion string `json:"client_version"`
 }
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -555,7 +559,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if caps == "{}" {
 		caps = peer.Capabilities
 	}
-	if err := s.presence.Beat(peer.ID, pv, caps, req.PromptVersion, req.Profile, time.Now().Unix()); err != nil {
+	if err := s.presence.Beat(peer.ID, pv, caps, req.PromptVersion, req.Profile, req.ClientVersion, time.Now().Unix()); err != nil {
 		writeErr(w, 500, "heartbeat failed")
 		return
 	}
@@ -568,6 +572,15 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if p2 != nil && p2.PromptVersion < prompts.PromptVersion {
 		resp["prompt_update"] = true
 		resp["prompt_version"] = prompts.PromptVersion
+	}
+	// Receiver client nudge (§8.9): same channel as prompt_update. Only
+	// peers that report a version get nudged (shell scripts report ""
+	// and are left alone); dev builds never nudge. Advisory only — never
+	// gates protocol access, the client just stages a wake event.
+	if latest := web.BinaryVersion(); latest != "" && latest != "dev" && p2 != nil &&
+		p2.ClientVersion != "" && p2.ClientVersion != latest {
+		resp["client_update"] = true
+		resp["client_version"] = latest
 	}
 	// Profile refresh nudge (§8.7): never-set or older than
 	// profile_refresh_days. Same channel as prompt_update; the assistant
@@ -1237,6 +1250,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		"peers_total": len(peers), "peers_online": online,
 		"protocol": s.cfg.Protocol, "min_client": s.cfg.MinClient,
 		"prompt_version": prompts.PromptVersion,
+		"client_version": web.BinaryVersion(),
 	})
 }
 

@@ -568,6 +568,17 @@ without recompiling. Shipped as `relay-tail-linux-<arch>` Release assets
 the onboarding templates — shell scripts remain the default until field
 proven.
 
+Receiver client versions ride the heartbeat, mirroring prompt_version:
+the Go binary reports its release tag (`client_version`, baked via
+`-X main.clientVersion=`); shell scripts report nothing ("" = not
+reporting, never nudged). Stored in `peers.client_version` (+ updated_at),
+surfaced in `GET /peers` and the UI members table. When the server runs a
+newer Release tag, the heartbeat answers `client_update=true` +
+`client_version=<latest>`; the binary stages `.client_version` and emits a
+one-shot `client_update` wake event (download path included) so the thin
+shell wakes the worker to upgrade. Advisory only — never gates protocol
+access, no forward-only rule (build tags are opaque, overwrites allowed).
+
 ### 8.8 Local-delivery self-check (no "main session" on the server)
 
 The relay is a broker: it stores and forwards, it has no "main session" concept and no

@@ -31,6 +31,8 @@ type Peer struct {
 	PromptUpdatedAt  int64  // when the peer confirmed the current revision
 	Profile          string // self-reported capabilities + usual tasks (§8.7)
 	ProfileUpdatedAt int64  // when the profile was last set/refreshed
+	ClientVersion    string // receiver client version (§8.9); "" = not reporting
+	ClientUpdatedAt  int64  // when the client version was last reported
 }
 
 type TokenRow struct {
@@ -121,6 +123,11 @@ type Store interface {
 	// UpdatePeerPrompt records a peer's confirmed worker-instruction
 	// revision (§8.6). Only moves forward: stale replays are ignored.
 	UpdatePeerPrompt(id string, promptVersion int, ts int64) error
+	// UpdatePeerClient records the receiver client version (§8.9). Empty
+	// keeps the stored value (shell scripts don't report); non-empty
+	// overwrites unconditionally — client builds are opaque tags, not
+	// ordered revisions, so no forward-only gate.
+	UpdatePeerClient(id, clientVersion string, ts int64) error
 	TouchPeer(id string, ts int64) error
 	PrunePeers(olderThan int64) (int64, error)
 	// DeletePeer removes the peer row, revokes all its tokens and clears
@@ -297,9 +304,11 @@ func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 	var p Peer
 	err := s.db.QueryRow(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen,
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
-		COALESCE(profile,''),COALESCE(profile_updated_at,0) FROM peers WHERE id=?`, id).
+		COALESCE(profile,''),COALESCE(profile_updated_at,0),
+		COALESCE(client_version,''),COALESCE(client_updated_at,0) FROM peers WHERE id=?`, id).
 		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
-			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt)
+			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
+			&p.ClientVersion, &p.ClientUpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -312,7 +321,8 @@ func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 	rows, err := s.db.Query(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen,
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
-		COALESCE(profile,''),COALESCE(profile_updated_at,0) FROM peers ORDER BY id`)
+		COALESCE(profile,''),COALESCE(profile_updated_at,0),
+		COALESCE(client_version,''),COALESCE(client_updated_at,0) FROM peers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +331,8 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 	for rows.Next() {
 		var p Peer
 		if err := rows.Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
-			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt); err != nil {
+			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
+			&p.ClientVersion, &p.ClientUpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
@@ -354,6 +365,12 @@ func (s *sqliteStore) UpdatePeerPrompt(id string, promptVersion int, ts int64) e
 	// clobber a newer confirmation.
 	_, err := s.db.Exec(`UPDATE peers SET prompt_version=?, prompt_updated_at=?
 		WHERE id=? AND COALESCE(prompt_version,0)<=?`, promptVersion, ts, id, promptVersion)
+	return err
+}
+
+func (s *sqliteStore) UpdatePeerClient(id, clientVersion string, ts int64) error {
+	_, err := s.db.Exec(`UPDATE peers SET client_version=?, client_updated_at=? WHERE id=?`,
+		clientVersion, ts, id)
 	return err
 }
 
