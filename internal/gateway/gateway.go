@@ -809,7 +809,22 @@ func (s *Server) handleAdminListPeers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "peers failed")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "peers": views})
+	// Facets are computed over the unfiltered set so filter chips can show
+	// "全部 N / 在线 M" regardless of the current selection.
+	facets := map[string]int{"all": len(views)}
+	types := map[string]int{}
+	for _, v := range views {
+		if v.Online {
+			facets["online"]++
+		}
+		facets["status:"+v.Status]++
+		types[v.AgentType]++
+	}
+	p := parsePage(r)
+	filtered := filterPeers(views, r)
+	writeJSON(w, 200, withMeta(map[string]any{
+		"ok": true, "peers": slicePage(filtered, p), "facets": facets, "types": types,
+	}, p, len(filtered)))
 }
 
 // liveTransports snapshots the SSE hub's live peers for the members
@@ -885,6 +900,16 @@ func (s *Server) handleAdminListTokens(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "tokens failed")
 		return
 	}
+	p := parsePage(r)
+	toks = filterTokens(toks, r)
+	if p.Paged {
+		// Console view: newest first (legacy unpaged callers keep id ASC).
+		for i, j := 0, len(toks)-1; i < j; i, j = i+1, j-1 {
+			toks[i], toks[j] = toks[j], toks[i]
+		}
+	}
+	total := len(toks)
+	toks = slicePage(toks, p)
 	out := make([]map[string]any, 0, len(toks))
 	for _, t := range toks {
 		prefix := ""
@@ -897,7 +922,7 @@ func (s *Server) handleAdminListTokens(w http.ResponseWriter, r *http.Request) {
 			"last_used_at": t.LastUsedAt, "last_ip": t.LastIP, "revoked_at": t.RevokedAt,
 		})
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "tokens": out})
+	writeJSON(w, 200, withMeta(map[string]any{"ok": true, "tokens": out}, p, total))
 }
 
 func (s *Server) handleAdminRevokeToken(w http.ResponseWriter, r *http.Request) {
@@ -947,8 +972,12 @@ func (s *Server) handleAdminRotateToken(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
+	p := parsePage(r)
 	if q := r.URL.Query().Get("q"); q != "" {
-		msgs, err := s.st.SearchMessages(q, 50)
+		if !p.Paged {
+			p.Size = 50 // legacy: top 50 hits
+		}
+		msgs, total, err := s.st.SearchMessagesPage(q, p.Size, p.offset())
 		if err != nil {
 			writeErr(w, 500, "search failed")
 			return
@@ -963,41 +992,40 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 				"detail": m.Detail, "decision": m.Decision, "expires_at": m.ExpiresAt,
 			})
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "items": items})
+		writeJSON(w, 200, withMeta(map[string]any{"ok": true, "items": items}, p, total))
 		return
 	}
 	thread := r.URL.Query().Get("thread")
 	if thread == "" {
-		roots, err := s.st.ThreadRoots(100)
+		if !p.Paged {
+			p.Size = 100 // legacy: latest 100 threads
+		}
+		f := store.ThreadFilter{Q: r.URL.Query().Get("filter")}
+		switch r.URL.Query().Get("state") {
+		case "held":
+			f.Held = true
+		case "fused":
+			f.FusedMin = s.cfg.FuseMaxMessages
+		}
+		sums, total, err := s.st.ThreadSummaries(f, p.Size, p.offset())
 		if err != nil {
 			writeErr(w, 500, "threads failed")
 			return
 		}
-		out := make([]map[string]any, 0, len(roots))
-		for _, root := range roots {
-			msgs, _ := s.st.ThreadMessages(root, 1000)
-			participants := map[string]bool{}
-			held := 0
-			for _, m := range msgs {
-				participants[m.Sender] = true
-				if m.Recipient != "*" {
-					participants[m.Recipient] = true
-				}
-				if m.ApprovalState == "pending" {
-					held++
-				}
-			}
-			fused := len(msgs) >= s.cfg.FuseMaxMessages
-			names := []string{}
-			for p := range participants {
-				names = append(names, p)
-			}
+		out := make([]map[string]any, 0, len(sums))
+		for _, t := range sums {
 			out = append(out, map[string]any{
-				"root_id": root, "count": len(msgs),
-				"participants": names, "held": held, "fused": fused,
+				"root_id": t.RootID, "count": t.Count,
+				"participants": t.Participants, "held": t.Held,
+				"fused":       s.cfg.FuseMaxMessages > 0 && t.SinceReset >= s.cfg.FuseMaxMessages,
+				"since_reset": t.SinceReset, "first_at": t.FirstAt, "last_at": t.LastAt,
+				"last_seq": t.LastSeq, "last_sender": t.LastSender, "last_kind": t.LastKind,
+				"last_preview": t.LastPreview,
 			})
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "threads": out})
+		writeJSON(w, 200, withMeta(map[string]any{
+			"ok": true, "threads": out, "fuse_max_messages": s.cfg.FuseMaxMessages,
+		}, p, total))
 		return
 	}
 	msgs, err := s.st.ThreadMessages(thread, 1000)
@@ -1151,6 +1179,26 @@ func (s *Server) handleAdminFuseReset(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	actor := r.URL.Query().Get("actor")
 	action := r.URL.Query().Get("action")
+	if p := parsePage(r); p.Paged {
+		// Console mode: newest first, action is a prefix, q searches detail.
+		entries, total, err := s.st.ListAuditPage(store.AuditFilter{
+			Actor: actor, Action: action, Q: r.URL.Query().Get("q"),
+		}, p.Size, p.offset())
+		if err != nil {
+			writeErr(w, 500, "audit failed")
+			return
+		}
+		body := map[string]any{"ok": true, "entries": entries}
+		if r.URL.Query().Get("facets") == "1" {
+			actors, actions, err := s.st.AuditFacets()
+			if err == nil {
+				body["actors"], body["actions"] = actors, actions
+			}
+		}
+		writeJSON(w, 200, withMeta(body, p, total))
+		return
+	}
+	// Legacy cursor mode (scripts): seq ASC after `since`.
 	since, _ := strconv.Atoi(r.URL.Query().Get("since"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	entries, err := s.st.ListAudit(actor, action, since, limit)
@@ -1245,13 +1293,20 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			online++
 		}
 	}
-	writeJSON(w, 200, map[string]any{
+	body := map[string]any{
 		"ok": true, "db_bytes": size, "max_seq": maxSeq,
 		"peers_total": len(peers), "peers_online": online,
 		"protocol": s.cfg.Protocol, "min_client": s.cfg.MinClient,
 		"prompt_version": prompts.PromptVersion,
 		"client_version": web.BinaryVersion(),
-	})
+	}
+	if c, err := s.st.AdminCounts(); err == nil {
+		body["threads_total"] = c.Threads
+		body["pending_approvals"] = c.PendingApprovals
+		body["tokens_active"] = c.TokensActive
+		body["audit_total"] = c.AuditTotal
+	}
+	writeJSON(w, 200, body)
 }
 
 // handleAdminConfig exposes the effective retention/guard policy (DESIGN §9.4).

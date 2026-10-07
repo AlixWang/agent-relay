@@ -91,37 +91,43 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 			line = line[j+1:]
 		}
 	}
-	// loginbtn is a static HTML id wired via form submit (no direct $() ref).
-	// expMd/expJsonl are injected dynamically by viewThread — skip here.
-	if !ids["loginbtn"] {
-		t.Fatal(`index.html missing id="loginbtn"`)
-	}
-	for _, ref := range []string{
-		"pw", "logoutbtn", "dbinfo", "ver",
-		"refreshPeers", "peerSummary", "peerTable",
-		"pType", "pPeer", "genPrompt", "promptOut", "inviteCode",
-		"copyPrompt", "promptText", "rPeer", "genReconf", "reconfText",
-		"refreshThreads", "threadTable", "threadTitle", "threadMsgs",
-		"qSearch", "qBtn", "searchOut",
-		"aActor", "aAction", "refreshAudit", "exportAudit", "auditTable",
-		"refreshConfig", "configOut",
-		"refreshTokens", "tokenTable", "rotPeer", "rotLabel", "rotBtn", "rotOut",
-		"updCurrent", "updVer", "updCheck", "updApply",
-		"updWarn", "updAckRow", "updAck", "updLog",
-		"updDockerCard", "updDockerCmd",
-		"loginPage", "loginForm", "loginErr", "username", "app",
+
+	// Key elements must exist in index.html
+	for _, key := range []string{
+		"loginPage", "loginForm", "loginbtn", "username", "pw", "loginErr", "app",
+		"sidebar", "menuBtn", "themeBtn", "logoutbtn", "pageTitle", "pageDesc",
+		"page-members", "page-threads", "page-prompts", "page-audit", "page-tokens", "page-system",
+		"threadDrawer", "rotateDlg", "confirmDlg", "toasts",
 	} {
-		if !strings.Contains(js, "$('"+ref+"')") {
-			t.Fatalf("app.js no longer references #%s (test stale?)", ref)
-		}
-		if !ids[ref] {
-			t.Fatalf("index.html missing id=%q used by app.js", ref)
+		if !ids[key] {
+			t.Fatalf("index.html missing key element id=%q", key)
 		}
 	}
-	for _, tab := range []string{"members", "prompts", "threads", "audit", "update"} {
-		if !ids["tab-"+tab] {
-			t.Fatalf("missing tab-%s", tab)
+
+	// Dynamically find every $('id') in app.js and assert it is present in index.html
+	lines := strings.Split(js, "\n")
+	matched := 0
+	for _, line := range lines {
+		for {
+			idx := strings.Index(line, "$('")
+			if idx < 0 {
+				break
+			}
+			line = line[idx+3:]
+			end := strings.Index(line, "')")
+			if end < 0 {
+				break
+			}
+			ref := line[:end]
+			line = line[end+2:]
+			if !ids[ref] {
+				t.Fatalf("index.html missing id=%q referenced by app.js", ref)
+			}
+			matched++
 		}
+	}
+	if matched < 30 {
+		t.Fatalf("expected at least 30 $('id') checks in app.js, got %d", matched)
 	}
 }
 

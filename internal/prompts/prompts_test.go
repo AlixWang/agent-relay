@@ -281,7 +281,7 @@ func TestClientChoiceDocumented(t *testing.T) {
 		}
 		for _, must := range []string{"首选", "relay-tail?arch", "client_update", "只用其一"} {
 			if !strings.Contains(out, must) {
-			t.Fatalf("%s missing client choice %q", typ, must)
+				t.Fatalf("%s missing client choice %q", typ, must)
 			}
 		}
 	}

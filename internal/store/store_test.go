@@ -312,3 +312,94 @@ func TestPermissionRequestCAS(t *testing.T) {
 		t.Fatalf("prune later: %d %v", n, err)
 	}
 }
+
+func TestStoreAdminPages(t *testing.T) {
+	st := openTest(t)
+	mustPeer(t, st, "alice")
+	mustPeer(t, st, "bob")
+
+	// Create tokens
+	if _, err := st.CreateToken("alice", "hash1", "tok1", 100); err != nil {
+		t.Fatal(err)
+	}
+	tok2ID, err := st.CreateToken("bob", "hash2", "tok2", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RevokeToken(tok2ID, 300); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create messages across threads
+	mustMsg(t, st, &Message{ID: "m1", Sender: "alice", Recipient: "bob", Kind: "task",
+		RootID: "alice/t1", Payload: "do homework", CreatedAt: 1000})
+	mustMsg(t, st, &Message{ID: "m2", Sender: "bob", Recipient: "alice", Kind: "progress",
+		RootID: "alice/t1", Payload: "working on it", CreatedAt: 1010})
+	mustMsg(t, st, &Message{ID: "m3", Sender: "alice", Recipient: "bob", Kind: "task",
+		RootID: "alice/t2", Payload: "research something", CreatedAt: 1020,
+		RequiresApproval: true, ApprovalState: "pending"})
+
+	// Audit logs
+	_ = st.AppendAudit("admin", "peer.status", "peer=alice status=active", 1000)
+	_ = st.AppendAudit("system", "verify.passed", "peer=alice", 1010)
+
+	// Test AdminCounts
+	counts, err := st.AdminCounts()
+	if err != nil {
+		t.Fatalf("AdminCounts: %v", err)
+	}
+	if counts.Threads != 2 {
+		t.Errorf("threads count: got %d, want 2", counts.Threads)
+	}
+	if counts.PendingApprovals != 1 {
+		t.Errorf("pending approvals: got %d, want 1", counts.PendingApprovals)
+	}
+	if counts.TokensActive != 1 {
+		t.Errorf("active tokens: got %d, want 1", counts.TokensActive)
+	}
+	if counts.AuditTotal != 2 {
+		t.Errorf("audit total: got %d, want 2", counts.AuditTotal)
+	}
+
+	// Test ThreadSummaries
+	sums, total, err := st.ThreadSummaries(ThreadFilter{}, 10, 0)
+	if err != nil || total != 2 || len(sums) != 2 {
+		t.Fatalf("ThreadSummaries: %v, total=%d, len=%d", err, total, len(sums))
+	}
+	if sums[0].RootID != "alice/t2" {
+		t.Errorf("expected latest thread first: got %s, want alice/t2", sums[0].RootID)
+	}
+	if sums[0].Held != 1 {
+		t.Errorf("expected held=1 on t2, got %d", sums[0].Held)
+	}
+
+	// Test ThreadSummaries with Held filter
+	heldSums, heldTotal, err := st.ThreadSummaries(ThreadFilter{Held: true}, 10, 0)
+	if err != nil || heldTotal != 1 || len(heldSums) != 1 || heldSums[0].RootID != "alice/t2" {
+		t.Fatalf("ThreadSummaries held filter failed: %v, total=%d", err, heldTotal)
+	}
+
+	// Test SearchMessagesPage
+	searchResults, searchTotal, err := st.SearchMessagesPage("homework", 10, 0)
+	if err != nil || searchTotal != 1 || len(searchResults) != 1 {
+		t.Fatalf("SearchMessagesPage: %v, total=%d", err, searchTotal)
+	}
+	if searchResults[0].Payload != "do homework" {
+		t.Errorf("search result payload mismatch: %s", searchResults[0].Payload)
+	}
+
+	// Test ListAuditPage
+	auditEntries, auditTotal, err := st.ListAuditPage(AuditFilter{}, 10, 0)
+	if err != nil || auditTotal != 2 || len(auditEntries) != 2 {
+		t.Fatalf("ListAuditPage: %v, total=%d", err, auditTotal)
+	}
+	if auditEntries[0].Action != "verify.passed" { // newest first
+		t.Errorf("expected newest audit first: got %s", auditEntries[0].Action)
+	}
+
+	// Test AuditFacets
+	actors, actions, err := st.AuditFacets()
+	if err != nil || len(actors) != 2 || len(actions) != 2 {
+		t.Fatalf("AuditFacets: %v, actors=%v, actions=%v", err, actors, actions)
+	}
+}

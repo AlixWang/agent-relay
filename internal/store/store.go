@@ -193,6 +193,12 @@ type Store interface {
 	AppendAudit(actor, action, detail string, ts int64) error
 	ListAudit(actor, action string, since, limit int) ([]*AuditEntry, error)
 	PruneAudit(olderThan int64) (int64, error)
+	// console read models (admin_pages.go): paged, total-counted queries
+	ThreadSummaries(f ThreadFilter, limit, offset int) ([]*ThreadSummary, int, error)
+	SearchMessagesPage(query string, limit, offset int) ([]*Message, int, error)
+	ListAuditPage(f AuditFilter, limit, offset int) ([]*AuditEntry, int, error)
+	AuditFacets() (actors, actions []string, err error)
+	AdminCounts() (*AdminCounts, error)
 	// ops
 	DBSize() (int64, error)
 	Vacuum() error

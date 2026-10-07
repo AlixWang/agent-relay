@@ -603,6 +603,37 @@ claiming "not received".
 
 The UI is an operations console, not a chat app. Its four jobs:
 
+### 9.0 Console read models (paging, facets, filters)
+
+Every admin list endpoint keeps its legacy shape and gains optional paging:
+`?page=<1-based>&page_size=<n>` adds `total`/`page`/`page_size` next to the
+original key (`peers`/`tokens`/`threads`/`items`/`entries`), so scripts that
+ignore the new fields are unaffected. Without `page*`, responses keep the old
+semantics (full list, or the legacy `limit`/`since` cursor for audit).
+
+- `GET /admin/peers` — server-side paging + `q`/`status`(comma list)/`type`/
+  `online`/`transport` filters, plus `facets` (counts over the *unfiltered*
+  set, so chips read "全部 N / 在线 M") and `types` for the type picker.
+- `GET /admin/tokens` — paged, newest first when paged; `peer`/`state`/`q`
+  filters; `state=revoked` is the only way to see dead credentials.
+- `GET /admin/messages` — thread list is served by `ThreadSummaries`
+  (one grouped query: counts, holds, post-fuse-watermark messages,
+  participants, last message preview) instead of loading every thread and
+  rescanning its messages (the old N+1). `?state=held|fused` and `?filter=`
+  narrow server-side; `fuse_max_messages` comes back with the page so the
+  UI meter matches the guard.
+- `GET /admin/messages?q=` — paged payload search (`SearchMessagesPage`).
+- `GET /admin/audit` — paged newest-first with `action` as a *prefix* match,
+  `q` over `detail`, and `facets=1` returning distinct actors/actions.
+- `GET /admin/stats` — gains `threads_total`/`pending_approvals`/
+  `tokens_active`/`audit_total` for the overview cards (single round trip).
+
+The console itself is a hash-routed single page (成员 / 消息线程 / 邀请 /
+审计 / Token / 策略&更新) with dark+light themes, a mobile drawer, toast
+notifications and a shared pager component. It stays build-chain-free: one
+`index.html` + `app.js` + `style.css`, embedded in the binary and served
+with `?v=<tag>` cache busting.
+
 ### 9.1 Members
 
 - Table of peers: identity, type, status (pending/verifying/active/suspended), online dot, last seen, protocol version, capabilities badges.

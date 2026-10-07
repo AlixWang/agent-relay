@@ -1291,3 +1291,72 @@ func TestHeartbeatClientVersion(t *testing.T) {
 		t.Fatalf("empty clobbered: %+v", p)
 	}
 }
+
+func TestAdminPaginationAndFacets(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "hermes")
+	admin := f.adminLogin(t)
+
+	// Send messages to generate threads and tokens
+	_, _ = f.do(t, "POST", "/messages",
+		map[string]any{"id": "m1", "to": "bob", "from": "alice", "payload": "hello bob"}, f.tok["alice"])
+	_, _ = f.do(t, "POST", "/messages",
+		map[string]any{"id": "m2", "to": "alice", "from": "bob", "payload": "hello alice", "requires_approval": true}, f.tok["bob"])
+
+	// 1. Peers pagination and facets
+	c, out := f.doAuth(t, "GET", "/admin/peers?page=1&page_size=1", nil, admin)
+	if c != 200 {
+		t.Fatalf("peers: %d %+v", c, out)
+	}
+	if int(out["total"].(float64)) != 2 || int(out["page"].(float64)) != 1 || len(out["peers"].([]any)) != 1 {
+		t.Fatalf("peers pagination mismatch: %+v", out)
+	}
+	facets := out["facets"].(map[string]any)
+	if int(facets["all"].(float64)) != 2 {
+		t.Fatalf("facets all mismatch: %+v", facets)
+	}
+
+	// Filter by type
+	c, out = f.doAuth(t, "GET", "/admin/peers?page=1&page_size=10&type=hermes", nil, admin)
+	if c != 200 || int(out["total"].(float64)) != 1 {
+		t.Fatalf("peers filter type mismatch: %+v", out)
+	}
+
+	// Status accepts a comma list (console groups pending+verifying)
+	c, out = f.doAuth(t, "GET", "/admin/peers?page=1&page_size=10&status=pending,verifying", nil, admin)
+	if c != 200 || len(out["peers"].([]any)) == 0 {
+		t.Fatalf("peers status list filter mismatch: %+v", out)
+	}
+	c, out = f.doAuth(t, "GET", "/admin/peers?page=1&page_size=10&status=suspended,nope", nil, admin)
+	if c != 200 || len(out["peers"].([]any)) != 0 {
+		t.Fatalf("peers status list filter should exclude all: %+v", out)
+	}
+
+	// 2. Tokens pagination
+	c, out = f.doAuth(t, "GET", "/admin/tokens?page=1&page_size=1", nil, admin)
+	if c != 200 || int(out["total"].(float64)) != 2 || len(out["tokens"].([]any)) != 1 {
+		t.Fatalf("tokens pagination mismatch: %+v", out)
+	}
+
+	// 3. Threads pagination
+	c, out = f.doAuth(t, "GET", "/admin/messages?page=1&page_size=1", nil, admin)
+	if c != 200 || len(out["threads"].([]any)) != 1 || out["total"] == nil {
+		t.Fatalf("threads pagination mismatch: %+v", out)
+	}
+
+	// 4. Audit pagination & facets
+	c, out = f.doAuth(t, "GET", "/admin/audit?page=1&page_size=1&facets=1", nil, admin)
+	if c != 200 || len(out["entries"].([]any)) != 1 || out["total"] == nil || out["actors"] == nil {
+		t.Fatalf("audit pagination & facets mismatch: %+v", out)
+	}
+
+	// 5. Stats overview counts
+	c, out = f.doAuth(t, "GET", "/admin/stats", nil, admin)
+	if c != 200 {
+		t.Fatalf("stats: %d %+v", c, out)
+	}
+	if out["pending_approvals"] == nil || out["threads_total"] == nil || out["tokens_active"] == nil {
+		t.Fatalf("stats missing count fields: %+v", out)
+	}
+}

@@ -1,218 +1,424 @@
 <!DOCTYPE html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>agent-relay · 运维控制台</title>
+<script>
+  // Apply saved theme before first paint (avoids a dark→light flash).
+  try { const t = localStorage.getItem('ar-theme'); if (t) document.documentElement.dataset.theme = t; } catch {}
+</script>
 <link rel="stylesheet" href="/style.css?v={{ASSET_V}}">
 </head>
 <body>
 
-<!-- 登录页：独立 form + 用户名占位，供浏览器密码管理器识别保存 -->
+<!-- ============ Icon sprite (Lucide, ISC license) ============ -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <defs>
+    <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+    <symbol id="i-user-plus" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></symbol>
+    <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+    <symbol id="i-scroll" viewBox="0 0 24 24"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><path d="M2 18v3c0 .6.4 1 1 1h4v-3h3v-3h2l1.4-1.4a6.5 6.5 0 1 0-4-4Z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="i-chev-l" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+    <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-chevs-l" viewBox="0 0 24 24"><path d="m11 17-5-5 5-5"/><path d="m18 17-5-5 5-5"/></symbol>
+    <symbol id="i-chevs-r" viewBox="0 0 24 24"><path d="m6 17 5-5-5-5"/><path d="m13 17 5-5-5-5"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></symbol>
+    <symbol id="i-radio" viewBox="0 0 24 24"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></symbol>
+    <symbol id="i-timer" viewBox="0 0 24 24"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+    <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+    <symbol id="i-hash" viewBox="0 0 24 24"><line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></symbol>
+    <symbol id="i-ok" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-err" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4"/><path d="M12 16V8"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></symbol>
+    <symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></symbol>
+    <symbol id="i-package" viewBox="0 0 24 24"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></symbol>
+    <symbol id="i-inbox" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+    <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+    <symbol id="i-arrow-r" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></symbol>
+  </defs>
+</svg>
+
+<!-- ============ Login ============ -->
 <div id="loginPage" class="login-wrap" hidden>
-  <form id="loginForm" class="card login-card" autocomplete="on">
+  <form id="loginForm" class="login-card" autocomplete="on">
     <div class="login-head">
-      <div class="login-logo">AR</div>
+      <div class="logo lg">AR</div>
       <div>
         <h1>agent-relay</h1>
-        <p class="muted">运维控制台 · 请登录</p>
+        <p class="muted">多助手任务中继 · 运维控制台</p>
       </div>
     </div>
     <label class="field" for="username">用户名
-      <input id="username" name="username" value="admin" autocomplete="username" readonly>
+      <span class="input-icon"><svg class="icon"><use href="#i-user"/></svg>
+        <input id="username" name="username" value="admin" autocomplete="username" readonly></span>
     </label>
     <label class="field" for="pw">密码
-      <input id="pw" name="password" type="password" placeholder="admin password" autocomplete="current-password">
+      <span class="input-icon"><svg class="icon"><use href="#i-lock"/></svg>
+        <input id="pw" name="password" type="password" placeholder="admin password" autocomplete="current-password" required></span>
     </label>
-    <p id="loginErr" class="error" hidden></p>
-    <button id="loginbtn" type="submit" class="btn w-full">登录</button>
+    <p id="loginErr" class="alert alert-bad" hidden></p>
+    <button id="loginbtn" type="submit" class="btn btn-primary w-full">登录 <svg class="icon"><use href="#i-arrow-r"/></svg></button>
   </form>
 </div>
 
-<!-- 主界面 -->
-<div id="app" hidden>
-<header class="topbar">
-  <div class="brand">
-    <div class="login-logo sm">AR</div>
-    <div>
-      <strong>agent-relay</strong>
-      <span id="ver" class="muted small"></span>
+<!-- ============ App shell ============ -->
+<div id="app" class="shell" hidden>
+  <aside class="sidebar" id="sidebar">
+    <div class="sb-brand">
+      <div class="logo">AR</div>
+      <div class="sb-brand-text">
+        <strong>agent-relay</strong>
+        <span id="sbVer" class="muted xs">—</span>
+      </div>
     </div>
+    <nav class="sb-nav" aria-label="主导航">
+      <div class="sb-group">运行</div>
+      <a href="#members" data-route="members" class="sb-link"><svg class="icon"><use href="#i-users"/></svg><span>成员</span><em id="navOnline" class="sb-count"></em></a>
+      <a href="#threads" data-route="threads" class="sb-link"><svg class="icon"><use href="#i-message"/></svg><span>消息线程</span><em id="navPending" class="sb-count warn" hidden></em></a>
+      <div class="sb-group">接入</div>
+      <a href="#prompts" data-route="prompts" class="sb-link"><svg class="icon"><use href="#i-user-plus"/></svg><span>邀请 &amp; Prompt</span></a>
+      <div class="sb-group">安全</div>
+      <a href="#audit" data-route="audit" class="sb-link"><svg class="icon"><use href="#i-scroll"/></svg><span>审计日志</span></a>
+      <a href="#tokens" data-route="tokens" class="sb-link"><svg class="icon"><use href="#i-key"/></svg><span>Token 管理</span></a>
+      <div class="sb-group">系统</div>
+      <a href="#system" data-route="system" class="sb-link"><svg class="icon"><use href="#i-server"/></svg><span>策略 &amp; 更新</span></a>
+    </nav>
+    <div class="sb-foot">
+      <div class="sb-meta">
+        <span title="消息最大序号"><svg class="icon xs"><use href="#i-hash"/></svg><b id="sbSeq">-</b></span>
+        <span title="数据库体积"><svg class="icon xs"><use href="#i-db"/></svg><b id="sbDb">-</b></span>
+      </div>
+    </div>
+  </aside>
+  <div class="sb-scrim" id="sbScrim"></div>
+
+  <div class="main-col">
+    <header class="topbar">
+      <button class="btn-icon only-mobile" id="menuBtn" aria-label="打开菜单"><svg class="icon"><use href="#i-menu"/></svg></button>
+      <div class="tb-title">
+        <h1 id="pageTitle">成员</h1>
+        <p id="pageDesc" class="muted xs"></p>
+      </div>
+      <div class="tb-right">
+        <span class="pill" id="onlinePill"><span class="dot on"></span><span id="onlineText">-</span></span>
+        <button class="btn-icon" id="themeBtn" aria-label="切换主题" data-tip="切换主题"><svg class="icon"><use href="#i-sun"/></svg></button>
+        <button class="btn-icon" id="logoutbtn" aria-label="退出登录" data-tip="退出登录"><svg class="icon"><use href="#i-logout"/></svg></button>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ---------- 成员 ---------- -->
+      <section id="page-members" class="page">
+        <div class="stats">
+          <div class="stat"><div class="stat-ic ok"><svg class="icon"><use href="#i-activity"/></svg></div><div><span class="stat-label">在线成员</span><b id="stOnline">-</b></div></div>
+          <div class="stat"><div class="stat-ic warn"><svg class="icon"><use href="#i-shield"/></svg></div><div><span class="stat-label">待审批消息</span><b id="stPending">-</b></div></div>
+          <div class="stat"><div class="stat-ic info"><svg class="icon"><use href="#i-message"/></svg></div><div><span class="stat-label">线程总数</span><b id="stThreads">-</b></div></div>
+          <div class="stat"><div class="stat-ic brand"><svg class="icon"><use href="#i-key"/></svg></div><div><span class="stat-label">有效 Token</span><b id="stTokens">-</b></div></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-bar">
+            <div class="seg" id="peerSeg" role="tablist">
+              <button data-v="" class="on">全部 <em id="fcAll"></em></button>
+              <button data-v="online">在线 <em id="fcOnline"></em></button>
+              <button data-v="active">active <em id="fcActive"></em></button>
+              <button data-v="pending">待验证 <em id="fcPending"></em></button>
+              <button data-v="suspended">已停用 <em id="fcSuspended"></em></button>
+            </div>
+            <div class="bar-right">
+              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="peerQ" type="search" placeholder="搜索身份 / 简介"></label>
+              <select id="peerType" aria-label="类型"><option value="">全部类型</option></select>
+              <label class="switch" data-tip="每 15 秒自动刷新"><input type="checkbox" id="peerAuto"><span></span>自动</label>
+              <button class="btn btn-outline btn-sm" id="refreshPeers"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="peerTable">
+              <thead><tr><th>成员</th><th>状态</th><th>在线</th><th>接收</th><th>版本</th><th>能力</th><th class="col-profile">简介</th><th class="th-right">操作</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pager" id="peerPager"></div>
+        </div>
+      </section>
+
+      <!-- ---------- 消息线程 ---------- -->
+      <section id="page-threads" class="page" hidden>
+        <div class="panel">
+          <div class="panel-bar">
+            <div class="seg" id="threadMode">
+              <button data-v="threads" class="on"><svg class="icon xs"><use href="#i-message"/></svg>线程</button>
+              <button data-v="search"><svg class="icon xs"><use href="#i-search"/></svg>全文搜索</button>
+            </div>
+            <div class="seg" id="threadState">
+              <button data-v="" class="on">全部</button>
+              <button data-v="held">待审批</button>
+              <button data-v="fused">已熔断</button>
+            </div>
+            <div class="bar-right">
+              <form class="search" id="threadSearchForm"><svg class="icon"><use href="#i-search"/></svg><input id="threadQ" type="search" placeholder="按 root_id / 参与者过滤"></form>
+              <button class="btn btn-outline btn-sm" id="refreshThreads"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
+            </div>
+          </div>
+          <div id="threadListView">
+            <div class="table-wrap">
+              <table class="table" id="threadTable">
+                <thead><tr><th>线程</th><th>参与者</th><th>消息数</th><th>状态</th><th>最近活动</th><th class="th-right">操作</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div id="searchView" hidden>
+            <div id="searchList" class="msg-list"></div>
+          </div>
+          <div class="pager" id="threadPager"></div>
+        </div>
+        <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg>熔断线程可一键 reset：保留历史，从当前 max seq 重新计数。</p>
+      </section>
+
+      <!-- ---------- 邀请 & Prompt ---------- -->
+      <section id="page-prompts" class="page" hidden>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head">
+              <div class="card-ic brand"><svg class="icon"><use href="#i-user-plus"/></svg></div>
+              <div><h2>生成邀请 &amp; Onboarding Prompt</h2><p class="muted xs">生成 → 粘贴给新助手 → 等成员状态变为 <b>active</b>（冒烟验证通过）</p></div>
+            </div>
+            <div class="field"><span>助手类型</span>
+              <div class="type-grid" id="pTypeGrid" role="radiogroup">
+                <label><input type="radio" name="pType" value="muse" checked><span><svg class="icon"><use href="#i-bot"/></svg><b>muse</b><small>个人助手</small></span></label>
+                <label><input type="radio" name="pType" value="hermes"><span><svg class="icon"><use href="#i-send"/></svg><b>hermes</b><small>Hermes Agent</small></span></label>
+                <label><input type="radio" name="pType" value="claw"><span><svg class="icon"><use href="#i-terminal"/></svg><b>claw</b><small>Claw 系</small></span></label>
+                <label><input type="radio" name="pType" value="generic"><span><svg class="icon"><use href="#i-zap"/></svg><b>generic</b><small>通用</small></span></label>
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="field">预设身份（可选）<input id="pPeer" placeholder="如 muse-c" autocomplete="off"></label>
+              <div class="field field-btn"><button id="genPrompt" class="btn btn-primary"><svg class="icon"><use href="#i-zap"/></svg>生成邀请</button></div>
+            </div>
+            <div id="promptOut" hidden>
+              <div class="invite-box">
+                <div><span class="muted xs">邀请码 · 一次有效，请即刻使用</span><code id="inviteCode" class="big-code"></code></div>
+                <button class="btn-icon" data-copy="#inviteCode" data-tip="复制邀请码"><svg class="icon"><use href="#i-copy"/></svg></button>
+              </div>
+              <div class="code-block">
+                <div class="code-head"><span><svg class="icon xs"><use href="#i-terminal"/></svg>onboarding-prompt.md</span>
+                  <div><button class="btn btn-ghost btn-xs" data-copy="#promptText"><svg class="icon xs"><use href="#i-copy"/></svg>复制</button>
+                  <button class="btn btn-ghost btn-xs" data-dl="#promptText" data-name="onboarding-prompt.md"><svg class="icon xs"><use href="#i-download"/></svg>下载</button></div>
+                </div>
+                <pre id="promptText"></pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div class="card-ic info"><svg class="icon"><use href="#i-wrench"/></svg></div>
+              <div><h2>已有成员重配 Prompt</h2><p class="muted xs">协议 / 指令升级时使用，沿用原 token，无需重新注册</p></div>
+            </div>
+            <div class="form-row">
+              <label class="field">成员身份
+                <input id="rPeer" list="peerList" placeholder="选择或输入身份" autocomplete="off">
+              </label>
+              <div class="field field-btn"><button id="genReconf" class="btn btn-outline"><svg class="icon"><use href="#i-rotate"/></svg>生成重配 Prompt</button></div>
+            </div>
+            <div id="reconfOut" class="code-block" hidden>
+              <div class="code-head"><span><svg class="icon xs"><use href="#i-terminal"/></svg><span id="reconfName">reconfigure.md</span></span>
+                <div><button class="btn btn-ghost btn-xs" data-copy="#reconfText"><svg class="icon xs"><use href="#i-copy"/></svg>复制</button></div>
+              </div>
+              <pre id="reconfText"></pre>
+            </div>
+            <div id="reconfEmpty" class="empty sm"><svg class="icon"><use href="#i-wrench"/></svg><p>选择成员后生成重配指令</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 审计 ---------- -->
+      <section id="page-audit" class="page" hidden>
+        <div class="panel">
+          <div class="panel-bar">
+            <div class="bar-left">
+              <select id="aActor" aria-label="actor"><option value="">全部 actor</option></select>
+              <select id="aAction" aria-label="action"><option value="">全部 action</option></select>
+              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="aQ" type="search" placeholder="搜索 detail"></label>
+            </div>
+            <div class="bar-right">
+              <button class="btn btn-ghost btn-sm" id="exportAudit"><svg class="icon"><use href="#i-download"/></svg>导出 JSON</button>
+              <button class="btn btn-outline btn-sm" id="refreshAudit"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="auditTable">
+              <thead><tr><th class="col-seq">#</th><th>时间</th><th>actor</th><th>action</th><th>detail</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pager" id="auditPager"></div>
+        </div>
+      </section>
+
+      <!-- ---------- Tokens ---------- -->
+      <section id="page-tokens" class="page" hidden>
+        <div class="panel">
+          <div class="panel-bar">
+            <div class="seg" id="tokSeg">
+              <button data-v="" class="on">全部</button>
+              <button data-v="active">有效</button>
+              <button data-v="revoked">已撤销</button>
+            </div>
+            <div class="bar-right">
+              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="tokQ" type="search" placeholder="搜索 peer / label / IP"></label>
+              <button class="btn btn-outline btn-sm" id="refreshTokens"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
+              <button class="btn btn-primary btn-sm" id="openRotate"><svg class="icon"><use href="#i-plus"/></svg>签发 Token</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="tokenTable">
+              <thead><tr><th class="col-seq">ID</th><th>成员</th><th>hash 前缀</th><th>label</th><th>创建</th><th>最后使用</th><th>状态</th><th class="th-right">操作</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pager" id="tokenPager"></div>
+        </div>
+      </section>
+
+      <!-- ---------- 系统 ---------- -->
+      <section id="page-system" class="page" hidden>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head">
+              <div class="card-ic brand"><svg class="icon"><use href="#i-server"/></svg></div>
+              <div><h2>服务信息</h2><p class="muted xs">当前运行实例</p></div>
+            </div>
+            <dl class="kv" id="sysInfo"></dl>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <div class="card-ic info"><svg class="icon"><use href="#i-sliders"/></svg></div>
+              <div><h2>Retention 与 Guard 策略</h2><p class="muted xs">只读 · 修改走 config.toml + 重启</p></div>
+            </div>
+            <dl class="kv" id="sysPolicy"></dl>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-ic ok"><svg class="icon"><use href="#i-package"/></svg></div>
+            <div><h2>版本更新</h2><p class="muted xs">仅 GitHub Releases · systemd 自动（备份 + 健康检查 + 失败回滚）/ docker 给命令</p></div>
+          </div>
+          <p class="muted small" id="updCurrent">读取中…</p>
+          <div class="form-row">
+            <label class="field">目标版本（留空 = 最新版）<input id="updVer" placeholder="如 v0.10.0，留空查最新" autocomplete="off"></label>
+            <div class="field field-btn row-btns">
+              <button id="updCheck" class="btn btn-outline"><svg class="icon"><use href="#i-search"/></svg>检查</button>
+              <button id="updApply" class="btn btn-primary" disabled><svg class="icon"><use href="#i-up"/></svg>应用更新</button>
+            </div>
+          </div>
+          <div id="updWarn"></div>
+          <label class="check" id="updAckRow" hidden><input type="checkbox" id="updAck"> 我已知晓协议变更，继续更新</label>
+          <pre id="updLog" class="log"></pre>
+        </div>
+        <div class="card" id="updDockerCard" hidden>
+          <div class="card-head">
+            <div class="card-ic"><svg class="icon"><use href="#i-terminal"/></svg></div>
+            <div><h2>Docker 模式更新命令</h2><p class="muted xs">Web 更新只支持 systemd，请按下面命令手动执行</p></div>
+          </div>
+          <div class="code-block">
+            <div class="code-head"><span>shell</span><div><button class="btn btn-ghost btn-xs" data-copy="#updDockerCmd"><svg class="icon xs"><use href="#i-copy"/></svg>复制</button></div></div>
+            <pre id="updDockerCmd"></pre>
+          </div>
+        </div>
+      </section>
+    </main>
   </div>
-  <div class="topbar-right">
-    <span id="dbinfo" class="badge"></span>
-    <button id="logoutbtn" class="btn btn-ghost btn-sm">退出</button>
-  </div>
-</header>
-
-<nav class="tabs" role="tablist">
-  <button data-tab="members" class="tab active" role="tab">成员</button>
-  <button data-tab="prompts" class="tab" role="tab">邀请 &amp; Prompt</button>
-  <button data-tab="threads" class="tab" role="tab">消息 &amp; 线程</button>
-  <button data-tab="audit" class="tab" role="tab">审计 &amp; Token</button>
-  <button data-tab="update" class="tab" role="tab">更新</button>
-</nav>
-
-<main>
-  <section id="tab-members">
-    <div class="toolbar">
-      <div>
-        <h2>成员</h2>
-        <p id="peerSummary" class="muted small"></p>
-      </div>
-      <button id="refreshPeers" class="btn btn-outline btn-sm">刷新</button>
-    </div>
-    <div class="table-wrap">
-      <table id="peerTable" class="table">
-        <thead><tr><th>身份</th><th>类型</th><th>状态</th><th>在线</th><th>最后在线</th><th>协议</th><th>指令</th><th>客户端</th><th>能力</th><th>简介</th><th>接收</th><th class="th-right">操作</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
-
-  <section id="tab-prompts" hidden>
-    <div class="card">
-      <h2>生成邀请 &amp; Onboarding Prompt</h2>
-      <p class="muted small">流程：生成 → 把 prompt 粘贴给新助手 → 等成员表状态变 <b>active</b>（冒烟验证通过）。</p>
-      <div class="form-row">
-        <label class="field">类型
-          <select id="pType">
-            <option value="muse">muse</option>
-            <option value="hermes">hermes</option>
-            <option value="claw">claw</option>
-            <option value="generic">generic</option>
-          </select>
-        </label>
-        <label class="field">预设身份（可选）
-          <input id="pPeer" placeholder="muse-c">
-        </label>
-        <div class="field field-btn">
-          <button id="genPrompt" class="btn">生成邀请 &amp; Prompt</button>
-        </div>
-      </div>
-      <div id="promptOut" hidden>
-        <p>邀请码：<code id="inviteCode"></code> <span class="muted small">（一次有效，请即刻使用）</span></p>
-        <button id="copyPrompt" class="btn btn-outline btn-sm">复制 Prompt</button>
-        <pre id="promptText"></pre>
-      </div>
-    </div>
-    <div class="card">
-      <h2>已有成员重配 Prompt <span class="muted small">（协议升级用）</span></h2>
-      <div class="form-row">
-        <label class="field">身份
-          <input id="rPeer" placeholder="muse-a">
-        </label>
-        <div class="field field-btn">
-          <button id="genReconf" class="btn btn-outline">生成重配 Prompt（沿用原 token）</button>
-        </div>
-      </div>
-      <pre id="reconfText"></pre>
-    </div>
-  </section>
-
-  <section id="tab-threads" hidden>
-    <div class="toolbar">
-      <div>
-        <h2>消息 &amp; 线程</h2>
-        <p class="muted small">熔断线程可一键 reset（保留历史，从当前 max seq 重计）。</p>
-      </div>
-      <button id="refreshThreads" class="btn btn-outline btn-sm">刷新线程</button>
-    </div>
-    <div class="search-row">
-      <input id="qSearch" placeholder="搜索 payload 全文">
-      <button id="qBtn" class="btn btn-outline btn-sm">搜索</button>
-    </div>
-    <div id="searchOut"></div>
-    <div class="table-wrap">
-      <table id="threadTable" class="table">
-        <thead><tr><th>root_id</th><th>条数</th><th>参与者</th><th>holds</th><th>熔断</th><th class="th-right">操作</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <h3 id="threadTitle"></h3>
-    <div id="threadExport"></div>
-    <div id="threadMsgs"></div>
-  </section>
-
-  <section id="tab-audit" hidden>
-    <div class="toolbar">
-      <div>
-        <h2>审计</h2>
-      </div>
-      <div class="toolbar-actions">
-        <input id="aActor" placeholder="actor 过滤">
-        <input id="aAction" placeholder="action 过滤">
-        <button id="refreshAudit" class="btn btn-outline btn-sm">查询</button>
-        <button id="exportAudit" class="btn btn-ghost btn-sm">导出 JSON</button>
-      </div>
-    </div>
-    <div class="table-wrap">
-      <table id="auditTable" class="table">
-        <thead><tr><th>seq</th><th>时间</th><th>actor</th><th>action</th><th>detail</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-
-    <div class="card">
-      <h2>Retention 与 Guard 策略 <span class="muted small">（改动走 config.toml + 重启）</span></h2>
-      <div class="toolbar">
-        <span id="configOut" class="muted small"></span>
-        <button id="refreshConfig" class="btn btn-outline btn-sm">查看当前策略</button>
-      </div>
-    </div>
-
-    <div class="toolbar">
-      <div><h2>Tokens</h2></div>
-      <button id="refreshTokens" class="btn btn-outline btn-sm">刷新</button>
-    </div>
-    <div class="table-wrap">
-      <table id="tokenTable" class="table">
-        <thead><tr><th>id</th><th>peer</th><th>hash 前缀</th><th>label</th><th>创建时间</th><th>最后使用</th><th>IP</th><th>撤销</th><th class="th-right">操作</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <div class="card">
-      <h3>签发 Token（轮换）</h3>      <div class="form-row">
-        <label class="field">peer id
-          <input id="rotPeer" placeholder="peer id">
-        </label>
-        <label class="field">label
-          <input id="rotLabel" placeholder="label">
-        </label>
-        <div class="field field-btn">
-          <button id="rotBtn" class="btn">签发新 token（显示一次）</button>
-        </div>
-      </div>
-      <pre id="rotOut"></pre>
-    </div>
-  </section>
-  <section id="tab-update" hidden>
-    <div class="card">
-      <h2>版本更新 <span class="muted small">（仅 GitHub Releases · systemd 自动 / docker 给命令）</span></h2>
-      <p class="muted small" id="updCurrent">读取中…</p>
-      <div class="form-row">
-        <label class="field">目标版本（留空=最新版）
-          <input id="updVer" placeholder="留空查最新版">
-        </label>
-        <div class="field field-btn">
-          <button id="updCheck" class="btn btn-outline">检查</button>
-          <button id="updApply" class="btn" disabled>应用更新</button>
-        </div>
-      </div>
-      <div id="updWarn"></div>
-      <label class="field" id="updAckRow" hidden>
-        <span><input type="checkbox" id="updAck"> 我已知晓协议变更，继续更新</span>
-      </label>
-      <pre id="updLog"></pre>
-    </div>
-    <div class="card" id="updDockerCard" hidden>
-      <h3>Docker 模式更新命令</h3>
-      <p class="muted small">Web 更新只支持 systemd。二进制/docker 混用时按下面命令手动执行：</p>
-      <pre id="updDockerCmd"></pre>
-    </div>
-  </section>
-</main>
 </div>
+
+<datalist id="peerList"></datalist>
+
+<!-- ============ Thread drawer ============ -->
+<dialog id="threadDrawer" class="drawer" closedby="any" aria-labelledby="drawerTitle">
+  <div class="drawer-head">
+    <div class="drawer-title">
+      <span class="muted xs">线程</span>
+      <h2 id="drawerTitle" class="mono"></h2>
+      <p id="drawerMeta" class="muted xs"></p>
+    </div>
+    <div class="row-btns tight">
+      <button class="btn btn-ghost btn-sm" id="expMd"><svg class="icon"><use href="#i-download"/></svg>Markdown</button>
+      <button class="btn btn-ghost btn-sm" id="expJsonl"><svg class="icon"><use href="#i-download"/></svg>JSONL</button>
+      <button class="btn-icon" data-close aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
+    </div>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</dialog>
+
+<!-- ============ Rotate token dialog ============ -->
+<dialog id="rotateDlg" class="modal" aria-labelledby="rotTitle">
+  <form method="dialog" id="rotForm">
+    <div class="modal-head">
+      <div class="card-ic brand"><svg class="icon"><use href="#i-key"/></svg></div>
+      <div><h2 id="rotTitle">签发新 Token（轮换）</h2><p class="muted xs">明文只显示一次；旧 token 记得在列表中撤销</p></div>
+    </div>
+    <label class="field">成员身份<input id="rotPeer" list="peerList" placeholder="peer id" required autocomplete="off"></label>
+    <label class="field">label<input id="rotLabel" placeholder="rotated" autocomplete="off"></label>
+    <div id="rotResult" hidden>
+      <div class="alert alert-warn"><svg class="icon"><use href="#i-alert"/></svg>请立即交给对应助手，关闭后无法再次查看。</div>
+      <div class="invite-box"><code id="rotToken" class="big-code wrap"></code>
+        <button type="button" class="btn-icon" data-copy="#rotToken" data-tip="复制"><svg class="icon"><use href="#i-copy"/></svg></button></div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" data-close>关闭</button>
+      <button type="submit" class="btn btn-primary" id="rotBtn" value="go"><svg class="icon"><use href="#i-key"/></svg>签发</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Confirm dialog ============ -->
+<dialog id="confirmDlg" class="modal sm" aria-labelledby="cfTitle">
+  <form method="dialog">
+    <div class="modal-head">
+      <div class="card-ic bad" id="cfIc"><svg class="icon"><use href="#i-alert"/></svg></div>
+      <div><h2 id="cfTitle">确认</h2><p id="cfBody" class="muted small pre-line"></p></div>
+    </div>
+    <div class="modal-foot">
+      <button value="cancel" class="btn btn-ghost">取消</button>
+      <button value="ok" class="btn btn-danger" id="cfOk">确认</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
 
 <script src="/app.js?v={{ASSET_V}}"></script>
 </body>
