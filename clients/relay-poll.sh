@@ -71,9 +71,12 @@ curl --fail --silent --max-time 10 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "${auth[@
 # prompt-changes.json; summarized into the wake event.
 PROMPT_CHANGES_FILE="$BASE/prompt-changes.json"
 update_event=""
+# Dedup: already-staged version wakes only once. Without this a peer that
+# hasn't confirmed yet gets re-woken every poll (per-round spam).
 if jq -e '.prompt_update == true' "$hb_file" >/dev/null 2>&1; then
   new_ver="$(jq -r '.prompt_version // 0' "$hb_file" 2>/dev/null || echo 0)"
-  if [[ "$new_ver" =~ ^[0-9]+$ ]] && [[ "$new_ver" -gt "$prompt_ver" ]]; then
+  staged_ver="$(cat "$PROMPT_VER_FILE.staged" 2>/dev/null || echo 0)"
+  if [[ "$new_ver" =~ ^[0-9]+$ ]] && [[ "$new_ver" -gt "$prompt_ver" ]] && [[ "$staged_ver" != "$new_ver" ]]; then
     pu_file="$(mktemp)"
     if curl --fail --silent --max-time 20 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "${auth[@]}" \
         -o "$pu_file" "$RELAY/prompts/current" 2>/dev/null; then

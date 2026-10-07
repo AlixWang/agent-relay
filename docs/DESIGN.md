@@ -548,6 +548,26 @@ own memory.
 - Advisory only: the relay never auto-routes on profile text. It is a display + search aid
   for humans and dispatchers, not a scheduler input.
 
+### 8.9 Go receiver prototype (dumb pipe, DESIGN follow-up)
+
+The two shell receivers drifted apart (buffered SSE parse, jq crashes, wake
+filtering, cursor holes) — not "one logic over two transports". The prototype
+(`cmd/relay-tail`, `--transport poll|sse`) reunites them: one core for message
+parse, prompt_update staging, atomic cursor persistence (tmp+rename), and
+backoff reconnect. It is deliberately dumb: normalized `{tasks:[...]}` event
+lines on stdout, no wake policy — the thin shell (hook watchdog) keeps prompt
+dedup, presence, and runtime wake calls. Wake stays in shell because only
+shell (sourced hook functions) can call the runtime's wake/log/silent.
+
+Transport bugs (parse, reconnect, cursor, silent drops) get fixed once in Go;
+policy bugs (dedup, delivery target, monitoring) stay in shell, editable
+without recompiling. Shipped as `relay-tail-linux-<arch>` Release assets
+(same matrix as the server), fetched via `GET /clients/relay-tail?arch=`
+(302 to the Release file). Prototype status: acceptance-tested locally
+(poll/sse wake, cursor, backlog, dedup, exit codes); not yet referenced by
+the onboarding templates — shell scripts remain the default until field
+proven.
+
 ### 8.8 Local-delivery self-check (no "main session" on the server)
 
 The relay is a broker: it stores and forwards, it has no "main session" concept and no

@@ -82,6 +82,8 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /clients/relay-poll.sh", s.handlePollScript)
 	mux.HandleFunc("GET /clients/relay-tail.sh", s.handleTailScript)
+	// Go receiver prototype (DESIGN §8.9): redirect to the Release asset.
+	mux.HandleFunc("GET /clients/relay-tail", s.handleTailBinary)
 	mux.HandleFunc("POST /register", s.handleRegister)
 	mux.HandleFunc("POST /messages", s.handleSend)
 	mux.HandleFunc("GET /messages", s.handlePull)
@@ -232,6 +234,29 @@ func (s *Server) handleTailScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write([]byte(web.TailScript()))
+}
+
+// handleTailBinary redirects to the Go receiver prototype for the requested
+// arch (DESIGN §8.9). Binaries ride the GitHub Release (same source as the
+// Web updater), not the embed — the server never proxies multi-MB blobs.
+// Usage: GET /clients/relay-tail?arch=amd64 (default amd64).
+func (s *Server) handleTailBinary(w http.ResponseWriter, r *http.Request) {
+	arch := r.URL.Query().Get("arch")
+	if arch == "" {
+		arch = "amd64"
+	}
+	if arch != "amd64" && arch != "arm64" {
+		writeErr(w, 400, "arch must be amd64 or arm64")
+		return
+	}
+	tag := web.BinaryVersion()
+	if tag == "" || tag == "dev" {
+		writeErr(w, 404, "binary releases start after this build; use the shell scripts")
+		return
+	}
+	target := "https://github.com/AlixWang/agent-relay/releases/download/" + tag +
+		"/relay-tail-linux-" + arch
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 type registerReq struct {

@@ -35,7 +35,13 @@ jobs:
             -o dist/agent-relay-linux-amd64 ./cmd/agent-relay
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$LDFLAGS" \
             -o dist/agent-relay-linux-arm64 ./cmd/agent-relay
-          (cd dist && sha256sum agent-relay-linux-* > SHA256SUMS)
+          # relay-tail receiver prototype (dumb pipe: poll|sse, DESIGN §8.9).
+          # Same matrix; assistants fetch it like the shell scripts.
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" \
+            -o dist/relay-tail-linux-amd64 ./cmd/relay-tail
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$LDFLAGS" \
+            -o dist/relay-tail-linux-arm64 ./cmd/relay-tail
+          (cd dist && sha256sum agent-relay-linux-* relay-tail-linux-* > SHA256SUMS)
           cat dist/SHA256SUMS
 
       - name: publish GitHub Release
@@ -44,6 +50,8 @@ jobs:
           files: |
             dist/agent-relay-linux-amd64
             dist/agent-relay-linux-arm64
+            dist/relay-tail-linux-amd64
+            dist/relay-tail-linux-arm64
             dist/SHA256SUMS
           generate_release_notes: true
 

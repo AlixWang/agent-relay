@@ -1251,3 +1251,15 @@ func TestStreamLiveFrameWithoutDisconnect(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestTailBinaryRedirect(t *testing.T) {
+	f := newFixture(t)
+	// Unknown arch rejected.
+	if code, _ := f.do(t, "GET", "/clients/relay-tail?arch=mips", nil, ""); code != 400 {
+		t.Fatalf("arch: %d", code)
+	}
+	// Dev build (no tag) explains shell fallback.
+	if code, out := f.do(t, "GET", "/clients/relay-tail?arch=amd64", nil, ""); code != 404 {
+		t.Fatalf("dev: %d %+v", code, out)
+	}
+}

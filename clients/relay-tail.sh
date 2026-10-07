@@ -89,7 +89,9 @@ heartbeat_once() {
     return 0
   fi
   new_ver="$(echo "$hb" | jq -r '.prompt_version // 0' 2>/dev/null || echo 0)"
-  if ! [[ "$new_ver" =~ ^[0-9]+$ ]] || [[ "$new_ver" -le "$prompt_ver" ]]; then
+  staged_ver="$(cat "$PROMPT_VER_FILE.staged" 2>/dev/null || echo 0)"
+  # Dedup: already-staged version wakes only once, not every 60s round.
+  if ! [[ "$new_ver" =~ ^[0-9]+$ ]] || [[ "$new_ver" -le "$prompt_ver" ]] || [[ "$staged_ver" == "$new_ver" ]]; then
     return 0
   fi
   pu_json="$(curl --fail --silent --max-time 20 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} \
