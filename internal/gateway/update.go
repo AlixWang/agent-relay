@@ -234,44 +234,36 @@ func (s *Server) handleAdminUpdateApply(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, 200, map[string]any{"ok": true, "job_id": job.ID})
 }
 
-// runUpdateJob shells out to the root-owned helper via sudo. The helper
-// does download→verify→backup→install→restart→health→rollback and prints a
-// final UPDATE_RESULT line; we tail the job log file for the console.
+// runUpdateJob triggers the root oneshot service and tails the on-disk
+// job log until the helper writes its UPDATE_RESULT line.
+// Why a service, not `sudo helper apply <ver>`: the gateway inherits the
+// main unit's ProtectSystem=strict mount namespace (/usr read-only) and
+// sudo cannot escape it — backup/install fail with Read-only file system.
+// The oneshot unit runs as root in a clean namespace; sudoers allows only
+// the parameterless `systemctl start`, the version travels via
+// `systemctl set-environment UPDATE_VERSION=<ver>` (also whitelisted).
 func (s *Server) runUpdateJob(job *updateJob) {
-	helper := "/usr/local/sbin/agent-relay-update"
 	jobDir := filepath.Join(s.cfg.DataDir, "update-jobs")
 	_ = os.MkdirAll(jobDir, 0o755)
 	logPath := filepath.Join(jobDir, job.Version+".log")
-	cmd := exec.Command("sudo", "-n", helper, "apply", job.Version)
-	out, err := cmd.CombinedOutput()
-	status := "ok"
-	detail := job.Version
-	if err != nil {
-		status = "failed"
-		detail = err.Error()
+
+	run := func(name string, args ...string) (string, error) {
+		cmd := exec.Command(name, args...)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
 	}
-	// Parse the helper's machine-readable tail line.
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "UPDATE_RESULT ") {
-			parts := strings.SplitN(line, " ", 3)
-			if len(parts) == 3 {
-				status, detail = parts[1], parts[2]
-			}
-		}
+	status, detail := "failed", "trigger failed"
+	// set-environment is separate so the start rule stays parameterless.
+	if out, err := run("sudo", "-n", "systemctl", "set-environment", "UPDATE_VERSION="+job.Version); err != nil {
+		detail = "set-environment: " + strings.TrimSpace(out)
+	} else if out, err := run("sudo", "-n", "systemctl", "start", "agent-relay-update.service"); err != nil {
+		detail = "start: " + strings.TrimSpace(out)
+	} else {
+		// The helper restarts THIS process mid-job; poll the on-disk log
+		// for the terminal line instead of waiting on a child.
+		status, detail = s.waitJobResult(logPath, job.Version)
 	}
-	tail := string(out)
-	if len(tail) > 8000 {
-		tail = "...[truncated]...\n" + tail[len(tail)-8000:]
-	}
-	// Also append the on-disk job log if the helper wrote one (survives
-	// the restart that kills this process mid-job).
-	if data, rerr := os.ReadFile(logPath); rerr == nil && len(data) > 0 {
-		disk := string(data)
-		if len(disk) > 8000 {
-			disk = "...[truncated]...\n" + disk[len(disk)-8000:]
-		}
-		tail = disk + "\n--- helper stdout ---\n" + tail
-	}
+	tail := s.readJobTail(logPath)
 	now := time.Now().Unix()
 	s.updateMgr().finish(job.ID, status, tail, now)
 	action := "update.ok"
@@ -281,6 +273,40 @@ func (s *Server) runUpdateJob(job *updateJob) {
 	_ = s.st.AppendAudit("admin", action,
 		fmt.Sprintf("version=%s job=%s detail=%s", job.Version, job.ID, detail), now)
 	log.Printf("update job %s %s: %s", job.ID, status, detail)
+}
+
+// waitJobResult polls the on-disk job log for the helper's UPDATE_RESULT
+// line. Returns when found or after ~5 minutes (helper has its own curl
+// timeouts; a missing line means the service never ran).
+func (s *Server) waitJobResult(logPath, version string) (string, string) {
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(logPath); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(line, "UPDATE_RESULT ") {
+					parts := strings.SplitN(line, " ", 3)
+					if len(parts) == 3 {
+						return parts[1], parts[2]
+					}
+				}
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return "failed", "timeout waiting for " + version + " result"
+}
+
+// readJobTail returns the last 8KB of the on-disk job log for the console.
+func (s *Server) readJobTail(logPath string) string {
+	data, err := os.ReadFile(logPath)
+	if err != nil || len(data) == 0 {
+		return "(no job log yet)"
+	}
+	tail := string(data)
+	if len(tail) > 8000 {
+		tail = "...[truncated]...\n" + tail[len(tail)-8000:]
+	}
+	return tail
 }
 
 // updateNewer reports whether target is newer than current. Versions are

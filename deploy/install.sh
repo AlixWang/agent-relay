@@ -513,16 +513,21 @@ EOF
 fi
 
 # ---- 7.5 Web 一键更新 helper（仅 systemd 模式） ----
-# Web 控制台 `POST /admin/update/apply` 以 agent-relay 用户经 sudo 调它：
-# 下载→SHA256→备份→安装→重启→健康检查→失败回滚。root 属主 0700 + sudoers
-# 仅放行 `agent-relay-update apply <v*>`，服务本身不直接提权。
+# Web 控制台 `POST /admin/update/apply` 经 sudo 触发一个独立的 oneshot
+# service (`agent-relay-update.service`，root 运行) 来执行全套更新。
+# 为什么不能直接 `sudo agent-relay-update apply`：主服务的 mount namespace
+# 受 ProtectSystem=strict 限制（/usr 只读），sudo 提权出不来这个 namespace，
+# 备份/安装必报 Read-only file system。独立 service 有干净的 namespace。
+# sudoers 只放行 `systemctl start agent-relay-update.service`（无参数），
+# 版本号经 KEY= 环境变量由 service 文件传给 helper，不经 sudo 命令行。
 if [ "$MODE" = "systemd" ]; then
   HELPER="/usr/local/sbin/agent-relay-update"
   cat > "$HELPER" <<HELPER_EOF
 #!/usr/bin/env bash
 # agent-relay-update — Web 一键更新 helper (installed by deploy/install.sh).
-# Usage: agent-relay-update apply <version>  (version must match ^v[0-9])
-# Logs to stderr, machine-readable tail line: UPDATE_RESULT <ok|rolled_back|failed> <detail>
+# Runs as root inside agent-relay-update.service (clean mount namespace).
+# Version comes from \$UPDATE_VERSION env (set by the service unit).
+# Logs to stderr + job file, tail line: UPDATE_RESULT <ok|rolled_back|failed> <detail>
 set -uo pipefail
 REPO="$REPO"
 BIN_PATH="$BIN_PATH"
@@ -532,8 +537,7 @@ JOB_DIR="$DATA_DIR/update-jobs"
 logf() { printf '[update] %s\n' "\$*" >&2; }
 result() { printf 'UPDATE_RESULT %s %s\n' "\$1" "\$2"; }
 
-cmd="\${1:-}" ver="\${2:-}"
-[ "\$cmd" = "apply" ] || { result failed "usage: apply <version>"; exit 2; }
+ver="\${UPDATE_VERSION:-}"
 case "\$ver" in v[0-9]*) ;; *) result failed "bad version"; exit 2;; esac
 case "\$ver" in *[^A-Za-z0-9._-]* ) result failed "bad version chars"; exit 2;; esac
 
@@ -582,10 +586,29 @@ exit 1
 EOF
   chmod 700 "$HELPER"
   chown root:root "$HELPER"
-  printf 'agent-relay ALL=(root) NOPASSWD: /usr/local/sbin/agent-relay-update apply v*\n' > /etc/sudoers.d/agent-relay-update
+  # Oneshot service: clean mount namespace (no ProtectSystem), root user.
+  # Version arrives via Environment= set by the gateway at trigger time
+  # (see update.go: systemctl set-environment + start). The sudoers rule
+  # allows exactly one parameterless systemctl invocation.
+  cat > /etc/systemd/system/agent-relay-update.service <<SVC_EOF
+[Unit]
+Description=agent-relay one-click update (triggered from web console)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=$HELPER
+StandardOutput=append:$DATA_DIR/update-jobs/service.log
+StandardError=append:$DATA_DIR/update-jobs/service.log
+SVC_EOF
+  printf 'agent-relay ALL=(root) NOPASSWD: /usr/bin/systemctl set-environment UPDATE_VERSION=v*\n' > /etc/sudoers.d/agent-relay-update
+  printf 'agent-relay ALL=(root) NOPASSWD: /usr/bin/systemctl start agent-relay-update.service\n' >> /etc/sudoers.d/agent-relay-update
   chmod 440 /etc/sudoers.d/agent-relay-update
   visudo -c -q || { warn "sudoers 校验失败，已删除该文件（Web 更新不可用，重跑脚本排查）"; rm -f /etc/sudoers.d/agent-relay-update; }
-  log "Web 一键更新 helper 已安装（$HELPER + sudoers）"
+  systemctl daemon-reload
+  log "Web 一键更新已安装（helper + oneshot service + sudoers）"
 fi
 
 # ---- 8. 健康检查 ----
