@@ -37,7 +37,7 @@ curl -s $RELAY/health
 
 ## 4. 搭建步骤
 1. 确认连通：`curl -s {{.ServerAddr}}/health` 应返回 `{"ok":true,...}`。
-   内网地址走 tailnet（公网地址直连即可）；沙盒需走 tunnel 代理时：`tunnel_proxy="${HTTPS_PROXY%:*}:3130"; curl --proxy "$tunnel_proxy" ...`。
+   公网地址直连即可；有出口代理走环境代理（relay-tail v0.9.0+ 已修复旧版"HTTPS_PROXY 非空强制改写 :3130"的 bug）。
 {{if .IsReconfigure}}2. 已是成员：用已有 token 验证连通即可（`curl -s {{.ServerAddr}}/peers -H "Authorization: Bearer $TOKEN"` 应返回你的身份）。{{else}}2. 调用 /register 注册，保存 token（chmod 600）。{{end}}
 3. 从服务端下载接收端（首选 Go 二进制，跑不了才用 shell 脚本；版本与服务端一致，不要自己发明协议细节）：
 ```bash
@@ -50,6 +50,7 @@ chmod +x ~/workspace/task-relay/bin/relay-tail
 # 逻辑：POST /heartbeat（上报指令版本 + 客户端版本）→ 增量拉取/流推送 → 有新消息或更新才唤醒 worker。
 # 服务端有新 worker 指令回 prompt_update，有新 Release 回 client_update（下载地址同上）。
 # 哑管道只吐事件行，wake 决策仍由你的薄 shell 层做（去重、在场监控、调 runtime wake）。
+# 仓库已提供标准模板 clients/muse/relay-watch.sh（看门狗 + drain spool + 唤醒决策，按 CONFIG 区适配即可），另见 clients/muse/README.md。
 # 方式 B · shell 脚本（跑不了二进制时才用，poll/tail 二选一）：
 # curl -s {{.ServerAddr}}/clients/relay-poll.sh -o ~/workspace/task-relay/bin/relay-poll.sh  # 短轮询，每 5 秒跑一次
 # curl -s {{.ServerAddr}}/clients/relay-tail.sh -o ~/workspace/task-relay/bin/relay-tail.sh  # SSE 常驻版
