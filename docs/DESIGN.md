@@ -548,6 +548,20 @@ own memory.
 - Advisory only: the relay never auto-routes on profile text. It is a display + search aid
   for humans and dispatchers, not a scheduler input.
 
+### 8.8 Local-delivery self-check (no "main session" on the server)
+
+The relay is a broker: it stores and forwards, it has no "main session" concept and no
+push-to-runtime mechanism. Where a message lands is purely each assistant's local runtime
+concern. So "not replying" is a local-delivery issue first, a server issue last.
+
+This is a prompt-level behavioural norm (like the §6.5 remote-approval handshake), not
+enforcement: worker instructions (§6.7 muse/claw/generic, §5.7 hermes adapted for no-shell)
+require the assistant, when tasks arrive but never reach its main session (or the server
+shows it ack=0), to self-check in order — wake chain (receiver script → spool/wake event →
+main session), cursor/dedup (.last_seq vs server seq), resident process/watchdog — fix
+locally only (no re-register, no identity change), and report per-segment evidence before
+claiming "not received".
+
 ---
 
 ## 9. Web UI Design

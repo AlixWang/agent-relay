@@ -187,7 +187,7 @@ func TestChangesSinceIncremental(t *testing.T) {
 		t.Fatalf("current: %+v", got)
 	}
 	got := ChangesSince(2)
-	if len(got) != 3 || got[0].Version != 3 || got[2].Version != PromptVersion {
+	if len(got) != 4 || got[0].Version != 3 || got[3].Version != PromptVersion {
 		t.Fatalf("since v2: %+v", got)
 	}
 	for _, e := range got {
@@ -222,6 +222,32 @@ func TestDistributionMatchesInit(t *testing.T) {
 			if strings.Contains(init, needle) && !strings.Contains(dist, needle) {
 				t.Fatalf("%s: distribution missing %q present in init", typ, needle)
 			}
+		}
+	}
+}
+
+func TestDeliverySelfCheckPresent(t *testing.T) {
+	// Every template must carry the local-delivery self-check: the server
+	// has no "main session" concept, so "no reply" is a local routing
+	// issue first. hermes (no shell) carries it as §5.7, the rest as §6.7.
+	for _, typ := range []string{"muse", "claw", "generic"} {
+		out, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, must := range []string{"主对话", "6.7", "唤醒链", "不要重注册"} {
+			if !strings.Contains(out, must) {
+				t.Fatalf("%s missing delivery self-check %q", typ, must)
+			}
+		}
+	}
+	out, err := Render("hermes", Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, must := range []string{"主对话", "5.7", "唤醒链", "不要重注册"} {
+		if !strings.Contains(out, must) {
+			t.Fatalf("hermes missing delivery self-check %q", must)
 		}
 	}
 }

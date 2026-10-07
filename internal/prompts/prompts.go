@@ -110,7 +110,7 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 5
+const PromptVersion = 6
 
 // ChangeEntry is one revision's upgrade guide for assistants.
 type ChangeEntry struct {
@@ -140,6 +140,11 @@ var ChangeLog = []ChangeEntry{
 		Version: 5,
 		Summary: "下发与初始化统一：/prompts/current 即完整全文（除注册块），SSE 二选一包含在内；新增本升级指引（changes 字段）。",
 		Actions: "以后被 prompt_update 唤醒：先读 prompt-changes.json 看动了哪几节，对照本地改，再读 prompt-update.md 全文核对，最后 mv .prompt_version.staged 确认。",
+	},
+	{
+		Version: 6,
+		Summary: "主对话投递自查 §6.7（muse/claw/generic）/§5.7（hermes）：服务端没有主对话概念，消息交到哪是本地 runtime 的事；收不到先查唤醒链→游标→常驻三段，只动本地不重注册。",
+		Actions: "被 prompt_update 唤醒后对照本地投递链补上自查节；下次“没收到”先按三步举证再上报。",
 	},
 }
 
