@@ -614,6 +614,12 @@ OnUnitActiveSec=30s
 WantedBy=timers.target
 TIMER_EOF
   rm -f /etc/sudoers.d/agent-relay-update
+  # pending/ must be writable by the service user: the gateway files
+  # <ver>.req here with no privilege. Root-owned pending/ (from an old
+  # plant) silently breaks updates — WriteFile fails, job reports failed
+  # with "(no job log yet)". Enforce ownership on every install run.
+  mkdir -p "$DATA_DIR/update-jobs/pending"
+  chown agent-relay:agent-relay "$DATA_DIR/update-jobs" "$DATA_DIR/update-jobs/pending"
   systemctl daemon-reload
   systemctl enable --now agent-relay-update.timer >/dev/null 2>&1 || true
   log "Web 一键更新已安装（helper + root timer，无 sudo）"
