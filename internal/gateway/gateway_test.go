@@ -1210,3 +1210,44 @@ func TestPromptCurrentHasChanges(t *testing.T) {
 		t.Fatalf("current peer should have no changes: %+v", changes)
 	}
 }
+
+func TestStreamLiveFrameWithoutDisconnect(t *testing.T) {
+	// Regression: the tail client must see live frames on a HELD connection.
+	// The old client buffered the whole stream to a file and parsed only on
+	// disconnect, so live pushes sat unread until reconnect. This test holds
+	// the stream open and requires the frame to arrive mid-connection.
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "claw")
+	f.srv.SetStream(stream.New(3, 100))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/messages/stream?for=bob&since=0", nil)
+	req = req.WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+f.tok["bob"])
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { f.mux.ServeHTTP(rec, req); close(done) }()
+	time.Sleep(200 * time.Millisecond) // let it subscribe
+	if _, out := f.do(t, "POST", "/messages",
+		map[string]any{"id": "live-held", "to": "bob", "from": "alice", "payload": "x"}, f.tok["alice"]); out["ok"] != true {
+		t.Fatalf("send: %+v", out)
+	}
+	// The frame must appear while the connection is still open (cancel only
+	// fires at the deadline — if the handler returned early, done closes).
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(rec.Body.String(), `"id":"live-held"`) {
+		select {
+		case <-done:
+			t.Fatalf("stream closed before live frame: %q", rec.Body.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no live frame on held connection: %q", rec.Body.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}
