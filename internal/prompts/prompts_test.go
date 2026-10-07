@@ -149,6 +149,9 @@ func TestHandshakeContractsPresent(t *testing.T) {
 }
 
 func TestTailChoiceDocumented(t *testing.T) {
+	// v7: Go receiver is the preferred choice, shell scripts are fallback.
+	// muse/claw/generic must carry 首选 + 只用其一; hermes keeps cron as
+	// the default entry but must not claim it cannot run resident processes.
 	for _, typ := range []string{"muse", "claw", "generic", "hermes"} {
 		out, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
 		if err != nil {
@@ -157,13 +160,28 @@ func TestTailChoiceDocumented(t *testing.T) {
 		if !strings.Contains(out, "relay-tail.sh") {
 			t.Fatalf("%s missing tail choice", typ)
 		}
-		// Both scripts must be presented as either/or, never both-at-once.
-		if !strings.Contains(out, "二选一") && !strings.Contains(out, "只用其一") && typ != "hermes" {
-			t.Fatalf("%s missing either/or note", typ)
+	}
+	for _, typ := range []string{"muse", "claw", "generic"} {
+		out, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+		if err != nil {
+			t.Fatalf("%s: %v", typ, err)
 		}
-		if typ == "hermes" && !strings.Contains(out, "cron 默认不变") {
-			t.Fatalf("hermes missing cron-stays-default note")
+		if !strings.Contains(out, "首选") || !strings.Contains(out, "只用其一") {
+			t.Fatalf("%s missing Go-preferred note", typ)
 		}
+	}
+	hout, err := Render("hermes", Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(hout, "cron") {
+		t.Fatal("hermes missing cron default note")
+	}
+	if !strings.Contains(hout, "client_update") {
+		t.Fatal("hermes must mention client_update (even if only to ignore it)")
+	}
+	if strings.Contains(hout, "跑不了常驻进程") {
+		t.Fatal("hermes must not claim it cannot run resident processes")
 	}
 }
 
@@ -187,7 +205,7 @@ func TestChangesSinceIncremental(t *testing.T) {
 		t.Fatalf("current: %+v", got)
 	}
 	got := ChangesSince(2)
-	if len(got) != 4 || got[0].Version != 3 || got[3].Version != PromptVersion {
+	if len(got) != 5 || got[0].Version != 3 || got[4].Version != PromptVersion {
 		t.Fatalf("since v2: %+v", got)
 	}
 	for _, e := range got {
@@ -218,7 +236,7 @@ func TestDistributionMatchesInit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, needle := range []string{"relay-tail.sh", "prompt-changes.json", "profile_refresh", "7.5", "6.5"} {
+		for _, needle := range []string{"relay-tail.sh", "relay-tail?arch", "client_update", "prompt-changes.json", "profile_refresh", "7.5", "6.5"} {
 			if strings.Contains(init, needle) && !strings.Contains(dist, needle) {
 				t.Fatalf("%s: distribution missing %q present in init", typ, needle)
 			}
@@ -248,6 +266,42 @@ func TestDeliverySelfCheckPresent(t *testing.T) {
 	for _, must := range []string{"主对话", "5.7", "唤醒链", "不要重注册"} {
 		if !strings.Contains(out, must) {
 			t.Fatalf("hermes missing delivery self-check %q", must)
+		}
+	}
+}
+
+func TestClientChoiceDocumented(t *testing.T) {
+	// v7: muse/claw/generic prefer the Go receiver (fallback to shell only
+	// when binaries can't run), with the client_update flow; hermes stays
+	// cron and explicitly says client_update is not for it.
+	for _, typ := range []string{"muse", "claw", "generic"} {
+		out, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, must := range []string{"首选", "relay-tail?arch", "client_update", "只用其一"} {
+			if !strings.Contains(out, must) {
+			t.Fatalf("%s missing client choice %q", typ, must)
+			}
+		}
+	}
+	out, err := Render("hermes", Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "cron") || !strings.Contains(out, "忽略") {
+		t.Fatal("hermes must keep cron default and say client_update is ignorable")
+	}
+	// Old poll-default wording must be gone from the shell-capable templates.
+	// ("poll/tail 二选一" inside fallback 方式 B is fine: the fallback pair
+	// is still either/or; what changed is Go-first, not shell-default.)
+	for _, typ := range []string{"muse", "claw"} {
+		out, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, "短轮询（默认）") {
+			t.Fatalf("%s still carries old poll-default wording", typ)
 		}
 	}
 }

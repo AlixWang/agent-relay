@@ -548,11 +548,11 @@ own memory.
 - Advisory only: the relay never auto-routes on profile text. It is a display + search aid
   for humans and dispatchers, not a scheduler input.
 
-### 8.9 Go receiver prototype (dumb pipe, DESIGN follow-up)
+### 8.9 Go receiver (dumb pipe, field-proven since v7)
 
 The two shell receivers drifted apart (buffered SSE parse, jq crashes, wake
-filtering, cursor holes) — not "one logic over two transports". The prototype
-(`cmd/relay-tail`, `--transport poll|sse`) reunites them: one core for message
+filtering, cursor holes) — not "one logic over two transports". `cmd/relay-tail`
+(`--transport poll|sse`) reunites them: one core for message
 parse, prompt_update staging, atomic cursor persistence (tmp+rename), and
 backoff reconnect. It is deliberately dumb: normalized `{tasks:[...]}` event
 lines on stdout, no wake policy — the thin shell (hook watchdog) keeps prompt
@@ -578,6 +578,10 @@ newer Release tag, the heartbeat answers `client_update=true` +
 one-shot `client_update` wake event (download path included) so the thin
 shell wakes the worker to upgrade. Advisory only — never gates protocol
 access, no forward-only rule (build tags are opaque, overwrites allowed).
+Since prompt v7 the Go receiver is the preferred choice in the onboarding
+templates (shell scripts are fallback for hosts that can't run binaries);
+hermes keeps cron as its default entry but may use resident/SSE/Go when
+deployed resident (docker/regular host — no sandbox reclamation).
 
 ### 8.8 Local-delivery self-check (no "main session" on the server)
 
