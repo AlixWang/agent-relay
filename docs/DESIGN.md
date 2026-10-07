@@ -588,11 +588,10 @@ The UI is intentionally boring: server-rendered or a tiny embedded SPA, no build
 - **Primary target:** the user's always-on VPS on the tailnet. Single binary + `config.toml` (listen address, data dir, TTLs, fuse limits, admin password hash) + a `systemd` unit. SQLite file lives in `/var/lib/agent-relay/`.
 - **Networking:** bind to the Tailscale IP by default (mirrors relay v2's behavior). Optional `--public` mode requires a TLS cert and flips the UI to require admin login over HTTPS only.
 - **Upgrades:** replace the binary, restart. Schema migrations are embedded and run on startup; the data file format is stable across v1.
-- **Web one-click update (§10.4)** runs as a root oneshot service (`agent-relay-update.service`)
-  in a clean mount namespace — never as a sudo child of the hardened main service
-  (`ProtectSystem=strict` would make /usr read-only for any child, breaking backup/install).
-  sudoers whitelists exactly two invocations: `systemctl set-environment UPDATE_VERSION=v*`
-  and `systemctl start agent-relay-update.service`.
+- **Web one-click update (§10.4)** is zero-privilege: the gateway only writes `<ver>.req` into
+  its own `data_dir/update-jobs/pending/` (no sudo — `ProtectSystem=strict` makes /run
+  read-only so sudo itself cannot start). A root systemd timer (`agent-relay-update.timer`,
+  every 30s) scans pending/ and runs the root-owned helper in a clean mount namespace.
 
 ### 10.4 Web self-update
 

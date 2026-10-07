@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -234,33 +233,28 @@ func (s *Server) handleAdminUpdateApply(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, 200, map[string]any{"ok": true, "job_id": job.ID})
 }
 
-// runUpdateJob triggers the root oneshot service and tails the on-disk
-// job log until the helper writes its UPDATE_RESULT line.
-// Why a service, not `sudo helper apply <ver>`: the gateway inherits the
-// main unit's ProtectSystem=strict mount namespace (/usr read-only) and
-// sudo cannot escape it — backup/install fail with Read-only file system.
-// The oneshot unit runs as root in a clean namespace; sudoers allows only
-// the parameterless `systemctl start`, the version travels via
-// `systemctl set-environment UPDATE_VERSION=<ver>` (also whitelisted).
+// runUpdateJob files a pending-update request and tails the on-disk job
+// log until the root timer picks it up and the helper writes UPDATE_RESULT.
+// No sudo anywhere: the gateway (ProtectSystem=strict, /run read-only —
+// sudo itself cannot even mkdir /run/sudo/ts) only writes a file into its
+// own data_dir, which it already owns. A root systemd timer
+// (agent-relay-update.timer, every 30s) scans pending/ and runs the
+// root-owned helper in a clean namespace. Trigger = file creation, which
+// needs no privilege escalation at all.
 func (s *Server) runUpdateJob(job *updateJob) {
 	jobDir := filepath.Join(s.cfg.DataDir, "update-jobs")
-	_ = os.MkdirAll(jobDir, 0o755)
+	pendDir := filepath.Join(jobDir, "pending")
+	_ = os.MkdirAll(pendDir, 0o755)
 	logPath := filepath.Join(jobDir, job.Version+".log")
 
-	run := func(name string, args ...string) (string, error) {
-		cmd := exec.Command(name, args...)
-		out, err := cmd.CombinedOutput()
-		return string(out), err
-	}
 	status, detail := "failed", "trigger failed"
-	// set-environment is separate so the start rule stays parameterless.
-	if out, err := run("sudo", "-n", "systemctl", "set-environment", "UPDATE_VERSION="+job.Version); err != nil {
-		detail = "set-environment: " + strings.TrimSpace(out)
-	} else if out, err := run("sudo", "-n", "systemctl", "start", "agent-relay-update.service"); err != nil {
-		detail = "start: " + strings.TrimSpace(out)
+	reqPath := filepath.Join(pendDir, job.Version+".req")
+	if err := os.WriteFile(reqPath, []byte(job.ID+"\n"), 0o644); err != nil {
+		detail = "pending write: " + err.Error()
 	} else {
-		// The helper restarts THIS process mid-job; poll the on-disk log
-		// for the terminal line instead of waiting on a child.
+		// The timer (root) picks up the .req, runs the helper, restarts
+		// THIS process mid-job. Poll the on-disk log for the terminal
+		// line instead of waiting on a child.
 		status, detail = s.waitJobResult(logPath, job.Version)
 	}
 	tail := s.readJobTail(logPath)
@@ -276,10 +270,11 @@ func (s *Server) runUpdateJob(job *updateJob) {
 }
 
 // waitJobResult polls the on-disk job log for the helper's UPDATE_RESULT
-// line. Returns when found or after ~5 minutes (helper has its own curl
-// timeouts; a missing line means the service never ran).
+// line. Returns when found or after ~8 minutes (timer runs every 30s +
+// helper has its own curl timeouts; a missing line means the timer never
+// picked up the request).
 func (s *Server) waitJobResult(logPath, version string) (string, string) {
-	deadline := time.Now().Add(5 * time.Minute)
+	deadline := time.Now().Add(8 * time.Minute)
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(logPath); err == nil {
 			for _, line := range strings.Split(string(data), "\n") {

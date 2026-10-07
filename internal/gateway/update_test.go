@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"os"
 	"testing"
+	"time"
 )
 
 func TestVersionCompare(t *testing.T) {
@@ -113,5 +115,39 @@ func TestUpdateJobMutex(t *testing.T) {
 	mgr.finish(j1.ID, "failed", "x", 1)
 	if _, ok := mgr.start("v9.9.10"); !ok {
 		t.Fatal("after finish should accept")
+	}
+}
+
+func TestPendingTriggerWritten(t *testing.T) {
+	f := newFixture(t)
+	dir := t.TempDir()
+	f.srv.cfg.DataDir = dir
+	mgr := f.srv.updateMgr()
+	job, ok := mgr.start("v9.9.9")
+	if !ok {
+		t.Fatal("start")
+	}
+	done := make(chan struct{})
+	go func() { f.srv.runUpdateJob(job); close(done) }()
+	// The .req file must appear quickly (no sudo, just a file write).
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(dir + "/update-jobs/pending/v9.9.9.req"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pending .req not written")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Simulate the root timer completing the job.
+	os.WriteFile(dir+"/update-jobs/v9.9.9.log", []byte("UPDATE_RESULT ok v9.9.9\n"), 0o644)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runUpdateJob did not finish")
+	}
+	if j := mgr.get(job.ID); j.Status != "ok" {
+		t.Fatalf("job: %+v", j)
 	}
 }

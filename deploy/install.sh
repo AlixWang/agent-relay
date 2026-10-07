@@ -512,37 +512,40 @@ EOF
   systemctl --no-pager status agent-relay | head -8 || true
 fi
 
-# ---- 7.5 Web 一键更新 helper（仅 systemd 模式） ----
-# Web 控制台 `POST /admin/update/apply` 经 sudo 触发一个独立的 oneshot
-# service (`agent-relay-update.service`，root 运行) 来执行全套更新。
-# 为什么不能直接 `sudo agent-relay-update apply`：主服务的 mount namespace
-# 受 ProtectSystem=strict 限制（/usr 只读），sudo 提权出不来这个 namespace，
-# 备份/安装必报 Read-only file system。独立 service 有干净的 namespace。
-# sudoers 只放行 `systemctl start agent-relay-update.service`（无参数），
-# 版本号经 KEY= 环境变量由 service 文件传给 helper，不经 sudo 命令行。
+# ---- 7.5 Web 一键更新（仅 systemd 模式） ----
+# 零提权触发：Web 端只在 data_dir/update-jobs/pending/ 里写一个 <ver>.req
+# 文件（服务用户本来就有写权限），root 的 systemd timer 每 30s 扫描并执行。
+# 为什么不用 sudo：主服务 ProtectSystem=strict 下 /run 只读，sudo 自身连
+# /run/sudo/ts 都建不了，直接报 "a password is required"；而 sudo 子进程
+# 还继承只读 /usr，备份/安装也必败。文件触发彻底避开提权。
 if [ "$MODE" = "systemd" ]; then
   HELPER="/usr/local/sbin/agent-relay-update"
   cat > "$HELPER" <<HELPER_EOF
 #!/usr/bin/env bash
 # agent-relay-update — Web 一键更新 helper (installed by deploy/install.sh).
-# Runs as root inside agent-relay-update.service (clean mount namespace).
-# Version comes from \$UPDATE_VERSION env (set by the service unit).
-# Logs to stderr + job file, tail line: UPDATE_RESULT <ok|rolled_back|failed> <detail>
+# Runs as root from the timer (clean mount namespace, no ProtectSystem).
+# Scans PENDING_DIR for <ver>.req, processes the oldest, deletes the req.
+# Logs to job file, tail line: UPDATE_RESULT <ok|rolled_back|failed> <detail>
 set -uo pipefail
 REPO="$REPO"
 BIN_PATH="$BIN_PATH"
 HELPER_EOF
   cat >> "$HELPER" <<EOF
 JOB_DIR="$DATA_DIR/update-jobs"
+PENDING_DIR="\$JOB_DIR/pending"
 logf() { printf '[update] %s\n' "\$*" >&2; }
 result() { printf 'UPDATE_RESULT %s %s\n' "\$1" "\$2"; }
 
-ver="\${UPDATE_VERSION:-}"
-case "\$ver" in v[0-9]*) ;; *) result failed "bad version"; exit 2;; esac
-case "\$ver" in *[^A-Za-z0-9._-]* ) result failed "bad version chars"; exit 2;; esac
+mkdir -p "\$PENDING_DIR"
+REQ="\$(ls "\$PENDING_DIR"/*.req 2>/dev/null | head -1 || true)"
+[ -n "\$REQ" ] || exit 0
+ver="\$(basename "\$REQ" .req)"
+rm -f "\$REQ"
+case "\$ver" in v[0-9]*) ;; *) exit 0;; esac
+case "\$ver" in *[^A-Za-z0-9._-]* ) exit 0;; esac
 
 ARCH_RAW="\$(uname -m)"
-case "\$ARCH_RAW" in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) result failed "unsupported arch"; exit 2;; esac
+case "\$ARCH_RAW" in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) result failed "unsupported arch"; exit 1;; esac
 
 mkdir -p "\$JOB_DIR"
 JOB="\$JOB_DIR/\$ver.log"
@@ -586,13 +589,11 @@ exit 1
 EOF
   chmod 700 "$HELPER"
   chown root:root "$HELPER"
-  # Oneshot service: clean mount namespace (no ProtectSystem), root user.
-  # Version arrives via Environment= set by the gateway at trigger time
-  # (see update.go: systemctl set-environment + start). The sudoers rule
-  # allows exactly one parameterless systemctl invocation.
+  # Root timer: polls pending/ every 30s in a clean namespace.
+  # No sudoers file at all — the gateway never escalates privilege.
   cat > /etc/systemd/system/agent-relay-update.service <<SVC_EOF
 [Unit]
-Description=agent-relay one-click update (triggered from web console)
+Description=agent-relay one-click update worker (timer-triggered)
 After=network-online.target
 Wants=network-online.target
 
@@ -600,15 +601,22 @@ Wants=network-online.target
 Type=oneshot
 User=root
 ExecStart=$HELPER
-StandardOutput=append:$DATA_DIR/update-jobs/service.log
-StandardError=append:$DATA_DIR/update-jobs/service.log
 SVC_EOF
-  printf 'agent-relay ALL=(root) NOPASSWD: /usr/bin/systemctl set-environment UPDATE_VERSION=v*\n' > /etc/sudoers.d/agent-relay-update
-  printf 'agent-relay ALL=(root) NOPASSWD: /usr/bin/systemctl start agent-relay-update.service\n' >> /etc/sudoers.d/agent-relay-update
-  chmod 440 /etc/sudoers.d/agent-relay-update
-  visudo -c -q || { warn "sudoers 校验失败，已删除该文件（Web 更新不可用，重跑脚本排查）"; rm -f /etc/sudoers.d/agent-relay-update; }
+  cat > /etc/systemd/system/agent-relay-update.timer <<TIMER_EOF
+[Unit]
+Description=agent-relay update trigger poll (every 30s)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=30s
+
+[Install]
+WantedBy=timers.target
+TIMER_EOF
+  rm -f /etc/sudoers.d/agent-relay-update
   systemctl daemon-reload
-  log "Web 一键更新已安装（helper + oneshot service + sudoers）"
+  systemctl enable --now agent-relay-update.timer >/dev/null 2>&1 || true
+  log "Web 一键更新已安装（helper + root timer，无 sudo）"
 fi
 
 # ---- 8. 健康检查 ----
