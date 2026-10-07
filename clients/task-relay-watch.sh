@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # task-relay-watch.sh — Hatch hook wrapper around relay-poll.sh (new protocol).
+# 注：本脚本只适配 relay-poll.sh 短轮询；Go 二进制方案请用 clients/muse/relay-watch.sh。
 # Calls the zero-token poller; wakes the worker only when it emits work JSON.
 set -euo pipefail
 source "$HATCH_HOOK_RUNTIME"
