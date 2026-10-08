@@ -160,9 +160,18 @@ if [ -n "$out" ]; then
 fi
 case "$msg_count" in ''|*[!0-9]*) msg_count=0 ;; esac
 
-final_payload="$out"
-if [ -z "$final_payload" ]; then
-  final_payload="{}"
+# wake payload 只带元数据（id/from/kind/in_reply_to + payload 前 120 字预览），
+# 全文 worker 从 spool/wake.jsonl 按 id 取。
+# 原因：大 payload 会把唤醒交接的 JSON 撑爆 → 输出被截断 → 解析失败 → wake 丢失，
+# 而 spool offset 已推进，任务会静默卡死（实测：一条 1KB+ 的任务触发过此问题）。
+final_payload="$(printf '%s' "$out" | jq -c '{
+  tasks: [.tasks[]? | {id, from, kind, in_reply_to,
+    payload_preview: ((.payload // "" | tostring)[0:120])}],
+  prompt_update: .prompt_update,
+  client_update: .client_update
+}' 2>/dev/null || echo '{}')"
+if [ -z "$final_payload" ] || [ "$final_payload" = "null" ]; then
+  final_payload='{"tasks":[]}'
 fi
 if [ "$msg_count" = "0" ] && [ "$has_pu" != "true" ] && [ "$has_cu" != "true" ]; then
   silent "无新消息"
