@@ -36,7 +36,8 @@ CLIENT_VER_FILE="$BASE/.client_version"
 # 如果你有 hook/agent 调度体系，把 wake() 换成调你的唤醒命令
 #（如 Hatch 的 hook runtime：source "$HATCH_HOOK_RUNTIME" 后直接调 wake）。
 wake() {
-  printf '%s\n' "${2-}" >> "$SPOOL_DIR/pending.log"
+  # $1 = 人话原因（通知/日志用），$2 = 事件 JSON（worker 按 id 去 spool 取全文）
+  printf '[%s] %s\n%s\n' "$(date -u +%FT%TZ)" "${1-}" "${2-}" >> "$SPOOL_DIR/pending.log"
 }
 log() {
   printf '[%s] %s %s\n' "$(date -u +%FT%TZ)" "${1-}" "${2-}" >> "$BASE/relay-watch.log"
@@ -63,7 +64,9 @@ if ! daemon_alive; then
     exit 0
   fi
   if [ -f "$AUTH_FAIL_MARKER" ]; then
-    silent "daemon 认证失败待人工处理，暂不拉起"
+    # 认证失败后不自动拉起（否则每 5s 重连风暴）：等人工重新 onboarding。
+    # 这里刻意不写日志——marker 存在期间每轮都会走到，写日志会刷屏。
+    silent
     exit 0
   fi
   if tail -n 20 "$SPOOL_ERR" 2>/dev/null | grep -qE "relay-tail: (401|426)"; then
@@ -94,7 +97,7 @@ fi
 # ---- 2. drain spool ----
 offset="$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)"
 case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
-total="$(wc -l < "$SPOOL" 2>/dev/null || echo 0)"
+total="$(wc -l < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)"
 case "$total" in ''|*[!0-9]*) total=0 ;; esac
 out=""
 if [ "$total" -gt "$offset" ]; then
@@ -118,10 +121,10 @@ if [ "$total" -gt "$offset" ]; then
 fi
 
 # spool 过大且已排空则截断，防止无限增长
-spool_size="$(wc -c < "$SPOOL" 2>/dev/null || echo 0)"
+spool_size="$(wc -c < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)"
 case "$spool_size" in ''|*[!0-9]*) spool_size=0 ;; esac
 if [ "$spool_size" -gt 2097152 ]; then
-  cur_total="$(wc -l < "$SPOOL" 2>/dev/null || echo 0)"
+  cur_total="$(wc -l < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)"
   cur_offset="$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)"
   case "$cur_offset" in ''|*[!0-9]*) cur_offset=0 ;; esac
   if [ "$cur_offset" -ge "$cur_total" ]; then
@@ -186,7 +189,7 @@ if [ "$has_pu" = "true" ]; then
 fi
 if [ "$has_cu" = "true" ]; then
   cu_ver="$(printf '%s' "$out" | jq -r '.client_update.version // "?"' 2>/dev/null || echo "?")"
-  reasons+=("服务端有新版 Go 接收端 v$cu_ver")
+  reasons+=("服务端有新版 Go 接收端 v${cu_ver#v}")  # 版本号本身可能已带 v
   log "client_update_pending" "$(printf '{"version":%s}' "$(printf '%s' "$cu_ver" | jq -Rs .)")"
 fi
 if [ "$msg_count" != "0" ]; then

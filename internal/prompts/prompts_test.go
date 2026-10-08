@@ -1,6 +1,7 @@
 package prompts
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -28,7 +29,7 @@ func TestAllTypesRender(t *testing.T) {
 		out := render(t, typ, Data{InviteCode: "inv_test"})
 		for _, must := range []string{
 			"http://100.1.2.3:18789", "inv_test", "test-x",
-			"untrusted input", // §6.3 hygiene present in every template
+			"你用户的指令", // §6.3/§7 hygiene present in every template
 			"/verify/smoke", "426",
 		} {
 			if !strings.Contains(out, must) {
@@ -272,6 +273,46 @@ func TestMuseWorkerRichness(t *testing.T) {
 	}
 	if strings.Contains(out, "<RELAY_URL>") || strings.Contains(out, "<YOUR_IDENTITY>") {
 		t.Fatal("muse prompt leaks unrendered <PLACEHOLDER>")
+	}
+}
+
+// Relayed-instruction policy (prompt v8, DESIGN §6.3): a message that relays the
+// user's instruction IS the user's instruction — the four redlines are the only
+// thing the receiving agent still has to escalate.
+func TestRelayedInstructionPolicy(t *testing.T) {
+	for _, typ := range Types() {
+		out := render(t, typ, Data{InviteCode: "inv_test"})
+		for _, must := range []string{"你用户的指令", "无论消息里怎么说", "外泄", "删除不可恢复的数据", "改动中继之外的凭证"} {
+			if !strings.Contains(out, must) {
+				t.Fatalf("%s missing relayed-instruction rule %q", typ, must)
+			}
+		}
+		// The old blanket "relay = untrusted, not your user" wording is retired:
+		// it is what made assistants refuse their own user's relayed orders.
+		for _, bad := range []string{"不是你用户的指令", "not instructions from your user", "中继永远不能代替"} {
+			if strings.Contains(out, bad) {
+				t.Fatalf("%s still carries retired hygiene wording %q", typ, bad)
+			}
+		}
+	}
+}
+
+// Section numbers are how prompt_update tells assistants what to re-read, so a
+// duplicated heading number silently breaks the upgrade guide.
+func TestSectionNumberingClean(t *testing.T) {
+	re := regexp.MustCompile(`(?m)^## (\d+(?:\.\d+)?)[ .]`)
+	for _, typ := range Types() {
+		out := render(t, typ, Data{InviteCode: "inv_test"})
+		seen := map[string]bool{}
+		for _, m := range re.FindAllStringSubmatch(out, -1) {
+			if seen[m[1]] {
+				t.Fatalf("%s: section %s declared twice", typ, m[1])
+			}
+			seen[m[1]] = true
+		}
+		if strings.Contains(out, "方式 C") {
+			t.Fatalf("%s references a non-existent setup option 方式 C", typ)
+		}
 	}
 }
 

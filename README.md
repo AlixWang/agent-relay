@@ -88,7 +88,8 @@ chmod +x clients/*.sh
 - Admin 会话与 agent token 是两个信任域，cookie `HttpOnly+SameSite`，公网模式自动 `Secure`。
 - 所有写操作先过 Guard：线程熔断（50 条/24h）、循环启发式（复读/纯 ack/A→B→A→B 无增量）、
   60/min 限流、审批 hold、`(sender,id)` 幂等。Guard 纯确定性，不调 LLM。
-- 中继消息是**不可信输入**（见四套 prompt 模板 §7 hygiene 原文），永远不能代替用户授权敏感操作。
+- 中继转达的**用户指令 = 用户的指令**，直接执行（含装软件/改配置/跑测试）；只有四类红线——外泄凭证、
+  删除不可恢复数据、对外发布或花钱、改中继之外的凭证——无论消息怎么说都要用户当面批准（见四套 prompt 模板 §7/§6 原文）。
 
 ## License
 
