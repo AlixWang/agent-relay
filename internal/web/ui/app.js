@@ -201,6 +201,7 @@ function renderPager(targetEl, { total, page, pageSize, onPage, onPageSize }) {
 /* ---------- Global State ---------- */
 let serverPromptVersion = 0;
 let serverClientVersion = '';
+let serverReceiverRev = '';
 let currentRoute = 'members';
 let peerRefreshTimer = null;
 
@@ -341,6 +342,7 @@ async function refreshStats() {
 
     if (s.prompt_version) serverPromptVersion = s.prompt_version;
     if (s.client_version) serverClientVersion = s.client_version;
+    if (s.receiver_rev) serverReceiverRev = s.receiver_rev;
 
     showApp();
     return true;
@@ -380,11 +382,25 @@ const promptBadge = (p) => {
 const clientBadge = (p) => {
   const v = p.client_version || '';
   if (!v) return '<span class="muted xs">—</span>';
-  if (!serverClientVersion || v === serverClientVersion) {
-    return `<span class="badge ok mono" title="客户端版本">${esc(v)}</span>`;
-  }
+  // Update predicate is the receiver *revision* (DESIGN §8.9): the release tag
+  // moves on every release, the rev only when the receiver code changed. So a
+  // tag mismatch with an equal rev is not "needs update".
+  const rev = p.client_rev || '';
   const when = p.client_updated_at ? fmtTime(p.client_updated_at) : '未知';
-  return `<span class="badge warn mono" title="上报于 ${esc(when)} → 最新 ${esc(serverClientVersion)}">${esc(v)} → 新版</span>`;
+  if (rev && serverReceiverRev) {
+    if (rev === serverReceiverRev) {
+      return `<span class="badge ok mono" title="接收端与服务端同源码版本（${esc(v)}）">${esc(v)} <em class="muted">rev ${esc(rev)}</em></span>`;
+    }
+    return `<span class="badge warn mono" title="上报于 ${esc(when)} · rev ${esc(rev)} → 最新 rev ${esc(serverReceiverRev)}（${esc(serverClientVersion)}）">${esc(v)} → 新版</span>`;
+  }
+  // No rev reported (old binary or shell script): fall back to the tag.
+  if (!rev && (!serverClientVersion || v === serverClientVersion)) {
+    return `<span class="badge ok mono" title="客户端版本（未上报 rev）">${esc(v)}</span>`;
+  }
+  if (!rev) {
+    return `<span class="badge warn mono" title="上报于 ${esc(when)} → 最新 ${esc(serverClientVersion)}（未上报 rev）">${esc(v)} → 新版</span>`;
+  }
+  return `<span class="badge warn mono" title="上报于 ${esc(when)} · rev ${esc(rev)}">${esc(v)}</span>`;
 };
 
 const transportBadge = (p) => {
@@ -1331,6 +1347,7 @@ async function refreshSystem() {
       <dt>${icon('terminal', 'xs')} 最低兼容客户端 (min_client)</dt><dd>v${s.min_client ?? '-'}</dd>
       <dt>${icon('wrench', 'xs')} 服务端指令版本</dt><dd>v${s.prompt_version ?? '-'}</dd>
       <dt>${icon('server', 'xs')} 官方客户端 Release</dt><dd>${esc(s.client_version || 'dev')}</dd>
+      <dt>${icon('package', 'xs')} 接收端源码版本 (receiver_rev)</dt><dd>${esc(s.receiver_rev || 'dev（不催更新）')}</dd>
     `;
   } catch {}
 

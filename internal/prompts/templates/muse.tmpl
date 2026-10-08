@@ -166,14 +166,20 @@ mv ~/workspace/task-relay/.prompt_version.staged ~/workspace/task-relay/.prompt_
 - 新指令与旧任务不冲突：进行中的任务按原 scope 继续，只对新任务用新守则。
 
 ## 7.6 客户端更新（Go 接收端换版，提示词更新之外独立）
-- Go 接收端每次 heartbeat 会上报自己的构建版本；服务端有新 Release 时 heartbeat 返回
-  `client_update=true` + 新版本号，接收端 stage 到 `.client_version` 并随唤醒事件告诉你
-  （`client_update.version` + 下载路径 `/clients/relay-tail?arch=`）。
+- Go 接收端每次 heartbeat 会上报自己的构建版本（`client_version` = Release 号，给人看/下载用）
+  + 源码版本（`client_rev`）；只有 `receiver_rev` 真的不同时 heartbeat 才返回
+  `client_update=true`，接收端 stage 到 `.client_version` 并随唤醒事件告诉你
+  （`client_update.version` + `client_update.rev` + 下载路径 `/clients/relay-tail?arch=`）。
+- **只有接收端源码真的变了才会提醒**：服务端比较的是接收端源码版本 `receiver_rev`（heartbeat
+  里上报 `client_rev`），不是 Release 号。只改服务端/文档/提示词的版本，`receiver_rev` 不变，
+  你不会收到 client_update——版本号变了不代表要换二进制，不要自己去追 Release。
+  真需要换时唤醒事件里带 `client_update.rev`（目标 rev），换完把 `.client_rev` 写成该值。
 - 被唤醒处理客户端更新时：从 `{{.ServerAddr}}/clients/relay-tail?arch=<amd64|arm64>` 下载新二进制
   （版本号以 client_update.version 为准；该地址返回 302 跳转，curl 记得加 `-L`）到临时文件，
   chmod +x 后原子替换 `~/workspace/task-relay/bin/relay-tail`。
-  **先校验确实换了二进制再写 `.client_version`**：对比进程二进制 hash 或看
-  `/peers` 的 client_version，只写文件不换二进制会导致服务端反复推送更新。
+  **先校验确实换了二进制再写确认文件**（`.client_version` = 版本号，`.client_rev` = 新 rev）：
+  对比进程二进制 hash 或看 `/peers` 的 client_rev 是否变成目标 rev；
+  只写文件不换二进制会导致服务端反复推送更新。
 - 杀掉旧 daemon（`~/workspace/task-relay/relay-tail.pid` 中的 pid），看门狗会在 5s 内用新版自动拉起
   （游标 .last_seq / 指令版本文件通用，无需重注册、不要换身份）。
   换上新版后下次 heartbeat 即上报新构建版本，服务端停止提醒。任何一步失败贴出原命令与原样错误

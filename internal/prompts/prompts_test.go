@@ -217,7 +217,7 @@ func TestChangesSinceIncremental(t *testing.T) {
 		t.Fatalf("current: %+v", got)
 	}
 	got := ChangesSince(2)
-	if len(got) != 6 || got[0].Version != 3 || got[5].Version != PromptVersion {
+	if len(got) != 7 || got[0].Version != 3 || got[6].Version != PromptVersion {
 		t.Fatalf("since v2: %+v", got)
 	}
 	for _, e := range got {
@@ -299,6 +299,26 @@ func TestRelayedInstructionPolicy(t *testing.T) {
 
 // Section numbers are how prompt_update tells assistants what to re-read, so a
 // duplicated heading number silently breaks the upgrade guide.
+// The client_update predicate is the receiver source revision, not the
+// release tag (§8.9 / prompt v9). Without this, every release nags every
+// assistant to swap a behaviourally identical binary.
+func TestReceiverRevDocumented(t *testing.T) {
+	for _, typ := range Types() {
+		out := render(t, typ, Data{InviteCode: "inv_test"})
+		for _, must := range []string{"receiver_rev", "client_rev"} {
+			if !strings.Contains(out, must) {
+				t.Fatalf("%s missing receiver-rev rule %q", typ, must)
+			}
+		}
+	}
+	for _, typ := range []string{"muse", "claw", "generic"} {
+		out := render(t, typ, Data{InviteCode: "inv_test"})
+		if !strings.Contains(out, "只有接收端源码真的变了才会提醒") {
+			t.Fatalf("%s must state that only a real receiver change triggers the nudge", typ)
+		}
+	}
+}
+
 func TestSectionNumberingClean(t *testing.T) {
 	re := regexp.MustCompile(`(?m)^## (\d+(?:\.\d+)?)[ .]`)
 	for _, typ := range Types() {

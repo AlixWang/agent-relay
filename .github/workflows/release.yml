@@ -28,24 +28,43 @@ jobs:
         run: pwd; ls -la; ls cmd/agent-relay || true
 
       - name: build (linux amd64 + arm64, CGO off, pure Go)
+        id: build
         run: |
           mkdir -p dist
-          LDFLAGS="-X github.com/AlixWang/agent-relay/internal/web.assetVersion=${GITHUB_REF_NAME}"
+          # Receiver source revision (DESIGN §8.9): hash of cmd/relay-tail/**/*.go.
+          # relay-tail is stdlib-only, so this content hash fully identifies the
+          # receiver's behaviour. Both binaries bake it; the server nudges
+          # client_update only when a client's rev differs, so releases that do
+          # not touch the receiver never ask anyone to swap binaries.
+          RECEIVER_REV=$(find cmd/relay-tail -name '*.go' -type f | LC_ALL=C sort | xargs cat | sha256sum | cut -c1-12)
+          echo "receiver_rev=${RECEIVER_REV}" >> "$GITHUB_OUTPUT"
+          LDFLAGS="-X github.com/AlixWang/agent-relay/internal/web.assetVersion=${GITHUB_REF_NAME} -X github.com/AlixWang/agent-relay/internal/gateway.receiverRev=${RECEIVER_REV}"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" \
             -o dist/agent-relay-linux-amd64 ./cmd/agent-relay
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$LDFLAGS" \
             -o dist/agent-relay-linux-arm64 ./cmd/agent-relay
           # relay-tail receiver prototype (dumb pipe: poll|sse, DESIGN §8.9).
           # Same matrix; assistants fetch it like the shell scripts.
-          # clientVersion rides the same tag: heartbeat reports it (§8.9),
-          # the server nudges via client_update when a newer Release exists.
-          RLDFLAGS="$LDFLAGS -X main.clientVersion=${GITHUB_REF_NAME}"
+          # clientVersion (release tag, for display/download) + receiverRev
+          # (source identity, for the update check) ride the heartbeat.
+          RLDFLAGS="$LDFLAGS -X main.clientVersion=${GITHUB_REF_NAME} -X main.receiverRev=${RECEIVER_REV}"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$RLDFLAGS" \
             -o dist/relay-tail-linux-amd64 ./cmd/relay-tail
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$RLDFLAGS" \
             -o dist/relay-tail-linux-arm64 ./cmd/relay-tail
           (cd dist && sha256sum agent-relay-linux-* relay-tail-linux-* > SHA256SUMS)
           cat dist/SHA256SUMS
+
+      - name: verify baked receiver revision
+        run: |
+          # A build that silently dropped the ldflag would make every release
+          # nag every client again — fail loudly instead.
+          for b in dist/agent-relay-linux-amd64 dist/relay-tail-linux-amd64; do
+            if ! grep -aq "${{ steps.build.outputs.receiver_rev }}" "$b"; then
+              echo "$b is missing receiver_rev=${{ steps.build.outputs.receiver_rev }}"; exit 1
+            fi
+          done
+          echo "receiver_rev baked ok: ${{ steps.build.outputs.receiver_rev }}"
 
       - name: publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -90,5 +109,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ github.ref_name }}
+            RECEIVER_REV=${{ steps.build.outputs.receiver_rev }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

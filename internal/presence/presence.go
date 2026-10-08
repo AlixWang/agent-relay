@@ -36,6 +36,10 @@ type PeerView struct {
 	// nudges via heartbeat when a newer Release exists.
 	ClientVersion   string `json:"client_version,omitempty"`
 	ClientUpdatedAt int64  `json:"client_updated_at,omitempty"`
+	// ClientRev is the receiver source revision (§8.9) — the value that
+	// actually decides whether the peer needs a new binary. A version-tag
+	// mismatch with an equal rev is not an update.
+	ClientRev string `json:"client_rev,omitempty"`
 	// Transport (§4.4b): how the peer currently receives messages.
 	// "sse" = holding a live /messages/stream; "poll" = short-polling
 	// (or offline/unknown). Computed from the stream hub, not stored.
@@ -75,6 +79,16 @@ func New(st store.Store, onlineTimeoutSecs int64, webhookURL string) *Service {
 // value, non-empty overwrites with now as profile_updated_at.
 // clientVersion is the receiver client build (§8.9); empty keeps the stored
 // value (shell scripts don't report), non-empty overwrites.
+// ClientRev records the receiver source revision reported in a heartbeat
+// (DESIGN §8.9). Kept separate from Beat so the presence API stays stable;
+// empty means "not reporting" and never clobbers a stored value.
+func (s *Service) BeatClientRev(peerID, clientRev string, now int64) error {
+	if clientRev == "" {
+		return nil
+	}
+	return s.st.UpdatePeerClientRev(peerID, clientRev, now)
+}
+
 func (s *Service) Beat(peerID string, protocolVer int, capabilities string, promptVersion int, profile string, clientVersion string, now int64) error {
 	if err := s.st.TouchPeer(peerID, now); err != nil {
 		return err
@@ -130,6 +144,7 @@ func (s *Service) List(now int64, live map[string]bool) ([]*PeerView, error) {
 			PromptVersion: p.PromptVersion, PromptUpdatedAt: p.PromptUpdatedAt,
 			Profile: p.Profile, ProfileUpdatedAt: p.ProfileUpdatedAt,
 			ClientVersion: p.ClientVersion, ClientUpdatedAt: p.ClientUpdatedAt,
+			ClientRev: p.ClientRev,
 		}
 		var caps any
 		if err := json.Unmarshal([]byte(orEmptyJSON(p.Capabilities)), &caps); err == nil {

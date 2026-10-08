@@ -24,8 +24,12 @@ ALTER TABLE peers ADD COLUMN prompt_updated_at INTEGER DEFAULT 0;
 ALTER TABLE peers ADD COLUMN profile TEXT DEFAULT '';
 ALTER TABLE peers ADD COLUMN profile_updated_at INTEGER DEFAULT 0;
 -- Receiver client version (§8.9): which relay-tail binary the peer runs.
+-- client_version is the release tag (for display/download); client_rev is the
+-- receiver source revision baked at build time (the actual update predicate:
+-- doc/prompt-only releases leave it unchanged, so nobody gets nagged).
 ALTER TABLE peers ADD COLUMN client_version TEXT DEFAULT '';
 ALTER TABLE peers ADD COLUMN client_updated_at INTEGER DEFAULT 0;
+ALTER TABLE peers ADD COLUMN client_rev TEXT DEFAULT '';
 -- Reported in heartbeat as client_version; empty means "not reporting"
 -- (shell scripts have no version concept). The server nudges via heartbeat
 -- when a newer Release exists, same channel as prompt_update. Advisory

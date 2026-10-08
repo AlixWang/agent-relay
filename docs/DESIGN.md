@@ -591,16 +591,32 @@ is served versioned at `GET /clients/relay-watch.sh` (same static pattern as
 `relay-poll.sh`/`relay-tail.sh`); onboarding templates point assistants at
 the server URL, never at the repo path.
 
-Receiver client versions ride the heartbeat, mirroring prompt_version:
-the Go binary reports its release tag (`client_version`, baked via
-`-X main.clientVersion=`); shell scripts report nothing ("" = not
-reporting, never nudged). Stored in `peers.client_version` (+ updated_at),
-surfaced in `GET /peers` and the UI members table. When the server runs a
-newer Release tag, the heartbeat answers `client_update=true` +
-`client_version=<latest>`; the binary stages `.client_version` and emits a
-one-shot `client_update` wake event (download path included) so the thin
-shell wakes the worker to upgrade. Advisory only — never gates protocol
-access, no forward-only rule (build tags are opaque, overwrites allowed).
+Receiver builds ride the heartbeat, mirroring prompt_version, in **two**
+fields because a release tag is not an update predicate:
+
+- `client_version` — the release tag (`-X main.clientVersion=`), for display
+  and for the download step.
+- `client_rev` — the *receiver source revision*: `sha256` over
+  `cmd/relay-tail/**/*.go` (the receiver is stdlib-only, so this content hash
+  fully identifies its behaviour), computed in CI and baked into **both**
+  binaries (`-X main.receiverRev=` server-side, `internal/gateway.receiverRev`).
+  Stored in `peers.client_rev`.
+
+The server nudges with `client_update=true` only when the reported rev differs
+from its own; the release workflow fails the build if the rev is missing from
+either binary. Why: every release bakes a new tag into the binary, so tag
+comparison nagged the whole fleet to swap binaries that were behaviourally
+identical (the v0.10.0 → v0.11.0 prompt/doc-only release would have been a
+fleet-wide restart for nothing). A client that reports a tag but no rev yet is
+compared by tag once — that one nudge moves it onto a rev-reporting build and
+the nagging ends for good. Shell scripts report nothing (never nudged); dev
+builds bake `""` and never nudge.
+
+Transition cost is bounded: each heartbeat also answers `receiver_rev`, the
+binary re-checks locally (a stale nudge with an equal rev is dropped), the thin
+shell dedups on `.client_rev` and the worker writes `.client_rev` after a real
+swap. Advisory only — never gates protocol access, no forward-only rule (build
+tags are opaque, overwrites allowed).
 Since prompt v7 the Go receiver is the preferred choice in the onboarding
 templates (shell scripts are fallback for hosts that can't run binaries);
 hermes keeps cron as its default entry but may use resident/SSE/Go when

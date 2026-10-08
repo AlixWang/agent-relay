@@ -118,6 +118,8 @@ mv ~/workspace/task-relay/.prompt_version.staged ~/workspace/task-relay/.prompt_
 - hermes 没有二进制/常驻能力，不走客户端更新：Go 接收端与 client_update 都是给能跑
   常驻进程的助手用的，你收到 client_update 唤醒可直接忽略。
   （对话型 hermes 无 shell 请用户代劳；有常驻条件切了 Go 版后 client_update 正常处理。）
+- 顺带一提：客户端更新只在**接收端源码真的变了**（服务端 `receiver_rev` 与接收端上报的
+  `client_rev` 不同）时才提醒，服务端/文档/提示词版本号前进不会催你换二进制。
 
 ## 6.6 自我简介（供服务端路由未指派任务）
 - 注册时你已带了一句话 profile（会什么 + 常干什么）。服务端把它展示在成员表，

@@ -30,6 +30,7 @@ OFFSET_FILE="$BASE/.spool_offset"
 AUTH_FAIL_MARKER="$BASE/.relay_auth_failed"
 PROMPT_VER_FILE="$BASE/.prompt_version"
 CLIENT_VER_FILE="$BASE/.client_version"
+CLIENT_REV_FILE="$BASE/.client_rev"
 
 # ---------- 本地适配：唤醒/日志原语 ----------
 # 默认实现：wake 只把事件记到 pending.log，等人工或你自己的调度来处理。
@@ -109,7 +110,7 @@ if [ "$total" -gt "$offset" ]; then
     + ((([.[] | select(has("prompt_update"))] | last) as $pu
         | if $pu == null then {} else {prompt_update: {prompt_update: true, version: ($pu.version // "?"), changes: ($pu.changes // "")}} end)
        + (([.[] | select(has("client_update"))] | last) as $cu
-        | if $cu == null then {} else {client_update: {client_update: true, version: ($cu.version // "?"), download: ($cu.download // "")}} end))
+        | if $cu == null then {} else {client_update: {client_update: true, version: ($cu.version // "?"), rev: ($cu.rev // ""), download: ($cu.download // "")}} end))
   ' "$newlines" 2>/dev/null || true)"
   rm -f "$newlines"
   # offset 只在解析成功后推进：坏行不推进，下一轮重跑（at-least-once）
@@ -154,8 +155,17 @@ if [ -n "$out" ]; then
   has_cu="$(printf '%s' "$out" | jq -r 'has("client_update")' 2>/dev/null || echo false)"
   if [ "$has_cu" = "true" ]; then
     cu_ver_chk="$(printf '%s' "$out" | jq -r '.client_update.version // "?"' 2>/dev/null || echo "?")"
+    cu_rev_chk="$(printf '%s' "$out" | jq -r '.client_update.rev // ""' 2>/dev/null || echo "")"
     confirmed_cu="$(cat "$CLIENT_VER_FILE" 2>/dev/null || echo "?")"
-    if [ "$cu_ver_chk" != "?" ] && [ "$cu_ver_chk" = "$confirmed_cu" ] && [ ! -f "$CLIENT_VER_FILE.staged" ]; then
+    confirmed_rev="$(cat "$CLIENT_REV_FILE" 2>/dev/null || echo "?")"
+    # 去重口径：有 rev 就按 rev（接收端源码身份），没有才回落版本号。
+    # rev 相同 = 服务端版本号前进了但二进制行为没变 → 不打扰 worker。
+    if [ -n "$cu_rev_chk" ]; then
+      if [ "$cu_rev_chk" = "$confirmed_rev" ] && [ ! -f "$CLIENT_REV_FILE.staged" ]; then
+        has_cu="false"
+        log "client_update_same_rev" "$(printf '{"rev":%s}' "$(printf '%s' "$cu_rev_chk" | jq -Rs .)")"
+      fi
+    elif [ "$cu_ver_chk" != "?" ] && [ "$cu_ver_chk" = "$confirmed_cu" ] && [ ! -f "$CLIENT_VER_FILE.staged" ]; then
       has_cu="false"
       log "client_update_duplicate" "$(printf '{"version":%s}' "$(printf '%s' "$cu_ver_chk" | jq -Rs .)")"
     fi
@@ -189,7 +199,8 @@ if [ "$has_pu" = "true" ]; then
 fi
 if [ "$has_cu" = "true" ]; then
   cu_ver="$(printf '%s' "$out" | jq -r '.client_update.version // "?"' 2>/dev/null || echo "?")"
-  reasons+=("服务端有新版 Go 接收端 v${cu_ver#v}")  # 版本号本身可能已带 v
+  cu_rev="$(printf '%s' "$out" | jq -r '.client_update.rev // ""' 2>/dev/null || echo "")"
+  reasons+=("服务端有新版 Go 接收端 v${cu_ver#v}${cu_rev:+ (rev $cu_rev)}")  # 只有 rev 变了才会走到这里
   log "client_update_pending" "$(printf '{"version":%s}' "$(printf '%s' "$cu_ver" | jq -Rs .)")"
 fi
 if [ "$msg_count" != "0" ]; then

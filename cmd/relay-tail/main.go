@@ -32,10 +32,16 @@ var (
 )
 
 // clientVersion is the receiver build tag (§8.9), baked at release time:
-// -ldflags "-X main.clientVersion=v0.7.0". Reported in every heartbeat;
-// the server nudges via client_update when a newer Release exists. Dev
-// builds report "" (= not reporting, never nudged).
+// -ldflags "-X main.clientVersion=v0.7.0". Reported in every heartbeat for
+// display/download. Dev builds report "" (= not reporting, never nudged).
 var clientVersion = ""
+
+// receiverRev is the receiver *source* revision (§8.9), baked from the same
+// source hash the server uses: -ldflags "-X main.receiverRev=<hash>". The
+// server nudges via client_update only when this differs from its own value,
+// so a release that does not touch this receiver (docs/prompt/server-only)
+// never asks anyone to swap binaries. Dev builds report "" (= unknown).
+var receiverRev = ""
 
 type cfg struct {
 	relay      string
@@ -247,6 +253,7 @@ func (c *cfg) heartbeatOnce() (promptEvent, clientEvent string) {
 	ver := c.readVer()
 	body, _ := json.Marshal(map[string]any{
 		"id": c.ident, "prompt_version": ver, "client_version": clientVersion,
+		"client_rev": receiverRev,
 	})
 	req, _ := http.NewRequest("POST", c.relay+"/heartbeat", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -261,6 +268,7 @@ func (c *cfg) heartbeatOnce() (promptEvent, clientEvent string) {
 		PromptVersion int    `json:"prompt_version"`
 		ClientUpdate  bool   `json:"client_update"`
 		ClientVersion string `json:"client_version"`
+		ReceiverRev   string `json:"receiver_rev"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&hb) != nil {
 		return "", ""
@@ -303,17 +311,27 @@ func (c *cfg) heartbeatOnce() (promptEvent, clientEvent string) {
 		})
 		promptEvent = string(ev)
 	}
-	// Receiver client nudge (§8.9): wake once per Release. Dedup via
-	// .client_version: the worker confirms by upgrading the binary (which
-	// then reports the new version and the nudge stops). Stale .client
-	// files from a downgrade are overwritten below.
-	if hb.ClientUpdate && hb.ClientVersion != "" && hb.ClientVersion != clientVersion {
+	// Receiver client nudge (§8.9): wake once per needed update. The
+	// server compares receiver revisions; we re-check locally as a guard
+	// (an old server, or a stale nudge, must not make us swap binaries
+	// for an unchanged receiver). Dedup via .client_version: the worker
+	// confirms by upgrading the binary (which then reports the new
+	// revision and the nudge stops).
+	needUpdate := hb.ClientUpdate && hb.ClientVersion != "" && hb.ClientVersion != clientVersion
+	if needUpdate && receiverRev != "" && hb.ReceiverRev != "" && hb.ReceiverRev == receiverRev {
+		needUpdate = false // same receiver source: nothing to upgrade
+	}
+	if needUpdate {
 		if confirmed := c.readConfirmedClient(); confirmed != hb.ClientVersion {
 			_ = os.WriteFile(c.clientVerPath, []byte(hb.ClientVersion), 0o644)
-			ce, _ := json.Marshal(map[string]any{
+			payload := map[string]any{
 				"client_update": true, "version": hb.ClientVersion,
 				"download": "/clients/relay-tail?arch=<amd64|arm64>",
-			})
+			}
+			if hb.ReceiverRev != "" {
+				payload["rev"] = hb.ReceiverRev
+			}
+			ce, _ := json.Marshal(payload)
 			clientEvent = string(ce)
 		}
 	}

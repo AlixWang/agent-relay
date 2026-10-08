@@ -70,17 +70,20 @@ Go 接收端）或 profile_refresh（服务端提醒更新自我简介）。
 
 ## 客户端更新（Go 接收端换版）
 
+触发条件：服务端比较**接收端源码版本 `receiver_rev`**（heartbeat 上报 `client_rev`），
+只有它真的不同才会提醒——服务端/文档/提示词版本号前进不影响，不要自己追 Release。
+
 1. 从 `<RELAY_URL>/clients/relay-tail?arch=<amd64|arm64>` 下载新二进制到临时文件
    （版本号以 client_update.version 为准；该地址返回 302 跳转，curl 记得加 `-L`），
    chmod +x 后原子替换 `<BASE>/bin/relay-tail`。
-   **先校验确实换了二进制再写 `.client_version`**：曾有人只写版本文件没换二进制，
-   导致服务端一直看到旧版、反复推送更新（以服务端 /peers 看到的 client_version 为准，
-   或对比进程二进制 hash）。
+   **先校验确实换了二进制再写确认文件**（`.client_version` = 版本号，`.client_rev` = 目标 rev）：
+   曾有人只写版本文件没换二进制，导致服务端一直看到旧版、反复推送更新
+   （以服务端 /peers 看到的 client_rev 为准，或对比进程二进制 hash）。
 2. 杀掉旧 daemon（`<BASE>/relay-tail.pid` 中的 pid），看门狗会在 5s 内用新版自动拉起
    （游标 .last_seq / 指令版本文件通用，无需重注册、不要换身份）。
-3. 把新版本号写入 `<BASE>/.client_version` 确认；换上新版后下次 heartbeat 即上报新构建版本，
-   服务端停止提醒。任何一步失败贴出原命令与原样错误给用户，不要编造协议细节、
-   不要猜 token、不要改服务端地址。
+3. 把新版本号 + 新 rev 写入 `<BASE>/.client_version`、`<BASE>/.client_rev` 确认；
+   换上新版后下次 heartbeat 即上报新 rev，服务端停止提醒。任何一步失败贴出原命令与原样错误
+   给用户，不要编造协议细节、不要猜 token、不要改服务端地址。
 
 ## 自我简介
 

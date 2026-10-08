@@ -1309,6 +1309,64 @@ func TestHeartbeatClientVersion(t *testing.T) {
 	}
 }
 
+// The receiver-rev nudge rule (DESIGN §8.9): a release that leaves
+// cmd/relay-tail untouched must not ask anyone to swap binaries, so the
+// predicate is the receiver source revision, not the release tag.
+func TestHeartbeatReceiverRevNudge(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	prevRev := ReceiverRev()
+	defer func() { receiverRev = prevRev }()
+	receiverRev = "aaaa11112222"
+
+	beat := func(m map[string]any) map[string]any {
+		t.Helper()
+		code, out := f.do(t, "POST", "/heartbeat", m, f.tok["alice"])
+		if code != 200 {
+			t.Fatalf("beat: %d %+v", code, out)
+		}
+		return out
+	}
+
+	// Same rev, stale tag => no nudge (doc-only release: tag moved, code same).
+	out := beat(map[string]any{"id": "alice", "client_version": "v0.11.0", "client_rev": "aaaa11112222"})
+	if out["client_update"] == true {
+		t.Fatalf("same rev must not nudge: %+v", out)
+	}
+	if out["receiver_rev"] != "aaaa11112222" {
+		t.Fatalf("server must advertise its rev: %+v", out)
+	}
+	if p, _ := f.srv.st.GetPeer("alice"); p.ClientRev != "aaaa11112222" {
+		t.Fatalf("rev not stored: %+v", p)
+	}
+
+	// Different rev => nudge with the target tag + rev.
+	out = beat(map[string]any{"id": "alice", "client_version": "v0.11.0", "client_rev": "9999ffff0000"})
+	if out["client_update"] != true || out["receiver_rev"] != "aaaa11112222" {
+		t.Fatalf("stale rev must nudge: %+v", out)
+	}
+
+	// Transitional: a client that reports a tag but no rev yet is compared by
+	// tag (one last nudge), then stops reporting tags it cannot back with a rev.
+	out = beat(map[string]any{"id": "alice", "client_version": "v0.9.0", "client_rev": ""})
+	if out["client_update"] != true {
+		t.Fatalf("legacy tag comparison must nudge: %+v", out)
+	}
+
+	// Shell scripts report nothing at all: never nudged.
+	f.registerPeer(t, "carol", "generic")
+	if _, out := f.do(t, "POST", "/heartbeat", map[string]any{"id": "carol"}, f.tok["carol"]); out["client_update"] == true {
+		t.Fatalf("no-report client must not be nudged: %+v", out)
+	}
+
+	// Dev builds (no baked rev) never nudge, whatever the client reports.
+	receiverRev = ""
+	out = beat(map[string]any{"id": "alice", "client_version": "v0.1.0", "client_rev": "zzz"})
+	if out["client_update"] == true || out["receiver_rev"] != nil {
+		t.Fatalf("dev build must stay quiet: %+v", out)
+	}
+}
+
 func TestAdminPaginationAndFacets(t *testing.T) {
 	f := newFixture(t)
 	f.registerPeer(t, "alice", "muse")

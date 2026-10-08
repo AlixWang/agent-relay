@@ -4,7 +4,7 @@ Auth: `Authorization: Bearer <per-identity token>`，除 `GET /health` 外全部
 统一错误形：`{"ok": false, "error": "..."}`。Body 上限 1 MiB（`max_body_bytes`）。
 
 ```
-GET    /health                       → { ok, version: 2, protocol: 1, min_client: 1 }（免鉴权）
+GET    /health                       → { ok, version: 2, protocol: 1, min_client: 1 }（免鉴权）（含 receiver_rev，见 §8.9）
 POST   /register    { code, id, agent_type, protocol_version, capabilities }
                                    → { ok, peer_id, token }  （token 只显示这一次）
 POST   /messages    { id, to, from, kind, in_reply_to, requires_approval, payload }
@@ -14,15 +14,21 @@ GET    /messages?for=<id>&since=<seq>
 GET    /messages/stream?for=<id>&since=<seq>   （SSE，§4.4b 推送：backlog 回放 + live 帧，需鉴权）
                                    → text/event-stream，帧 `id/event: message/retry/data`，保活 `: ping`
 POST   /ack         { message_id, by }                        → { ok }
-POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version?, profile? }
-                                   → { ok, prompt_update?, prompt_version?, profile_refresh? }（新指令/简介过期时提醒）
+POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version?, profile?,
+                      client_version?, client_rev? }
+                                   → { ok, receiver_rev?, prompt_update?, prompt_version?,
+                                       client_update?, client_version?, profile_refresh? }
+                                     （prompt_update=指令新版；client_update 只在 client_rev 与
+                                       服务端 receiver_rev 不同时返回，§8.9）
 GET    /prompts/current           → { ok, prompt_version, agent_type, prompt }（§8.6 指令下发，需鉴权）
 GET    /clients/relay-watch.sh      → 薄 shell 层（Muse 标准接入：看门狗 + drain spool + 唤醒决策，免鉴权）
 GET    /clients/relay-poll.sh       → 短轮询脚本（免鉴权）
 GET    /clients/relay-tail.sh       → SSE 常驻脚本（免鉴权）
 GET    /clients/relay-tail?arch=<amd64|arm64> → Go 接收端（302 跳转到 Release，curl 加 -L）
 GET    /peers                         → { ok, peers: [{ id, display_name, agent_type, status,
-                                            online, last_seen, protocol_version, capabilities }] }
+                                            online, last_seen, protocol_version, capabilities,
+                                            prompt_version, profile, client_version, client_rev,
+                                            transport }] }
 POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 ```
 

@@ -403,3 +403,26 @@ func TestStoreAdminPages(t *testing.T) {
 		t.Fatalf("AuditFacets: %v, actors=%v, actions=%v", err, actors, actions)
 	}
 }
+
+// The receiver source revision is the update predicate (§8.9) and must
+// round-trip like any other peer column.
+func TestPeerClientRevRoundTrip(t *testing.T) {
+	st := openTest(t)
+	if err := st.CreatePeer(&Peer{ID: "p1", DisplayName: "p1", AgentType: "muse", Status: "active", CreatedAt: 1, LastSeen: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := st.GetPeer("p1"); p == nil || p.ClientRev != "" {
+		t.Fatalf("fresh peer should have no rev: %+v", p)
+	}
+	if err := st.UpdatePeerClientRev("p1", "abc123def456", 42); err != nil {
+		t.Fatal(err)
+	}
+	p, err := st.GetPeer("p1")
+	if err != nil || p.ClientRev != "abc123def456" || p.ClientUpdatedAt != 42 {
+		t.Fatalf("rev not stored: %+v err=%v", p, err)
+	}
+	all, err := st.ListPeers()
+	if err != nil || len(all) != 1 || all[0].ClientRev != "abc123def456" {
+		t.Fatalf("rev not listed: %+v err=%v", all, err)
+	}
+}

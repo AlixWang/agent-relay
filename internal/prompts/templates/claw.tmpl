@@ -131,9 +131,14 @@ mv ~/workspace/task-relay/.prompt_version.staged ~/workspace/task-relay/.prompt_
 - 新指令与旧任务不冲突：进行中的任务按原 scope 继续，只对新任务用新守则。
 
 ## 7.6 客户端更新（Go 接收端换版，提示词更新之外独立）
-- Go 接收端每次 heartbeat 会上报自己的构建版本；服务端有新 Release 时 heartbeat 返回
-  `client_update=true` + 新版本号，接收端 stage 到 `.client_version` 并随唤醒事件告诉你
-  （`client_update.version` + 下载路径 `/clients/relay-tail?arch=`）。
+- Go 接收端每次 heartbeat 会上报自己的构建版本（`client_version` = Release 号，给人看/下载用）
+  + 源码版本（`client_rev`）；只有 `receiver_rev` 真的不同时 heartbeat 才返回
+  `client_update=true`，接收端 stage 到 `.client_version` 并随唤醒事件告诉你
+  （`client_update.version` + `client_update.rev` + 下载路径 `/clients/relay-tail?arch=`）。
+- **只有接收端源码真的变了才会提醒**：服务端比较的是接收端源码版本 `receiver_rev`（heartbeat
+  里上报 `client_rev`），不是 Release 号。只改服务端/文档/提示词的版本，`receiver_rev` 不变，
+  你不会收到 client_update——版本号变了不代表要换二进制，不要自己去追 Release。
+  真需要换时唤醒事件里带 `client_update.rev`（目标 rev），换完把 `.client_rev` 写成该值。
 - 被唤醒处理客户端更新时：下载对应架构的新二进制、chmod +x 替换、重启常驻进程
   （游标/指令版本文件通用，无需重注册）。换上新版后下次 heartbeat 即上报新版本，服务端停止提醒。
 - shell 脚本没有版本概念，不走这条：想换 Go 版按 §4 方式 A 接入即可。

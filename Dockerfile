@@ -11,9 +11,15 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
-  -ldflags "-X github.com/AlixWang/agent-relay/internal/web.assetVersion=${VERSION}" \
-  -o /out/agent-relay ./cmd/agent-relay
+# Receiver revision (DESIGN §8.9): the client_update predicate. CI passes the
+# hash of cmd/relay-tail/**/*.go; when the build can compute it itself (full
+# source present) do that, so local/docker builds still nudge correctly.
+# Empty = never nudge (safe default; the console shows "dev").
+ARG RECEIVER_REV=""
+RUN REV="${RECEIVER_REV:-$(find cmd/relay-tail -name '*.go' -type f | LC_ALL=C sort | xargs cat | sha256sum | cut -c1-12)}" \
+  && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+     -ldflags "-X github.com/AlixWang/agent-relay/internal/web.assetVersion=${VERSION} -X github.com/AlixWang/agent-relay/internal/gateway.receiverRev=${REV}" \
+     -o /out/agent-relay ./cmd/agent-relay
 
 FROM debian:bookworm-slim
 RUN useradd -r -d /var/lib/agent-relay agent-relay \
