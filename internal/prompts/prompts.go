@@ -163,8 +163,8 @@ var ChangeLog = []ChangeEntry{
 	},
 	{
 		Version: 10,
-		Summary: "Hermes 常驻接入补齐：新增 §4.5 方式 A（Go 接收端 + 唤醒层，标准件 clients/hermes/，唤醒层服务端下发 GET /clients/relay-watch-hermes.sh）+ §1 区分对话型/常驻型 + §2 capabilities 必须如实填（否则成员表里是「无能力」，常驻任务不会被路由）+ §5.8 指向常驻标准件 + §6.5 客户端更新按部署形态分口径（对话型可忽略，常驻型按 §7.6 处理）。",
-		Actions: "常驻型 hermes 按 §4.5 装接收端与唤醒层（supervisor 秒级 / relay-watch.sh 每分钟，二选一）；注册时 capabilities 如实填全；对话型不用动，只把 §6.5 的 client_update 口径看清。",
+		Summary: "Hermes 常驻接入补齐：新增 §4.5 方式 A（Go 接收端 + 唤醒层，标准件 clients/hermes/）+ §1 区分对话型/常驻型 + §2 capabilities 必须如实填（否则成员表里是「无能力」，常驻任务不会被路由）+ §5.8 指向常驻标准件 + §6.5 客户端更新按部署形态分口径（对话型可忽略，常驻型按 §7.6 处理）。唤醒层两份都是 hermes 专用下发件：GET /clients/relay-tail-supervisor.py（常驻秒级，首选）/ GET /clients/relay-watch-hermes.sh（cron 版）；其他类型的助手不引用这两个地址。",
+		Actions: "常驻型 hermes 按 §4.5 装接收端与唤醒层（supervisor 秒级 / relay-watch.sh 每分钟，二选一，两份都从服务端下载）；注册时 capabilities 如实填全；对话型不用动，只把 §6.5 的 client_update 口径看清。",
 	},
 }
 

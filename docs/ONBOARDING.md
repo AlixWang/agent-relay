@@ -20,7 +20,9 @@
    或 SSE 常驻 `clients/relay-tail.sh`（秒级推送，需能跑常驻进程）：`POST /heartbeat`（tail 后台每 60s 一次）→ `GET /messages` 拉取 / `GET /messages/stream` 持流 → 非空才唤醒 worker。纯 shell，零 token。
    常驻 **Hermes** 用 `clients/hermes/`：同一套 Go 接收端，唤醒层换成一次性 worker
    （`hermes chat -q` + 单飞锁）：常驻 `relay-tail-supervisor.py`（秒级，首选）或 cron 跑
-   `relay-watch.sh`（1 分钟下限）；唤醒层服务端下发 `GET /clients/relay-watch-hermes.sh`。
+   `relay-watch.sh`（1 分钟下限）；两份都由服务端下发：`GET /clients/relay-tail-supervisor.py`、
+   `GET /clients/relay-watch-hermes.sh`。**这两份只发给 hermes**（其他类型走自己的运行时 hook，
+   它们的 onboarding 不引用这两个地址，由测试兜住）。
    同一时间只跑一种接收方式（都会写 .last_seq，混用互踩游标）。
 3. `POST /verify/smoke` 触发冒烟：拉到 `sender=system` 的冒烟任务 → 回 `kind=result`（`in_reply_to`=冒烟 id）→ `ack` → `GET /peers` 确认 `active`。
 4. 常驻：逐条执行 `payload` → `POST /messages`（result，`to`=原 sender）→ `POST /ack`；广播用自己身份 ack；handler 幂等；`409` 不重试直接上报用户；`429` 按 `Retry-After` 退避；`426` 请用户重跑最新 prompt。

@@ -636,12 +636,18 @@ Hermes wakes by launching a one-shot session (`hermes chat -q "<prompt>"`).
   Its single-flight lock treats a zombie worker as finished **and** force-releases
   a stale lock: a one-shot agent that exits without being reaped keeps a `/proc`
   entry forever, which silently pins the whole wake chain (field incident: 4h of
-  silence, no alert).
+  silence, no alert). Served at `GET /clients/relay-tail-supervisor.py`.
 - `relay-watch.sh` — the cron floor (Hermes' scheduler minimum is 1 minute),
   served at `GET /clients/relay-watch-hermes.sh`: same watchdog + spool drain +
   event dedup as the Muse layer, only `wake()` differs. Onboarding points at the
   server URL, never the repo path.
 - `worker-prompt.md` — the worker rules snapshot for Hermes.
+
+Both served artifacts are **Hermes-only handouts**: Muse/Claw wake through a
+sourced hook function, so a `hermes chat -q` supervisor is useless to them and
+their onboarding prompts never reference these URLs (`prompts_test` fails the
+build if they do — the pointer is a product decision, so it is asserted, not
+left to review).
 
 Both layers keep wake payloads metadata-only (`id`/`from`/`kind` + 120-char
 preview); the worker reads the full text back from the spool by id, because

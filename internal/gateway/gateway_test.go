@@ -1033,6 +1033,34 @@ func TestWatchScriptServed(t *testing.T) {
 	}
 }
 
+func TestHermesWakeLayerServed(t *testing.T) {
+	f := newFixture(t)
+	// Both Hermes wake-layer artifacts are static, no-auth downloads — during
+	// onboarding a resident Hermes must never hand-write wake/lock/backoff.
+	cases := []struct {
+		path    string
+		ctype   string
+		bodyHas string
+	}{
+		{"/clients/relay-watch-hermes.sh", "shellscript", "wake_running"},
+		{"/clients/relay-tail-supervisor.py", "python", "WAKE_CMD"},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest("GET", c.path, nil)
+		rec := httptest.NewRecorder()
+		f.mux.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d", c.path, rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, c.ctype) {
+			t.Fatalf("%s content-type: %q", c.path, ct)
+		}
+		if !strings.Contains(rec.Body.String(), c.bodyHas) {
+			t.Fatalf("%s body missing %q", c.path, c.bodyHas)
+		}
+	}
+}
+
 func TestCapabilitiesDualShape(t *testing.T) {
 	f := newFixture(t)
 	now := time.Now().Unix()

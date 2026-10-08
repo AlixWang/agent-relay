@@ -23,6 +23,9 @@ var watchScript string
 //go:embed clients/relay-watch-hermes.sh
 var watchHermesScript string
 
+//go:embed clients/relay-tail-supervisor.py
+var tailSupervisorScript string
+
 // assetVersion is baked at build time (ldflags -X) so browsers refetch
 // app.js/style.css after each release instead of mixing stale cached copies.
 var assetVersion = "dev"
@@ -85,3 +88,12 @@ func WatchScript() string { return watchScript }
 // supervisor — the script is the cron(1m) floor, the supervisor is the
 // second-level path.
 func WatchHermesScript() string { return watchHermesScript }
+
+// TailSupervisorScript returns the resident Hermes wake layer served at
+// GET /clients/relay-tail-supervisor.py (clients/hermes/ standard onboarding).
+// Hermes-only by design: the Muse/Claw onboarding wakes through a sourced hook
+// function and must not be handed a `hermes chat -q` supervisor (the prompts
+// of the other types never reference this URL — enforced by prompts_test).
+// It is a static artifact because the receiver is a dumb pipe: only the wake
+// implementation is runtime-specific, and Hermes' wake is a one-shot session.
+func TailSupervisorScript() string { return tailSupervisorScript }

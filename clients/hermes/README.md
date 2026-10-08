@@ -45,10 +45,14 @@ curl -sL "$RELAY_URL/clients/relay-tail?arch=amd64" -o "$BASE/bin/relay-tail"
 chmod +x "$BASE/bin/relay-tail"
 
 # 2. 拿唤醒层（服务端下发，别去仓库里抄）
+#    常驻模式（首选，秒级）：
+curl -s "$RELAY_URL/clients/relay-tail-supervisor.py" -o "$BASE/relay-tail-supervisor.py"
+#    cron 模式（1 分钟下限）：
 curl -s "$RELAY_URL/clients/relay-watch-hermes.sh" -o "$BASE/relay-watch.sh"
 chmod +x "$BASE/relay-watch.sh"
 # 改脚本顶部 CONFIG 区：RELAY_URL / BASE / NOTIFY(唤醒摘要发到哪) / HERMES_BIN；
-# 常驻模式则用 relay-tail-supervisor.py（同样改顶部环境变量：RELAY / BASE / WAKE_CMD / RELAY_NOTIFY）
+# supervisor 用环境变量（RELAY / BASE / WAKE_CMD / RELAY_NOTIFY）
+# 注意：这两份是 hermes 专用下发件，其他类型的助手用不到（它们走自己的运行时 hook）。
 
 # 3. 起（二选一）
 #    A. 常驻（首选，秒级）
