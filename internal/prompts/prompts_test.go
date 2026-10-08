@@ -217,7 +217,7 @@ func TestChangesSinceIncremental(t *testing.T) {
 		t.Fatalf("current: %+v", got)
 	}
 	got := ChangesSince(2)
-	if len(got) != 7 || got[0].Version != 3 || got[6].Version != PromptVersion {
+	if len(got) != 8 || got[0].Version != 3 || got[7].Version != PromptVersion {
 		t.Fatalf("since v2: %+v", got)
 	}
 	for _, e := range got {

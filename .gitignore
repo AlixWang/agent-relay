@@ -8,3 +8,5 @@
 /var/lib/agent-relay/
 .idea/
 .vscode/
+__pycache__/
+*.pyc

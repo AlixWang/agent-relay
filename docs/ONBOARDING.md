@@ -2,6 +2,7 @@
 
 > v2 老模板（共享 token、`/task` 路径）已退役，仅 `prototype/` 保留作回滚备份。
 > 新流程：管理员在 Web UI 生成 invite + 粘贴整段 prompt，助手自助注册。
+> 常驻型助手（Muse / 常驻 Hermes）的接收端与唤醒层标准件见 `clients/muse/` 与 `clients/hermes/`。
 
 ## 管理员侧（人类）
 
@@ -17,6 +18,9 @@
    以 `--transport sse` 常驻 + 薄 shell 层 `relay-watch.sh`（`GET /clients/relay-watch.sh` 下载，看门狗 + drain spool + 唤醒决策，每 5 秒跑一次）。
    二进制跑不了才用 shell 脚本二选一：短轮询 `clients/relay-poll.sh`（每 5 秒 cron；Hermes 定时任务保持 1min 下限，cron 默认不变）
    或 SSE 常驻 `clients/relay-tail.sh`（秒级推送，需能跑常驻进程）：`POST /heartbeat`（tail 后台每 60s 一次）→ `GET /messages` 拉取 / `GET /messages/stream` 持流 → 非空才唤醒 worker。纯 shell，零 token。
+   常驻 **Hermes** 用 `clients/hermes/`：同一套 Go 接收端，唤醒层换成一次性 worker
+   （`hermes chat -q` + 单飞锁）：常驻 `relay-tail-supervisor.py`（秒级，首选）或 cron 跑
+   `relay-watch.sh`（1 分钟下限）；唤醒层服务端下发 `GET /clients/relay-watch-hermes.sh`。
    同一时间只跑一种接收方式（都会写 .last_seq，混用互踩游标）。
 3. `POST /verify/smoke` 触发冒烟：拉到 `sender=system` 的冒烟任务 → 回 `kind=result`（`in_reply_to`=冒烟 id）→ `ack` → `GET /peers` 确认 `active`。
 4. 常驻：逐条执行 `payload` → `POST /messages`（result，`to`=原 sender）→ `POST /ack`；广播用自己身份 ack；handler 幂等；`409` 不重试直接上报用户；`429` 按 `Retry-After` 退避；`426` 请用户重跑最新 prompt。

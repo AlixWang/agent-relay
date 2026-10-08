@@ -160,3 +160,22 @@ func TestWatchScriptEmbedded(t *testing.T) {
 		t.Fatal("internal/web/clients/relay-watch.sh diverged from clients/muse/relay-watch.sh")
 	}
 }
+
+func TestWatchHermesScriptEmbedded(t *testing.T) {
+	s := WatchHermesScript()
+	// The Hermes edition must keep the shared thin-layer shape and carry its
+	// own wake implementation (one-shot worker + single-flight lock).
+	for _, must := range []string{"spool", "wake_running", "hermes", "wake.lock"} {
+		if !strings.Contains(s, must) {
+			t.Fatalf("embedded hermes watch script missing %q", must)
+		}
+	}
+	// Must stay in sync with the repo copy.
+	raw, err := os.ReadFile("../../clients/hermes/relay-watch.sh")
+	if err != nil {
+		t.Fatalf("repo copy: %v", err)
+	}
+	if s != string(raw) {
+		t.Fatal("internal/web/clients/relay-watch-hermes.sh diverged from clients/hermes/relay-watch.sh")
+	}
+}

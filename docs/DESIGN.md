@@ -622,6 +622,40 @@ templates (shell scripts are fallback for hosts that can't run binaries);
 hermes keeps cron as its default entry but may use resident/SSE/Go when
 deployed resident (docker/regular host — no sandbox reclamation).
 
+### 8.10 Hermes resident wake layer (`clients/hermes/`)
+
+A resident Hermes (docker / regular host) can run the Go receiver, but the Muse
+thin shell cannot wake it: Muse wakes through a sourced hook function, whereas
+Hermes wakes by launching a one-shot session (`hermes chat -q "<prompt>"`).
+`clients/hermes/` is the same dumb-pipe split with a Hermes wake implementation:
+
+- `relay-tail-supervisor.py` — resident mode (preferred): spawns `relay-tail`,
+  reads its stdout directly, wakes on arrival (second-level), restarts the child
+  with backoff, refuses to start when another receiver already holds the cursor
+  (two SSE streams duplicate every event line).
+  Its single-flight lock treats a zombie worker as finished **and** force-releases
+  a stale lock: a one-shot agent that exits without being reaped keeps a `/proc`
+  entry forever, which silently pins the whole wake chain (field incident: 4h of
+  silence, no alert).
+- `relay-watch.sh` — the cron floor (Hermes' scheduler minimum is 1 minute),
+  served at `GET /clients/relay-watch-hermes.sh`: same watchdog + spool drain +
+  event dedup as the Muse layer, only `wake()` differs. Onboarding points at the
+  server URL, never the repo path.
+- `worker-prompt.md` — the worker rules snapshot for Hermes.
+
+Both layers keep wake payloads metadata-only (`id`/`from`/`kind` + 120-char
+preview); the worker reads the full text back from the spool by id, because
+handing a whole payload through the wake handoff truncates it and the task is
+silently dropped (field incident).
+
+Event parsing is schema-fragile and must fail loudly. When the server merged
+`prompt_update` and `client_update` into one line and turned `version` into a
+client-version string (`"v0.12.0"`), a wake layer doing `int(version)` threw,
+swallowed both update events, and left the member on a stale prompt and binary
+for hours with nothing but a log line. Anything strongly typed (`int()`, index
+access) over an event line is a fragile point; the supervisor alerts on
+event-handling exceptions.
+
 ### 8.8 Local-delivery self-check (no "main session" on the server)
 
 The relay is a broker: it stores and forwards, it has no "main session" concept and no
