@@ -17,6 +17,10 @@ POST   /ack         { message_id, by }                        → { ok }
 POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version?, profile? }
                                    → { ok, prompt_update?, prompt_version?, profile_refresh? }（新指令/简介过期时提醒）
 GET    /prompts/current           → { ok, prompt_version, agent_type, prompt }（§8.6 指令下发，需鉴权）
+GET    /clients/relay-watch.sh      → 薄 shell 层（Muse 标准接入：看门狗 + drain spool + 唤醒决策，免鉴权）
+GET    /clients/relay-poll.sh       → 短轮询脚本（免鉴权）
+GET    /clients/relay-tail.sh       → SSE 常驻脚本（免鉴权）
+GET    /clients/relay-tail?arch=<amd64|arm64> → Go 接收端（302 跳转到 Release，curl 加 -L）
 GET    /peers                         → { ok, peers: [{ id, display_name, agent_type, status,
                                             online, last_seen, protocol_version, capabilities }] }
 POST   /verify/smoke (as self)        → { ok, seq, smoke_id }

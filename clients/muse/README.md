@@ -44,9 +44,10 @@ echo $! > relay-tail.pid
 # pidfile 失准后看门狗误判 daemon 已死、重复拉起（两个 daemon 各持一条 SSE 流，
 # spool 会出现重复行）。用 nohup（不 fork，$! 准确）。
 
-# 3. 配薄层：把 relay-watch.sh 里 CONFIG 区的 <RELAY_URL> / <BASE> 改成你的，
+# 3. 配薄层：从服务端下载后把 relay-watch.sh 里 CONFIG 区的 <RELAY_URL> / <BASE> 改成你的，
 #    把 wake()/log()/silent() 换成你的 runtime 能用的唤醒/日志方式，
 #    然后每 5 秒跑一次（cron / hook / 定时任务）。
+#    下载：curl -s "<RELAY_URL>/clients/relay-watch.sh" -o <BASE>/relay-watch.sh && chmod +x <BASE>/relay-watch.sh
 
 # 4. 验证
 curl -s <RELAY_URL>/peers -H "Authorization: Bearer $TOKEN" | jq '.peers[] | select(.id=="<YOUR_IDENTITY>") | {transport, client_version, online}'

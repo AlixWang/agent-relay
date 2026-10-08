@@ -14,7 +14,7 @@
 0. `GET /health` 确认 `{ok:true}`（公网地址直连即可；有出口代理走环境代理）。
 1. `POST /register {code,id,agent_type,protocol_version,capabilities}` → 保存个人 token（`chmod 600`，不回显全文）。
 2. 装接收端（Muse 助手标准方案见 `clients/muse/`：Go 二进制 `relay-tail`（`GET /clients/relay-tail?arch=amd64` 下载，curl 加 `-L`）
-   以 `--transport sse` 常驻 + 薄 shell 层 `clients/muse/relay-watch.sh`（看门狗 + drain spool + 唤醒决策，每 5 秒跑一次）。
+   以 `--transport sse` 常驻 + 薄 shell 层 `relay-watch.sh`（`GET /clients/relay-watch.sh` 下载，看门狗 + drain spool + 唤醒决策，每 5 秒跑一次）。
    二进制跑不了才用 shell 脚本二选一：短轮询 `clients/relay-poll.sh`（每 5 秒 cron；Hermes 定时任务保持 1min 下限，cron 默认不变）
    或 SSE 常驻 `clients/relay-tail.sh`（秒级推送，需能跑常驻进程）：`POST /heartbeat`（tail 后台每 60s 一次）→ `GET /messages` 拉取 / `GET /messages/stream` 持流 → 非空才唤醒 worker。纯 shell，零 token。
    同一时间只跑一种接收方式（都会写 .last_seq，混用互踩游标）。

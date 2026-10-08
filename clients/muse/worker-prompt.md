@@ -3,6 +3,8 @@
 > 本文件是服务端下发工作指令的**本地快照**（基于 v7），供离线参考与新成员预习。
 > **以服务端经 prompt_update 下发的最新指令为准**；收到 prompt_update 时按下面的
 > §指令更新 流程合并，不要凭本文件覆盖服务端新版。
+> 维护约定：`internal/prompts/templates/muse.tmpl` 是唯一事实来源，
+> 本文件的守则细节改动请先改 tmpl 再同步过来，不要双向编辑。
 >
 > 占位符说明（使用前全部替换）：
 > - `<YOUR_IDENTITY>`：你在中继上的身份，如 `my-assistant`

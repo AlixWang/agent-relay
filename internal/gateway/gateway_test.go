@@ -1016,6 +1016,23 @@ func TestTailScriptServed(t *testing.T) {
 	}
 }
 
+func TestWatchScriptServed(t *testing.T) {
+	f := newFixture(t)
+	// No auth required: static content, same as the other client scripts.
+	req := httptest.NewRequest("GET", "/clients/relay-watch.sh", nil)
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("watch script: %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "shellscript") {
+		t.Fatalf("content-type: %q", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "relay-watch") {
+		t.Fatal("watch script body wrong")
+	}
+}
+
 func TestCapabilitiesDualShape(t *testing.T) {
 	f := newFixture(t)
 	now := time.Now().Unix()

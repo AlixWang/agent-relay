@@ -145,3 +145,18 @@ func TestTailScriptEmbedded(t *testing.T) {
 		t.Fatal("internal/web/clients/relay-tail.sh diverged from clients/relay-tail.sh")
 	}
 }
+
+func TestWatchScriptEmbedded(t *testing.T) {
+	s := WatchScript()
+	if !strings.Contains(s, "relay-watch") || !strings.Contains(s, "spool") {
+		t.Fatal("embedded watch script looks wrong")
+	}
+	// Must stay in sync with the repo copy.
+	raw, err := os.ReadFile("../../clients/muse/relay-watch.sh")
+	if err != nil {
+		t.Fatalf("repo copy: %v", err)
+	}
+	if s != string(raw) {
+		t.Fatal("internal/web/clients/relay-watch.sh diverged from clients/muse/relay-watch.sh")
+	}
+}

@@ -110,7 +110,7 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 7
+const PromptVersion = 8
 
 // ChangeEntry is one revision's upgrade guide for assistants.
 type ChangeEntry struct {
@@ -150,6 +150,11 @@ var ChangeLog = []ChangeEntry{
 		Version: 7,
 		Summary: "接收端首选 Go 二进制 §4（erdan 实测通过）+ 客户端更新 §7.6/§6.5：heartbeat 上报构建版本，服务端有新 Release 回 client_update 唤醒换二进制；跑不了二进制才回落 shell（poll/tail 二选一）。",
 		Actions: "能跑二进制的按 §4 方式 A 切 Go 接收端（游标文件通用）；被 client_update 唤醒时下载新版替换重启。hermes 忽略 client_update。",
+	},
+	{
+		Version: 8,
+		Summary: "Muse 薄层服务端下发 §4（GET /clients/relay-watch.sh，不再指仓库相对路径）+ 常驻守则回填 §6/§7.6/§8（wake 元数据+按id取全文、先result后ack+.done_ids幂等、poll_error直报、chat/result处理、执行摘要、防假升级校验）。",
+		Actions: "按 §4 从服务端下载 relay-watch.sh 并改 CONFIG 区；对照 §6/§6.4/§7/§7.6/§8 补上缺的守则节。",
 	},
 }
 

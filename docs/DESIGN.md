@@ -563,10 +563,10 @@ Transport bugs (parse, reconnect, cursor, silent drops) get fixed once in Go;
 policy bugs (dedup, delivery target, monitoring) stay in shell, editable
 without recompiling. Shipped as `relay-tail-linux-<arch>` Release assets
 (same matrix as the server), fetched via `GET /clients/relay-tail?arch=`
-(302 to the Release file). Prototype status: acceptance-tested locally
-(poll/sse wake, cursor, backlog, dedup, exit codes); not yet referenced by
-the onboarding templates — shell scripts remain the default until field
-proven.
+(302 to the Release file). The Muse thin shell (`clients/muse/relay-watch.sh`)
+is served versioned at `GET /clients/relay-watch.sh` (same static pattern as
+`relay-poll.sh`/`relay-tail.sh`); onboarding templates point assistants at
+the server URL, never at the repo path.
 
 Receiver client versions ride the heartbeat, mirroring prompt_version:
 the Go binary reports its release tag (`client_version`, baked via

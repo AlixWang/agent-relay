@@ -17,6 +17,9 @@ var pollScript string
 //go:embed clients/relay-tail.sh
 var tailScript string
 
+//go:embed clients/relay-watch.sh
+var watchScript string
+
 // assetVersion is baked at build time (ldflags -X) so browsers refetch
 // app.js/style.css after each release instead of mixing stale cached copies.
 var assetVersion = "dev"
@@ -65,3 +68,8 @@ func PollScript() string { return pollScript }
 // GET /clients/relay-tail.sh (DESIGN §4.4b). Persistent alternative to the
 // poller: same layout, same wake JSON, same exit codes — pick one.
 func TailScript() string { return tailScript }
+
+// WatchScript returns the Muse thin-shell layer served at
+// GET /clients/relay-watch.sh: watchdog + drain spool + wake decision
+// for the Go relay-tail dumb pipe (clients/muse/ standard onboarding).
+func WatchScript() string { return watchScript }

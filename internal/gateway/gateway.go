@@ -82,6 +82,7 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /clients/relay-poll.sh", s.handlePollScript)
 	mux.HandleFunc("GET /clients/relay-tail.sh", s.handleTailScript)
+	mux.HandleFunc("GET /clients/relay-watch.sh", s.handleWatchScript)
 	// Go receiver prototype (DESIGN §8.9): redirect to the Release asset.
 	mux.HandleFunc("GET /clients/relay-tail", s.handleTailBinary)
 	mux.HandleFunc("POST /register", s.handleRegister)
@@ -234,6 +235,15 @@ func (s *Server) handleTailScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write([]byte(web.TailScript()))
+}
+
+// handleWatchScript serves the Muse thin-shell layer (no auth: static
+// content). Assistants download it during Go-first onboarding instead of
+// hunting the repo — never hand-write wake/dedup details.
+func (s *Server) handleWatchScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write([]byte(web.WatchScript()))
 }
 
 // handleTailBinary redirects to the Go receiver prototype for the requested

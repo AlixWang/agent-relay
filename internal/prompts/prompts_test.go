@@ -116,6 +116,17 @@ func TestPollScriptDownloadDocumented(t *testing.T) {
 			t.Fatalf("%s still says 'ask user for full text'", typ)
 		}
 	}
+	// muse must point at the versioned thin-shell download — never a bare
+	// repo relative path ("去仓库找" is unactionable for an assistant).
+	out := render(t, "muse", Data{InviteCode: "inv_test"})
+	if !strings.Contains(out, "/clients/relay-watch.sh") {
+		t.Fatal("muse missing relay-watch.sh download URL")
+	}
+	for _, bad := range []string{"仓库已提供标准模板", "另见 clients/muse/README"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("muse still carries vague repo pointer %q", bad)
+		}
+	}
 }
 
 func TestAgentTypeEmbedded(t *testing.T) {
@@ -205,7 +216,7 @@ func TestChangesSinceIncremental(t *testing.T) {
 		t.Fatalf("current: %+v", got)
 	}
 	got := ChangesSince(2)
-	if len(got) != 5 || got[0].Version != 3 || got[4].Version != PromptVersion {
+	if len(got) != 6 || got[0].Version != 3 || got[5].Version != PromptVersion {
 		t.Fatalf("since v2: %+v", got)
 	}
 	for _, e := range got {
@@ -236,11 +247,31 @@ func TestDistributionMatchesInit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, needle := range []string{"relay-tail.sh", "relay-tail?arch", "client_update", "prompt-changes.json", "profile_refresh", "7.5", "6.5"} {
+		for _, needle := range []string{"relay-tail.sh", "relay-tail?arch", "client_update", "prompt-changes.json", "profile_refresh", "7.5", "6.5", "relay-watch.sh"} {
 			if strings.Contains(init, needle) && !strings.Contains(dist, needle) {
 				t.Fatalf("%s: distribution missing %q present in init", typ, needle)
 			}
 		}
+	}
+}
+
+func TestMuseWorkerRichness(t *testing.T) {
+	// Regression test for the onboarding drift: the served muse prompt
+	// must carry the worker-prompt.md details (not just the thin §6).
+	// Both init and distribution (IsReconfigure) render from the same
+	// template, so checking one covers both.
+	out := render(t, "muse", Data{InviteCode: "inv_test"})
+	for _, must := range []string{
+		"payload_preview", ".done_ids", "先回结果",
+		"poll_error", "kind=chat", "执行摘要",
+		"绝不带 `thread`", "relay-watch.sh",
+	} {
+		if !strings.Contains(out, must) {
+			t.Fatalf("muse prompt missing worker richness %q", must)
+		}
+	}
+	if strings.Contains(out, "<RELAY_URL>") || strings.Contains(out, "<YOUR_IDENTITY>") {
+		t.Fatal("muse prompt leaks unrendered <PLACEHOLDER>")
 	}
 }
 
