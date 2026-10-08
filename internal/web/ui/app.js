@@ -859,6 +859,7 @@ const renderHandshakeFields = (m) => {
 async function viewThread(root) {
   const drawer = $('threadDrawer');
   $('drawerTitle').textContent = root;
+  $('drawerTitle').title = root;
   $('drawerMeta').textContent = '加载中…';
   const body = $('drawerBody');
   body.innerHTML = `<div class="empty"><p class="muted">加载会话历史…</p></div>`;
@@ -866,9 +867,11 @@ async function viewThread(root) {
   setupDialog(drawer);
   drawer.showModal();
 
-  const copyThreadExport = async (format, btn) => {
-    const origHtml = btn.innerHTML;
-    btn.disabled = true;
+  const copyThreadExport = async (format) => {
+    const dropdown = $('copyDropdown');
+    if (dropdown) dropdown.open = false;
+    const summary = $('copySummary');
+    const origHtml = summary ? summary.innerHTML : '';
     try {
       let text = '';
       try {
@@ -893,24 +896,26 @@ async function viewThread(root) {
       const ok = await copyToClipboard(text);
       if (ok) {
         toast(`已复制 ${format === 'jsonl' ? 'JSONL' : 'Markdown'} 到剪贴板`, 'ok', 1800);
-        btn.innerHTML = `${icon('check', 'xs')} 已复制`;
-        setTimeout(() => { btn.innerHTML = origHtml; }, 1600);
+        if (summary) {
+          summary.innerHTML = `${icon('check', 'xs')} 已复制<svg class="icon xs chev"><use href="#i-chev-d"/></svg>`;
+          setTimeout(() => { if (summary) summary.innerHTML = origHtml; }, 1600);
+        }
       } else {
         toast('复制失败，请重试', 'bad');
       }
     } catch (err) {
       toast('复制失败: ' + err.message, 'bad');
-    } finally {
-      btn.disabled = false;
     }
   };
 
-  $('copyMd').onclick = () => copyThreadExport('markdown', $('copyMd'));
-  $('copyJsonl').onclick = () => copyThreadExport('jsonl', $('copyJsonl'));
+  $('copyMd').onclick = () => copyThreadExport('markdown');
+  $('copyJsonl').onclick = () => copyThreadExport('jsonl');
   $('expMd').onclick = () => {
+    $('expDropdown').open = false;
     window.location = '/admin/messages/export?thread=' + encodeURIComponent(root) + '&format=markdown';
   };
   $('expJsonl').onclick = () => {
+    $('expDropdown').open = false;
     window.location = '/admin/messages/export?thread=' + encodeURIComponent(root) + '&format=jsonl';
   };
 
@@ -1095,6 +1100,11 @@ $('genReconf').onclick = async () => {
 
 // Copy & Download delegate
 document.addEventListener('click', async (e) => {
+  // Close any open dropdowns if clicking outside
+  if (!e.target.closest('details.dropdown')) {
+    document.querySelectorAll('details.dropdown[open]').forEach((d) => { d.open = false; });
+  }
+
   const copyBtn = e.target.closest('[data-copy]');
   if (copyBtn) {
     const selector = copyBtn.dataset.copy;

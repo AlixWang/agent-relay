@@ -33,6 +33,7 @@
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
     <symbol id="i-chev-l" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
     <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
     <symbol id="i-chevs-l" viewBox="0 0 24 24"><path d="m11 17-5-5 5-5"/><path d="m18 17-5-5 5-5"/></symbol>
     <symbol id="i-chevs-r" viewBox="0 0 24 24"><path d="m6 17 5-5-5-5"/><path d="m13 17 5-5-5-5"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></symbol>
@@ -378,10 +379,24 @@
       <p id="drawerMeta" class="muted xs"></p>
     </div>
     <div class="row-btns tight drawer-actions">
-      <button class="btn btn-ghost btn-sm" id="copyMd" data-tip="复制 Markdown 到剪贴板"><svg class="icon"><use href="#i-copy"/></svg>复制 Markdown</button>
-      <button class="btn btn-ghost btn-sm" id="copyJsonl" data-tip="复制 JSONL 到剪贴板"><svg class="icon"><use href="#i-copy"/></svg>复制 JSONL</button>
-      <button class="btn btn-ghost btn-sm" id="expMd" data-tip="下载 Markdown 文件"><svg class="icon"><use href="#i-download"/></svg>下载 Markdown</button>
-      <button class="btn btn-ghost btn-sm" id="expJsonl" data-tip="下载 JSONL 文件"><svg class="icon"><use href="#i-download"/></svg>下载 JSONL</button>
+      <details class="dropdown" id="copyDropdown">
+        <summary class="btn btn-ghost btn-sm" id="copySummary" data-tip="复制对话">
+          <svg class="icon"><use href="#i-copy"/></svg>复制<svg class="icon xs chev"><use href="#i-chev-d"/></svg>
+        </summary>
+        <div class="menu">
+          <button type="button" id="copyMd"><svg class="icon xs"><use href="#i-copy"/></svg>复制 Markdown</button>
+          <button type="button" id="copyJsonl"><svg class="icon xs"><use href="#i-copy"/></svg>复制 JSONL</button>
+        </div>
+      </details>
+      <details class="dropdown" id="expDropdown">
+        <summary class="btn btn-ghost btn-sm" id="expSummary" data-tip="下载文件">
+          <svg class="icon"><use href="#i-download"/></svg>下载<svg class="icon xs chev"><use href="#i-chev-d"/></svg>
+        </summary>
+        <div class="menu">
+          <button type="button" id="expMd"><svg class="icon xs"><use href="#i-download"/></svg>Markdown (.md)</button>
+          <button type="button" id="expJsonl"><svg class="icon xs"><use href="#i-download"/></svg>JSONL (.jsonl)</button>
+        </div>
+      </details>
       <button class="btn-icon" data-close aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
     </div>
   </div>
