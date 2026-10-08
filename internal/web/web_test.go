@@ -160,3 +160,44 @@ func TestWatchScriptEmbedded(t *testing.T) {
 		t.Fatal("internal/web/clients/relay-watch.sh diverged from clients/muse/relay-watch.sh")
 	}
 }
+
+func TestWatchHermesScriptEmbedded(t *testing.T) {
+	s := WatchHermesScript()
+	// The Hermes edition must keep the shared thin-layer shape and carry its
+	// own wake implementation (one-shot worker + single-flight lock).
+	for _, must := range []string{"spool", "wake_running", "hermes", "wake.lock"} {
+		if !strings.Contains(s, must) {
+			t.Fatalf("embedded hermes watch script missing %q", must)
+		}
+	}
+	// Must stay in sync with the repo copy.
+	raw, err := os.ReadFile("../../clients/hermes/relay-watch.sh")
+	if err != nil {
+		t.Fatalf("repo copy: %v", err)
+	}
+	if s != string(raw) {
+		t.Fatal("internal/web/clients/relay-watch-hermes.sh diverged from clients/hermes/relay-watch.sh")
+	}
+}
+
+func TestTailSupervisorScriptEmbedded(t *testing.T) {
+	s := TailSupervisorScript()
+	// Served artifact for resident Hermes: it must stay a runnable stdlib-only
+	// supervisor (no third-party imports) with a zombie-aware single-flight lock.
+	if !strings.HasPrefix(s, "#!/usr/bin/env python3") {
+		t.Fatal("embedded supervisor lost its shebang")
+	}
+	for _, must := range []string{"import json", "import subprocess", "wake_running", "other_tail_running", "WAKE_CMD"} {
+		if !strings.Contains(s, must) {
+			t.Fatalf("embedded supervisor missing %q", must)
+		}
+	}
+	// Must stay in sync with the repo copy.
+	raw, err := os.ReadFile("../../clients/hermes/relay-tail-supervisor.py")
+	if err != nil {
+		t.Fatalf("repo copy: %v", err)
+	}
+	if s != string(raw) {
+		t.Fatal("internal/web/clients/relay-tail-supervisor.py diverged from clients/hermes/relay-tail-supervisor.py")
+	}
+}

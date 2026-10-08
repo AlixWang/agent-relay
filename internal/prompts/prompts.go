@@ -110,7 +110,7 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 9
+const PromptVersion = 10
 
 // ChangeEntry is one revision's upgrade guide for assistants.
 type ChangeEntry struct {
@@ -160,6 +160,11 @@ var ChangeLog = []ChangeEntry{
 		Version: 9,
 		Summary: "客户端更新触发条件改口径 §7.6/§6.6：服务端比较接收端源码版本 receiver_rev（heartbeat 上报 client_rev），只有它真不同才回 client_update——服务端/文档/提示词版本号前进不再催你换二进制；真要换时唤醒事件带 client_update.rev，换完写 .client_rev 确认。",
 		Actions: "读 §7.6（hermes §6.6）：以后只按 receiver_rev 判断要不要换接收端；处理更新时把目标 rev 写进 .client_rev。",
+	},
+	{
+		Version: 10,
+		Summary: "Hermes 常驻接入补齐：新增 §4.5 方式 A（Go 接收端 + 唤醒层，标准件 clients/hermes/）+ §1 区分对话型/常驻型 + §2 capabilities 必须如实填（否则成员表里是「无能力」，常驻任务不会被路由）+ §5.8 指向常驻标准件 + §6.5 客户端更新按部署形态分口径（对话型可忽略，常驻型按 §7.6 处理）。唤醒层两份都是 hermes 专用下发件：GET /clients/relay-tail-supervisor.py（常驻秒级，首选）/ GET /clients/relay-watch-hermes.sh（cron 版）；其他类型的助手不引用这两个地址。",
+		Actions: "常驻型 hermes 按 §4.5 装接收端与唤醒层（supervisor 秒级 / relay-watch.sh 每分钟，二选一，两份都从服务端下载）；注册时 capabilities 如实填全；对话型不用动，只把 §6.5 的 client_update 口径看清。",
 	},
 }
 

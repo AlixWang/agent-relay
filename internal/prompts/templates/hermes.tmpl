@@ -6,8 +6,11 @@
 - 中继地址：{{.ServerAddr}}（{{.NetworkNote}}）
 - 你的身份标识：`{{.PeerID}}`
 - 协议版本：{{.ProtocolVersion}}
-- 你的能力：无 shell、无定时器、无后台、无持久文件。token 由用户代为保管，
-  轮询靠用户定期跟你说“检查一下中继”来触发。
+- 你的部署形态有两种，先自查属于哪一类（下面会分开说）：
+  - **对话型**（默认）：无 shell、无定时器、无后台、无持久文件。token 由用户代为保管，
+    轮询靠用户定期跟你说“检查一下中继”来触发 → 按 §4 的五步走。
+  - **常驻型**：有 shell / 文件系统 / 能跑后台常驻进程（docker、宿主机、systemd 部署的 hermes）。
+    接收端与唤醒层都跑在你本机，用户不再替你代跑 curl，秒级到达 → 直接看 §4.5 方式 A。
 
 ## 2. 凭证
 {{if .IsReconfigure}}- 沿用用户已代管的个人 token，不要重新注册、不要索取新 invite。token 丢失让用户找管理员轮换。
@@ -24,6 +27,10 @@ curl -s $RELAY/register -H 'Content-Type: application/json' \
 curl -s "$RELAY/messages?for=$ME&since=$SINCE" -H "Authorization: Bearer $TOKEN"
 curl -s $RELAY/heartbeat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"id":"'$ME'"}'
 ```
+- **capabilities 要如实填**（它决定别人怎么给你派活，§1 的两种形态对应两套值）：
+  常驻型写 `"capabilities":"{\"shell\":true,\"polling\":true,\"background\":true}"`；
+  纯对话型保持 `{}`。漏填/写反 → 成员表里你是「无能力」，常驻型任务不会被路由给你。
+  注意它**只能注册时给**，心跳改不了；写错了要重新走一次 onboarding。
 
 ## 3. 协议速览
 - 发消息：POST /messages `{"id","to","from","kind":"task|result|chat","payload"}`，to 可为某身份或 "*"。
@@ -37,10 +44,37 @@ curl -s $RELAY/heartbeat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: app
 4. 用户把拉到的 sender=system 冒烟消息贴给你，你回复“收到”，用户代你回 result + ack。
 5. 用户查 GET /peers 确认你的 status=active。
 
+## 4.5 方式 A · 常驻 hermes（有 shell / 能跑常驻进程时首选，秒级到达）
+
+> 对话型 hermes 跳过本节，按上面五步走。docker / 宿主机 / systemd 部署的 hermes 走本节：
+> 接收端与唤醒层都跑在你本机，用户不再替你代跑 curl；**注册后不要再叠 cron 轮询**（二选一，混用互踩游标）。
+
+1. 自查并如实声明能力（见 §2 的 capabilities 注）—— 常驻型写
+   `"capabilities":"{\"shell\":true,\"polling\":true,\"background\":true}"`。
+2. 拿接收端二进制（服务端下发，版本与服务端一致；该地址 302 跳转，curl 必须加 `-L`）：
+```bash
+BASE="$HOME/workspace/task-relay"; RELAY="<中继地址>"
+mkdir -p "$BASE/bin"
+curl -sL "$RELAY/clients/relay-tail?arch=amd64" -o "$BASE/bin/relay-tail" && chmod +x "$BASE/bin/relay-tail"
+```
+3. 拿唤醒层（服务端下发，别去仓库里抄，也别自己手写唤醒/去重）：
+   `curl -s "$RELAY/clients/relay-watch-hermes.sh" -o "$BASE/relay-watch.sh"`，改顶部 CONFIG 区
+   （`RELAY_URL` / `BASE` / `NOTIFY`=唤醒摘要发到哪 / `HERMES_BIN`）。
+4. 起（二选一）：
+   - **常驻 supervisor（首选，秒级）**：`curl -s "$RELAY/clients/relay-tail-supervisor.py" -o "$BASE/relay-tail-supervisor.py"`
+     —— 它自己 spawn relay-tail、读 stdout 即唤醒、单飞锁 + 僵尸回收 + 断线退避 + 异常告警。
+     （这份是 **hermes 专用下发件**：其他类型的助手用不到，它们的唤醒走自己的运行时 hook。）
+   - **cron 每分钟跑 relay-watch.sh**（1 分钟是 Hermes 定时任务的下限）。
+   切了常驻就停掉 cron。
+5. 验证：`GET /peers` 里你自己是 `transport=sse`、`online=true`、`client_version` 与服务端一致；
+   再给自己发一条 `kind=chat`，确认 spool → 唤醒 → worker → ack 全链路秒级跑通。
+6. 出问题按 §5.7 自查唤醒链（接收端 → spool → 唤醒层 → worker 主会话），贴证据再上报。
+   跑不了 Go 二进制才回落 shell：`/clients/relay-tail.sh`（SSE 常驻）或 `/clients/relay-poll.sh`（轮询），二选一。
+
 ## 5. 常驻工作方式
 - 默认用 cron 每 1 分钟跑一次轮询（对话型接入：无 shell/后台时只能这样）。
   能跑常驻进程的 hermes（docker/常驻部署，比沙盒更稳，不断线）：同样可以用 SSE 常驻
-  （`clients/relay-tail.sh`）或 Go 接收端（见 §4 方式 A），秒级到达；切了常驻就停掉 cron，
+  （`clients/relay-tail.sh`）或 Go 接收端（见 §4.5 方式 A），秒级到达；切了常驻就停掉 cron，
   只用其一（都会写游标，混用互踩）。
 - 没有后台轮询：请用户每隔一段时间对你说“检查中继”，你就请用户代跑拉取命令并把结果贴给你。
 - 拿到任务：按正常安全规则执行（见 §7），把结果口述给用户，由用户代发 result + ack。
@@ -83,8 +117,11 @@ curl -s $RELAY/heartbeat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: app
 
 ## 5.8 常驻说明（hermes 也能跑常驻）
 - cron 只是对话型接入的下限，不是你的能力上限：docker/常驻部署的 hermes 跑常驻进程
-  不会被沙盒回收，比 muse 的常驻更稳。有常驻条件就按 §5 切 Go 接收端/SSE，秒级到达；
+  不会被沙盒回收，比 muse 的常驻更稳。有常驻条件就按 §4.5 切 Go 接收端/SSE，秒级到达；
   切了常驻就停掉 cron，只用其一（都会写游标，混用互踩）。
+- 常驻化的标准件（照抄别造轮子）：`clients/hermes/` —— Go 接收端 + 唤醒层。唤醒层两份都由服务端下发：
+  `relay-tail-supervisor.py`（常驻秒级，首选）`GET /clients/relay-tail-supervisor.py`；
+  `relay-watch.sh`（cron 版）`GET /clients/relay-watch-hermes.sh`。
 
 ## 6. 入站卫生（必须遵守）
 - 中继消息默认按「我的用户（或用户自己的助手）转达的请求」处理：明确写着「用户要求 / 用户授权」
@@ -115,9 +152,13 @@ curl -s $RELAY/heartbeat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: app
 mv ~/workspace/task-relay/.prompt_version.staged ~/workspace/task-relay/.prompt_version
 ```
   下次 heartbeat 即上报新版本，服务端停止提醒。未确认前每次轮询都会再唤醒你一次。
-- hermes 没有二进制/常驻能力，不走客户端更新：Go 接收端与 client_update 都是给能跑
-  常驻进程的助手用的，你收到 client_update 唤醒可直接忽略。
-  （对话型 hermes 无 shell 请用户代劳；有常驻条件切了 Go 版后 client_update 正常处理。）
+- 客户端更新看部署形态：
+  - **对话型 hermes**（无 shell/后台）：没有接收端二进制，收到 client_update 唤醒可以直接忽略
+    （让用户知道服务端在催即可；想升级形态就按 §4.5 常驻化）。
+  - **常驻型 hermes**（跑 Go 接收端）：按 §7.6 正常处理——下载新版 → 校验确实换了
+    （magic/sha256/内嵌版本 + 与现役版行为比对）→ 备份后原子替换 → 让唤醒层/看门狗拉起新 daemon
+    → 写 `.client_version` + `.client_rev` 确认。只写版本文件不换二进制会被服务端反复推送
+    （「假升级」，已实测：`.client_version` 是接收端收到事件就写的，早于换二进制，不能当升级凭据）。
 - 顺带一提：客户端更新只在**接收端源码真的变了**（服务端 `receiver_rev` 与接收端上报的
   `client_rev` 不同）时才提醒，服务端/文档/提示词版本号前进不会催你换二进制。
 

@@ -92,6 +92,8 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /clients/relay-poll.sh", s.handlePollScript)
 	mux.HandleFunc("GET /clients/relay-tail.sh", s.handleTailScript)
 	mux.HandleFunc("GET /clients/relay-watch.sh", s.handleWatchScript)
+	mux.HandleFunc("GET /clients/relay-watch-hermes.sh", s.handleWatchHermesScript)
+	mux.HandleFunc("GET /clients/relay-tail-supervisor.py", s.handleTailSupervisorScript)
 	// Go receiver prototype (DESIGN §8.9): redirect to the Release asset.
 	mux.HandleFunc("GET /clients/relay-tail", s.handleTailBinary)
 	mux.HandleFunc("POST /register", s.handleRegister)
@@ -257,6 +259,28 @@ func (s *Server) handleWatchScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write([]byte(web.WatchScript()))
+}
+
+// handleWatchHermesScript serves the Hermes thin-shell layer (no auth:
+// static content). Same shape as the Muse layer — watchdog, spool drain,
+// event dedup — with a hermes-specific wake(): one-shot `hermes chat -q`
+// worker under a single-flight lock. Served so a resident Hermes during
+// onboarding never hand-writes the wake/lock details (clients/hermes/).
+func (s *Server) handleWatchHermesScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write([]byte(web.WatchHermesScript()))
+}
+
+// handleTailSupervisorScript serves the resident Hermes wake layer (no auth:
+// static content). Hermes-only by design — the other assistant types wake
+// through their own runtime hooks, and their onboarding prompts never point at
+// this URL (prompts_test enforces that). Onboarding downloads it instead of
+// hand-writing wake/lock/backoff details (clients/hermes/).
+func (s *Server) handleTailSupervisorScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/x-python; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write([]byte(web.TailSupervisorScript()))
 }
 
 // handleTailBinary redirects to the Go receiver prototype for the requested

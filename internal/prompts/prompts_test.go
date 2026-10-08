@@ -217,7 +217,7 @@ func TestChangesSinceIncremental(t *testing.T) {
 		t.Fatalf("current: %+v", got)
 	}
 	got := ChangesSince(2)
-	if len(got) != 7 || got[0].Version != 3 || got[6].Version != PromptVersion {
+	if len(got) != 8 || got[0].Version != 3 || got[7].Version != PromptVersion {
 		t.Fatalf("since v2: %+v", got)
 	}
 	for _, e := range got {
@@ -394,6 +394,38 @@ func TestClientChoiceDocumented(t *testing.T) {
 		}
 		if strings.Contains(out, "短轮询（默认）") {
 			t.Fatalf("%s still carries old poll-default wording", typ)
+		}
+	}
+}
+
+func TestHermesWakeLayerIsHermesOnly(t *testing.T) {
+	// The resident wake layer is served (GET /clients/relay-tail-supervisor.py,
+	// /clients/relay-watch-hermes.sh) but is a Hermes-only handout: Muse/Claw/
+	// generic wake through a sourced hook function, so handing them a
+	// `hermes chat -q` supervisor would be useless at best.
+	hout, err := Render("hermes", Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, must := range []string{"/clients/relay-tail-supervisor.py", "/clients/relay-watch-hermes.sh"} {
+		if !strings.Contains(hout, must) {
+			t.Fatalf("hermes missing served wake-layer URL %q", must)
+		}
+	}
+	// A resident hermes must also be told where the pack lives and which
+	// section describes it (the old text pointed at a nonexistent §4 方式 A).
+	for _, must := range []string{"§4.5", "relay-tail"} {
+		if !strings.Contains(hout, must) {
+			t.Fatalf("hermes missing resident-onboarding marker %q", must)
+		}
+	}
+	for _, typ := range []string{"muse", "claw", "generic"} {
+		out, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, "relay-tail-supervisor") || strings.Contains(out, "relay-watch-hermes") {
+			t.Fatalf("%s must not hand out the hermes wake layer", typ)
 		}
 	}
 }
