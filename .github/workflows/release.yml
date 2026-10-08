@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5 # pinned major; runner resolves via tags
         with:
@@ -66,16 +68,44 @@ jobs:
           done
           echo "receiver_rev baked ok: ${{ steps.build.outputs.receiver_rev }}"
 
+      - name: generate release notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          REPO="${{ github.repository }}"
+          TAG_MSG=$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" | sed '/^$/d' | head -n 1)
+
+          {
+            if [ -n "$TAG_MSG" ]; then
+              echo "### ${TAG_MSG}"
+              echo ""
+            fi
+            echo "## What's Changed"
+            echo ""
+            if [ -n "$PREV_TAG" ]; then
+              COMMITS=$(git log "${PREV_TAG}..${GITHUB_REF_NAME}" --no-merges --pretty=format:"* %s ([%h](https://github.com/${REPO}/commit/%H)) by @%an")
+              if [ -z "$COMMITS" ]; then
+                COMMITS=$(git log "${PREV_TAG}..${GITHUB_REF_NAME}" --pretty=format:"* %s ([%h](https://github.com/${REPO}/commit/%H)) by @%an")
+              fi
+              echo "$COMMITS"
+              echo ""
+              echo ""
+              echo "**Full Changelog**: https://github.com/${REPO}/compare/${PREV_TAG}...${GITHUB_REF_NAME}"
+            else
+              git log "${GITHUB_REF_NAME}" --no-merges --pretty=format:"* %s ([%h](https://github.com/${REPO}/commit/%H)) by @%an"
+            fi
+          } > dist/RELEASE_NOTES.md
+          cat dist/RELEASE_NOTES.md
+
       - name: publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: dist/RELEASE_NOTES.md
           files: |
             dist/agent-relay-linux-amd64
             dist/agent-relay-linux-arm64
             dist/relay-tail-linux-amd64
             dist/relay-tail-linux-arm64
             dist/SHA256SUMS
-          generate_release_notes: true
 
   image:
     runs-on: ubuntu-latest

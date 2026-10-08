@@ -17,6 +17,34 @@ async function api(path, opts = {}) {
   return body;
 }
 
+const msgPayloadMap = new Map();
+
+async function copyToClipboard(text) {
+  if (text == null) return false;
+  const str = String(text);
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(str);
+      return true;
+    } catch (_) {}
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = str;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '-9999px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (ok) return true;
+  } catch (_) {}
+  return false;
+}
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -762,6 +790,8 @@ async function refreshSearch() {
       return;
     }
 
+    items.forEach((m) => msgPayloadMap.set(m.seq, m.payload));
+
     container.innerHTML = items.map((m) => {
       const isPending = m.approval_state === 'pending';
       return `<div class="msg ${isPending ? 'held' : ''}">
@@ -776,6 +806,7 @@ async function refreshSearch() {
           ${isPending ? `<span class="badge warn">${icon('shield', 'xs')}待审批</span>` : ''}
           <span class="sp"></span>
           <span class="muted xs" title="${fmtTime(m.created_at)}">${esc(ago(m.created_at))}</span>
+          <button class="btn btn-ghost btn-xs" data-copy-msg="${m.seq}" title="复制消息内容">${icon('copy', 'xs')}复制</button>
           <button class="btn btn-ghost btn-xs" onclick="window.__viewThread('${esc(m.thread)}')">${icon('eye', 'xs')}查看线程</button>
         </div>
         <div class="msg-body clamp">${esc(m.payload)}</div>
@@ -835,6 +866,47 @@ async function viewThread(root) {
   setupDialog(drawer);
   drawer.showModal();
 
+  const copyThreadExport = async (format, btn) => {
+    const origHtml = btn.innerHTML;
+    btn.disabled = true;
+    try {
+      let text = '';
+      try {
+        const res = await fetch('/admin/messages/export?thread=' + encodeURIComponent(root) + '&format=' + format);
+        if (res.ok) {
+          text = await res.text();
+        }
+      } catch (_) {}
+      if (!text && Array.isArray(window.__currentThreadItems)) {
+        if (format === 'jsonl') {
+          text = window.__currentThreadItems.map((m) => JSON.stringify(m)).join('\n') + '\n';
+        } else {
+          text = `# thread ${root}\n\n` + window.__currentThreadItems.map((m) =>
+            `## #${m.seq} ${m.sender} → ${m.recipient} (${m.kind}, ${m.approval_state || 'n/a'})\n\n${m.payload || ''}\n\n`
+          ).join('');
+        }
+      }
+      if (!text) {
+        toast('该线程无消息记录', 'info');
+        return;
+      }
+      const ok = await copyToClipboard(text);
+      if (ok) {
+        toast(`已复制 ${format === 'jsonl' ? 'JSONL' : 'Markdown'} 到剪贴板`, 'ok', 1800);
+        btn.innerHTML = `${icon('check', 'xs')} 已复制`;
+        setTimeout(() => { btn.innerHTML = origHtml; }, 1600);
+      } else {
+        toast('复制失败，请重试', 'bad');
+      }
+    } catch (err) {
+      toast('复制失败: ' + err.message, 'bad');
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  $('copyMd').onclick = () => copyThreadExport('markdown', $('copyMd'));
+  $('copyJsonl').onclick = () => copyThreadExport('jsonl', $('copyJsonl'));
   $('expMd').onclick = () => {
     window.location = '/admin/messages/export?thread=' + encodeURIComponent(root) + '&format=markdown';
   };
@@ -845,6 +917,8 @@ async function viewThread(root) {
   try {
     const r = await api('/admin/messages?thread=' + encodeURIComponent(root));
     const items = r.items || [];
+    window.__currentThreadItems = items;
+    items.forEach((m) => msgPayloadMap.set(m.seq, m.payload));
     $('drawerMeta').textContent = `共 ${items.length} 条消息 · 参与者: ${[...new Set(items.flatMap((m) => [m.sender, m.recipient]))].filter((x) => x && x !== '*').join(', ')}`;
 
     if (!items.length) {
@@ -865,6 +939,7 @@ async function viewThread(root) {
           <span class="badge mono xs">${esc(m.kind)}</span>
           <span class="sp"></span>
           <span class="muted xs" title="${fmtTime(m.created_at)}">${esc(ago(m.created_at))}</span>
+          <button class="btn btn-ghost btn-xs" data-copy-msg="${m.seq}" title="复制消息内容">${icon('copy', 'xs')}复制</button>
         </div>
         ${renderHandshakeBadge(m)}
         ${renderHandshakeFields(m)}
@@ -1019,17 +1094,55 @@ $('genReconf').onclick = async () => {
 };
 
 // Copy & Download delegate
-document.addEventListener('click', (e) => {
+document.addEventListener('click', async (e) => {
   const copyBtn = e.target.closest('[data-copy]');
   if (copyBtn) {
     const selector = copyBtn.dataset.copy;
     const target = document.querySelector(selector);
     if (target) {
-      navigator.clipboard.writeText(target.textContent || target.value || '');
-      toast('已复制到剪贴板', 'ok', 1800);
-      const origHtml = copyBtn.innerHTML;
-      copyBtn.innerHTML = `${icon('check', 'xs')} 已复制`;
-      setTimeout(() => { copyBtn.innerHTML = origHtml; }, 1600);
+      const ok = await copyToClipboard(target.textContent || target.value || '');
+      if (ok) {
+        toast('已复制到剪贴板', 'ok', 1800);
+        const origHtml = copyBtn.innerHTML;
+        copyBtn.innerHTML = `${icon('check', 'xs')} 已复制`;
+        setTimeout(() => { copyBtn.innerHTML = origHtml; }, 1600);
+      } else {
+        toast('复制失败，请重试', 'bad');
+      }
+    }
+    return;
+  }
+  const copyMsgBtn = e.target.closest('[data-copy-msg]');
+  if (copyMsgBtn) {
+    const seq = Number(copyMsgBtn.dataset.copyMsg);
+    let text = msgPayloadMap.get(seq);
+    if (text === undefined) {
+      const msgEl = copyMsgBtn.closest('.msg');
+      const bodyEl = msgEl && msgEl.querySelector('.msg-body');
+      text = bodyEl ? bodyEl.textContent : '';
+    }
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      toast(seq ? `已复制消息 #${seq} 内容` : '已复制消息内容', 'ok', 1800);
+      const origHtml = copyMsgBtn.innerHTML;
+      copyMsgBtn.innerHTML = `${icon('check', 'xs')} 已复制`;
+      setTimeout(() => { copyMsgBtn.innerHTML = origHtml; }, 1600);
+    } else {
+      toast('复制失败，请重试', 'bad');
+    }
+    return;
+  }
+  const copyThreadIdBtn = e.target.closest('#copyThreadId');
+  if (copyThreadIdBtn) {
+    const threadId = $('drawerTitle').textContent.trim();
+    if (threadId) {
+      const ok = await copyToClipboard(threadId);
+      if (ok) {
+        toast('已复制线程 ID 到剪贴板', 'ok', 1800);
+        const origHtml = copyThreadIdBtn.innerHTML;
+        copyThreadIdBtn.innerHTML = `${icon('check', 'xs')}`;
+        setTimeout(() => { copyThreadIdBtn.innerHTML = origHtml; }, 1600);
+      }
     }
     return;
   }

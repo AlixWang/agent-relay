@@ -371,12 +371,17 @@
   <div class="drawer-head">
     <div class="drawer-title">
       <span class="muted xs">线程</span>
-      <h2 id="drawerTitle" class="mono"></h2>
+      <div class="drawer-title-row">
+        <h2 id="drawerTitle" class="mono"></h2>
+        <button class="btn-icon xs" id="copyThreadId" data-tip="复制线程 ID" aria-label="复制线程 ID"><svg class="icon xs"><use href="#i-copy"/></svg></button>
+      </div>
       <p id="drawerMeta" class="muted xs"></p>
     </div>
-    <div class="row-btns tight">
-      <button class="btn btn-ghost btn-sm" id="expMd"><svg class="icon"><use href="#i-download"/></svg>Markdown</button>
-      <button class="btn btn-ghost btn-sm" id="expJsonl"><svg class="icon"><use href="#i-download"/></svg>JSONL</button>
+    <div class="row-btns tight drawer-actions">
+      <button class="btn btn-ghost btn-sm" id="copyMd" data-tip="复制 Markdown 到剪贴板"><svg class="icon"><use href="#i-copy"/></svg>复制 Markdown</button>
+      <button class="btn btn-ghost btn-sm" id="copyJsonl" data-tip="复制 JSONL 到剪贴板"><svg class="icon"><use href="#i-copy"/></svg>复制 JSONL</button>
+      <button class="btn btn-ghost btn-sm" id="expMd" data-tip="下载 Markdown 文件"><svg class="icon"><use href="#i-download"/></svg>下载 Markdown</button>
+      <button class="btn btn-ghost btn-sm" id="expJsonl" data-tip="下载 JSONL 文件"><svg class="icon"><use href="#i-download"/></svg>下载 JSONL</button>
       <button class="btn-icon" data-close aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
     </div>
   </div>
