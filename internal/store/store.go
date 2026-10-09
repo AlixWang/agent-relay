@@ -84,6 +84,10 @@ type Message struct {
 	Detail    string
 	Decision  string // allow|deny
 	ExpiresAt int64
+	// Conversation fields (§v12). ConvID links to conversations table;
+	// Mentions is JSON array of @mentioned peer IDs for selective delivery.
+	ConvID   string
+	Mentions string
 }
 
 // PermissionRequest is the server-side row for one permission_request
@@ -110,6 +114,26 @@ type AuditEntry struct {
 	Actor  string `json:"actor"`
 	Action string `json:"action"`
 	Detail string `json:"detail"`
+}
+
+// Conversation represents an explicit group or private chat (§v12).
+type Conversation struct {
+	ID          string
+	Type        string // dm|group
+	Title       string
+	CreatedBy   string
+	CreatedAt   int64
+	ArchivedAt  int64
+	AgentStreak int // consecutive agent replies after user message
+}
+
+// ConversationMember tracks membership in a conversation.
+type ConversationMember struct {
+	ConvID    string
+	MemberID  string
+	Role      string // creator|member
+	JoinedSeq int64  // message seq at join time
+	LeftAt    int64  // 0 = still member
 }
 
 // Store is the repository interface. Postgres can implement this later (P2)
@@ -198,6 +222,20 @@ type Store interface {
 	FuseWatermark(rootID string) (int64, error)
 	SetFuseWatermark(rootID string, seq int64) error
 	ClearFuseWatermark(rootID string) error
+	// conversations (§v12)
+	CreateConversation(conv *Conversation) error
+	GetConversation(id string) (*Conversation, error)
+	ListConversations(limit int) ([]*Conversation, error)
+	ListConversationsForPeer(peerID string, limit int) ([]*Conversation, error)
+	UpdateConversationStreak(convID string, agentStreak int) error
+	ArchiveConversation(convID string, ts int64) error
+	// conversation members
+	AddConversationMember(convID, memberID, role string, joinedSeq int64) error
+	RemoveConversationMember(convID, memberID string, leftAt int64) error
+	ListConversationMembers(convID string) ([]*ConversationMember, error)
+	IsConversationMember(convID, memberID string) (bool, error)
+	GetConversationMember(convID, memberID string) (*ConversationMember, error)
+	CountConversationMembers(convID string) (int, error)
 	// verify (§8.4)
 	SetSmoke(peerID, smokeID string, ts int64) error
 	GetSmoke(peerID string) (smokeID string, ts int64, err error)
@@ -592,9 +630,9 @@ func boolToInt(b bool) int {
 func (s *sqliteStore) InsertMessage(m *Message) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.Exec(`INSERT INTO messages(id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,status,op,target,detail,decision,expires_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, m.ID, m.Sender, m.Recipient, m.Kind, m.InReplyTo, m.RootID, boolToInt(m.RequiresApproval), m.ApprovalState, m.Payload, m.CreatedAt,
-		m.Status, m.Op, m.Target, m.Detail, m.Decision, m.ExpiresAt)
+	res, err := s.db.Exec(`INSERT INTO messages(id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,status,op,target,detail,decision,expires_at,conv_id,mentions)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, m.ID, m.Sender, m.Recipient, m.Kind, m.InReplyTo, m.RootID, boolToInt(m.RequiresApproval), m.ApprovalState, m.Payload, m.CreatedAt,
+		m.Status, m.Op, m.Target, m.Detail, m.Decision, m.ExpiresAt, m.ConvID, m.Mentions)
 	if err != nil {
 		return 0, err
 	}
@@ -605,7 +643,7 @@ func scanMessage(rows *sql.Rows) (*Message, error) {
 	var m Message
 	var req int
 	err := rows.Scan(&m.Seq, &m.ID, &m.Sender, &m.Recipient, &m.Kind, &m.InReplyTo, &m.RootID, &req, &m.ApprovalState, &m.Payload, &m.CreatedAt,
-		&m.Status, &m.Op, &m.Target, &m.Detail, &m.Decision, &m.ExpiresAt)
+		&m.Status, &m.Op, &m.Target, &m.Detail, &m.Decision, &m.ExpiresAt, &m.ConvID, &m.Mentions)
 	if err != nil {
 		return nil, err
 	}
@@ -617,10 +655,10 @@ func (s *sqliteStore) GetBySenderID(sender, id string) (*Message, error) {
 	var m Message
 	var req int
 	err := s.db.QueryRow(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
-		status,op,target,detail,decision,expires_at
+		status,op,target,detail,decision,expires_at,conv_id,mentions
 		FROM messages WHERE sender=? AND id=?`, sender, id).
 		Scan(&m.Seq, &m.ID, &m.Sender, &m.Recipient, &m.Kind, &m.InReplyTo, &m.RootID, &req, &m.ApprovalState, &m.Payload, &m.CreatedAt,
-			&m.Status, &m.Op, &m.Target, &m.Detail, &m.Decision, &m.ExpiresAt)
+			&m.Status, &m.Op, &m.Target, &m.Detail, &m.Decision, &m.ExpiresAt, &m.ConvID, &m.Mentions)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -635,10 +673,10 @@ func (s *sqliteStore) GetBySeq(seq int64) (*Message, error) {
 	var m Message
 	var req int
 	err := s.db.QueryRow(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
-		status,op,target,detail,decision,expires_at
+		status,op,target,detail,decision,expires_at,conv_id,mentions
 		FROM messages WHERE seq=?`, seq).
 		Scan(&m.Seq, &m.ID, &m.Sender, &m.Recipient, &m.Kind, &m.InReplyTo, &m.RootID, &req, &m.ApprovalState, &m.Payload, &m.CreatedAt,
-			&m.Status, &m.Op, &m.Target, &m.Detail, &m.Decision, &m.ExpiresAt)
+			&m.Status, &m.Op, &m.Target, &m.Detail, &m.Decision, &m.ExpiresAt, &m.ConvID, &m.Mentions)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -646,6 +684,8 @@ func (s *sqliteStore) GetBySeq(seq int64) (*Message, error) {
 		return nil, err
 	}
 	m.RequiresApproval = req != 0
+	return &m, nil
+}
 	return &m, nil
 }
 
@@ -668,22 +708,41 @@ func (s *sqliteStore) GetByIDAnySender(id string) ([]*Message, error) {
 	return out, rows.Err()
 }
 
-// VisibleTo implements the per-identity delivery view (DESIGN §4.4):
-// direct (recipient=peer) + broadcast (recipient='*' AND sender!=peer),
-// seq > since, not yet acked by peer, not held in pending approval.
+// VisibleTo implements the per-identity delivery view (DESIGN §4.4 + §v12):
+// Mode 1: direct (recipient=peer AND conv_id='')
+// Mode 2: broadcast (recipient='*' AND sender!=peer AND conv_id='')
+// Mode 3: conversation (recipient LIKE 'conv:%' AND member check + mentions filter)
+// All modes: seq > since, not yet acked by peer, not held in pending approval.
 func (s *sqliteStore) VisibleTo(peerID string, since int64, limit int) ([]*Message, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
 	rows, err := s.db.Query(`SELECT m.seq,m.id,m.sender,m.recipient,m.kind,m.in_reply_to,m.root_id,
 		m.requires_approval,m.approval_state,m.payload,m.created_at,
-		m.status,m.op,m.target,m.detail,m.decision,m.expires_at
+		m.status,m.op,m.target,m.detail,m.decision,m.expires_at,m.conv_id,m.mentions
 		FROM messages m
 		WHERE m.seq > ?
 		  AND m.approval_state NOT IN ('pending','rejected')
-		  AND ((m.recipient = ?) OR (m.recipient = '*' AND m.sender != ?))
 		  AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.message_seq = m.seq AND a.peer_id = ?)
-		ORDER BY m.seq ASC LIMIT ?`, since, peerID, peerID, peerID, limit)
+		  AND (
+		    (m.recipient = ? AND m.conv_id = '')
+		    OR
+		    (m.recipient = '*' AND m.sender != ? AND m.conv_id = '')
+		    OR
+		    (m.recipient LIKE 'conv:%'
+		     AND m.conv_id != ''
+		     AND EXISTS (
+		       SELECT 1 FROM conversation_members cm
+		       WHERE cm.conv_id = m.conv_id
+		         AND cm.member_id = ?
+		         AND cm.joined_seq <= m.seq
+		         AND (cm.left_at = 0 OR cm.left_at IS NULL)
+		     )
+		     AND m.sender != ?
+		     AND (m.mentions = '' OR m.mentions LIKE '%' || ? || '%')
+		    )
+		  )
+		ORDER BY m.seq ASC LIMIT ?`, since, peerID, peerID, peerID, peerID, peerID, peerID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -698,13 +757,19 @@ func (s *sqliteStore) VisibleTo(peerID string, since int64, limit int) ([]*Messa
 	}
 	return out, rows.Err()
 }
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
 
 func (s *sqliteStore) ThreadMessages(rootID string, limit int) ([]*Message, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
 	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
-		status,op,target,detail,decision,expires_at
+		status,op,target,detail,decision,expires_at,conv_id,mentions
 		FROM messages WHERE root_id=? ORDER BY seq ASC LIMIT ?`, rootID, limit)
 	if err != nil {
 		return nil, err
@@ -723,7 +788,22 @@ func (s *sqliteStore) ThreadMessages(rootID string, limit int) ([]*Message, erro
 
 func (s *sqliteStore) LastNInThread(rootID string, n int) ([]*Message, error) {
 	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
-		status,op,target,detail,decision,expires_at
+		status,op,target,detail,decision,expires_at,conv_id,mentions
+		FROM messages WHERE root_id=? ORDER BY seq DESC LIMIT ?`, rootID, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
 		FROM messages WHERE root_id=? ORDER BY seq DESC LIMIT ?`, rootID, n)
 	if err != nil {
 		return nil, err
@@ -802,7 +882,7 @@ func (s *sqliteStore) SearchMessages(query string, limit int) ([]*Message, error
 	}
 	esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
 	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
-		status,op,target,detail,decision,expires_at
+		status,op,target,detail,decision,expires_at,conv_id,mentions
 		FROM messages WHERE payload LIKE ? ESCAPE '\' ORDER BY seq DESC LIMIT ?`, "%"+esc+"%", limit)
 	if err != nil {
 		return nil, err
@@ -1082,6 +1162,148 @@ func (s *sqliteStore) DBSize() (int64, error) {
 func (s *sqliteStore) Vacuum() error {
 	_, err := s.db.Exec(`VACUUM`)
 	return err
+}
+
+// ---- conversations (§v12) ----
+
+func (s *sqliteStore) CreateConversation(conv *Conversation) error {
+	_, err := s.db.Exec(`INSERT INTO conversations(id,type,title,created_by,created_at,archived_at,agent_streak)
+		VALUES(?,?,?,?,?,?,?)`,
+		conv.ID, conv.Type, conv.Title, conv.CreatedBy, conv.CreatedAt, conv.ArchivedAt, conv.AgentStreak)
+	return err
+}
+
+func (s *sqliteStore) GetConversation(id string) (*Conversation, error) {
+	var c Conversation
+	err := s.db.QueryRow(`SELECT id,type,title,created_by,created_at,archived_at,agent_streak
+		FROM conversations WHERE id=?`, id).Scan(
+		&c.ID, &c.Type, &c.Title, &c.CreatedBy, &c.CreatedAt, &c.ArchivedAt, &c.AgentStreak)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (s *sqliteStore) ListConversations(limit int) ([]*Conversation, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`SELECT id,type,title,created_by,created_at,archived_at,agent_streak
+		FROM conversations ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Conversation
+	for rows.Next() {
+		var c Conversation
+		if err := rows.Scan(&c.ID, &c.Type, &c.Title, &c.CreatedBy, &c.CreatedAt, &c.ArchivedAt, &c.AgentStreak); err != nil {
+			return nil, err
+		}
+		out = append(out, &c)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) ListConversationsForPeer(peerID string, limit int) ([]*Conversation, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`SELECT c.id,c.type,c.title,c.created_by,c.created_at,c.archived_at,c.agent_streak
+		FROM conversations c
+		INNER JOIN conversation_members cm ON c.id = cm.conv_id
+		WHERE cm.member_id = ? AND (cm.left_at = 0 OR cm.left_at IS NULL)
+		ORDER BY c.created_at DESC LIMIT ?`, peerID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Conversation
+	for rows.Next() {
+		var c Conversation
+		if err := rows.Scan(&c.ID, &c.Type, &c.Title, &c.CreatedBy, &c.CreatedAt, &c.ArchivedAt, &c.AgentStreak); err != nil {
+			return nil, err
+		}
+		out = append(out, &c)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) UpdateConversationStreak(convID string, agentStreak int) error {
+	_, err := s.db.Exec(`UPDATE conversations SET agent_streak=? WHERE id=?`, agentStreak, convID)
+	return err
+}
+
+func (s *sqliteStore) ArchiveConversation(convID string, ts int64) error {
+	_, err := s.db.Exec(`UPDATE conversations SET archived_at=? WHERE id=?`, ts, convID)
+	return err
+}
+
+// ---- conversation members ----
+
+func (s *sqliteStore) AddConversationMember(convID, memberID, role string, joinedSeq int64) error {
+	_, err := s.db.Exec(`INSERT INTO conversation_members(conv_id,member_id,role,joined_seq,left_at)
+		VALUES(?,?,?,?,0)`, convID, memberID, role, joinedSeq)
+	return err
+}
+
+func (s *sqliteStore) RemoveConversationMember(convID, memberID string, leftAt int64) error {
+	_, err := s.db.Exec(`UPDATE conversation_members SET left_at=? WHERE conv_id=? AND member_id=?`,
+		leftAt, convID, memberID)
+	return err
+}
+
+func (s *sqliteStore) ListConversationMembers(convID string) ([]*ConversationMember, error) {
+	rows, err := s.db.Query(`SELECT conv_id,member_id,role,joined_seq,left_at
+		FROM conversation_members WHERE conv_id=? ORDER BY joined_seq ASC`, convID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ConversationMember
+	for rows.Next() {
+		var cm ConversationMember
+		if err := rows.Scan(&cm.ConvID, &cm.MemberID, &cm.Role, &cm.JoinedSeq, &cm.LeftAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &cm)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) IsConversationMember(convID, memberID string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM conversation_members
+		WHERE conv_id=? AND member_id=? AND (left_at=0 OR left_at IS NULL)`,
+		convID, memberID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *sqliteStore) GetConversationMember(convID, memberID string) (*ConversationMember, error) {
+	var cm ConversationMember
+	err := s.db.QueryRow(`SELECT conv_id,member_id,role,joined_seq,left_at
+		FROM conversation_members WHERE conv_id=? AND member_id=?`,
+		convID, memberID).Scan(&cm.ConvID, &cm.MemberID, &cm.Role, &cm.JoinedSeq, &cm.LeftAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cm, nil
+}
+
+func (s *sqliteStore) CountConversationMembers(convID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM conversation_members
+		WHERE conv_id=? AND (left_at=0 OR left_at IS NULL)`, convID).Scan(&count)
+	return count, err
 }
 
 func (s *sqliteStore) Close() error { return s.db.Close() }

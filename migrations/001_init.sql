@@ -117,8 +117,35 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     decided_at    INTEGER DEFAULT 0,
     decision_id   TEXT DEFAULT ''
 );
+-- Conversations (§v12): explicit group/private conversations with metadata
+CREATE TABLE IF NOT EXISTS conversations (
+    id            TEXT PRIMARY KEY,
+    type          TEXT DEFAULT 'group',
+    title         TEXT DEFAULT '',
+    created_by    TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    archived_at   INTEGER DEFAULT 0,
+    agent_streak  INTEGER DEFAULT 0
+);
+-- Conversation membership tracking
+CREATE TABLE IF NOT EXISTS conversation_members (
+    conv_id       TEXT NOT NULL,
+    member_id     TEXT NOT NULL,
+    role          TEXT DEFAULT 'member',
+    joined_seq    INTEGER NOT NULL,
+    left_at       INTEGER DEFAULT 0,
+    PRIMARY KEY (conv_id, member_id)
+);
+-- Conversation columns on messages (§v12): conv_id links to conversation,
+-- mentions stores JSON array of @mentioned peer IDs for selective delivery.
+-- ALTERs so pre-existing databases migrate on boot.
+ALTER TABLE messages ADD COLUMN conv_id TEXT DEFAULT '';
+ALTER TABLE messages ADD COLUMN mentions TEXT DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_perm_thread ON permission_requests(thread, status);
 CREATE INDEX IF NOT EXISTS idx_messages_recipient_seq ON messages(recipient, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_root ON messages(root_id, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender, id);
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+CREATE INDEX IF NOT EXISTS idx_messages_conv_seq ON messages(conv_id, seq);
+CREATE INDEX IF NOT EXISTS idx_conv_members_lookup ON conversation_members(conv_id, member_id, joined_seq);
+CREATE INDEX IF NOT EXISTS idx_conversations_created_by ON conversations(created_by, created_at);
