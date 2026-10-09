@@ -2,7 +2,7 @@
 # linux/amd64 + linux/arm64 (pushes to GHCR on every v* tag).
 # Local: docker build -t agent-relay . &&
 #   docker run -v agent-relay-data:/var/lib/agent-relay -p 18789:18789 agent-relay
-FROM --platform=$BUILDPLATFORM golang:1.22-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS build
 ARG TARGETOS TARGETARCH
 # Release tag for the update console + asset cache-busting. CI passes
 # VERSION=v*; local builds report dev (update downgrade guard skips dev).
@@ -10,7 +10,14 @@ ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+# Pin the CLI to the runtime version required by go.mod (see tools.go in the
+# repo root): a newer generator can emit code the pinned runtime cannot compile.
+RUN go list -m -f '{{.Version}}' github.com/a-h/templ > /tmp/templ.version \
+  && go install github.com/a-h/templ/cmd/templ@"$(cat /tmp/templ.version)"
 COPY . .
+# Generated *_templ.go files are gitignored, so they must be produced here:
+# without this the internal/web/views package does not compile.
+RUN templ generate
 # Receiver revision (DESIGN §8.9): the client_update predicate. CI passes the
 # hash of cmd/relay-tail/**/*.go; when the build can compute it itself (full
 # source present) do that, so local/docker builds still nudge correctly.
