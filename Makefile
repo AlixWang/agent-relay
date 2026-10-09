@@ -1,6 +1,8 @@
 .PHONY: generate build test clean htmx-ui
 
 # Generate templ files
+# Note: Generated *_templ.go files are in .gitignore and should NOT be committed
+# CI/CD will run `templ generate` automatically
 generate:
 	@echo "Generating templ files..."
 	@which templ > /dev/null || (echo "Error: templ not installed. Run: go install github.com/a-h/templ/cmd/templ@latest" && exit 1)

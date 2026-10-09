@@ -231,10 +231,19 @@ A: 可以，但不推荐。Templ 提供：
 
 ### Q: 生成的文件需要提交到 Git 吗？
 
-A: **是的**。`*_templ.go` 文件应该提交，这样：
-- CI/CD 无需安装 templ
-- 代码审查可见完整逻辑
-- `go build` 可直接工作
+A: **不需要**。`*_templ.go` 文件在 `.gitignore` 中，原因：
+- CI/CD 自动生成（GitHub Actions）
+- 避免合并冲突
+- 保持仓库整洁
+- 开发时本地生成即可
+
+CI workflow 会在构建前自动运行：
+```yaml
+- name: install templ
+  run: go install github.com/a-h/templ/cmd/templ@latest
+- name: generate templ files
+  run: templ generate
+```
 
 ### Q: HTMX 会增加页面大小吗？
 

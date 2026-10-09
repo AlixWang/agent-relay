@@ -29,6 +29,12 @@ jobs:
       - name: debug workspace
         run: pwd; ls -la; ls cmd/agent-relay || true
 
+      - name: install templ
+        run: go install github.com/a-h/templ/cmd/templ@latest
+
+      - name: generate templ files
+        run: templ generate
+
       - name: build (linux amd64 + arm64, CGO off, pure Go)
         id: build
         run: |

@@ -19,6 +19,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: install templ
+        run: go install github.com/a-h/templ/cmd/templ@latest
+
+      - name: generate templ files
+        run: templ generate
+
       - name: gofmt
         run: |
           out=$(gofmt -l . | grep -v '^prototype/' || true)
