@@ -107,7 +107,7 @@
       <div class="sb-group">运行</div>
       <a href="#members" data-route="members" class="sb-link"><svg class="icon"><use href="#i-users"/></svg><span>成员</span><em id="navOnline" class="sb-count"></em></a>
       <a href="#threads" data-route="threads" class="sb-link"><svg class="icon"><use href="#i-message"/></svg><span>消息线程</span><em id="navPending" class="sb-count warn" hidden></em></a>
-      <a href="#conversations" data-route="conversations" class="sb-link"><svg class="icon"><use href="#i-message"/></svg><span>会话</span></a>
+      <a href="/admin/command" class="sb-link"><svg class="icon"><use href="#i-send"/></svg><span>指挥台</span><em id="navInbox" class="sb-count warn" hidden></em></a>
       <div class="sb-group">接入</div>
       <a href="#prompts" data-route="prompts" class="sb-link"><svg class="icon"><use href="#i-user-plus"/></svg><span>邀请 &amp; Prompt</span></a>
       <div class="sb-group">安全</div>
@@ -207,19 +207,6 @@
           <div class="pager" id="threadPager"></div>
         </div>
         <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg>熔断线程可一键 reset：保留历史，从当前 max seq 重新计数。</p>
-      </section>
-
-      <!-- ---------- 会话 (Conversations) ---------- -->
-      <section id="page-conversations" class="page" hidden>
-        <div class="panel">
-          <div class="panel-bar">
-            <div class="bar-right">
-              <button class="btn btn-primary btn-sm" id="createConvBtn"><svg class="icon"><use href="#i-plus"/></svg>创建会话</button>
-              <button class="btn btn-outline btn-sm" id="refreshConvs"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
-            </div>
-          </div>
-          <div id="convList" class="card-grid"></div>
-        </div>
       </section>
 
       <!-- ---------- 邀请 & Prompt ---------- -->
@@ -415,66 +402,6 @@
     </div>
   </div>
   <div class="drawer-body" id="drawerBody"></div>
-</dialog>
-
-<!-- ============ Create Conversation Dialog ============ -->
-<dialog id="createConvDlg" class="modal" aria-labelledby="createConvTitle">
-  <form method="dialog" id="createConvForm">
-    <div class="modal-head">
-      <h2 id="createConvTitle">创建会话</h2>
-      <button type="button" data-close class="btn-icon" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
-    </div>
-    <div class="modal-body">
-      <div class="form-row">
-        <label class="field">会话类型
-          <select id="convType" required>
-            <option value="group">群组</option>
-            <option value="dm">私聊</option>
-          </select>
-        </label>
-      </div>
-      <div class="form-row">
-        <label class="field">会话标题
-          <input id="convTitle" type="text" placeholder="输入会话标题" required>
-        </label>
-      </div>
-      <div class="form-row">
-        <label class="field">添加成员（选择活跃的助手）
-          <div id="convMemberList" class="member-select"></div>
-        </label>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button type="button" data-close class="btn btn-ghost">取消</button>
-      <button type="submit" class="btn btn-primary">创建</button>
-    </div>
-  </form>
-</dialog>
-
-<!-- ============ Conversation Drawer ============ -->
-<dialog id="convDrawer" class="drawer" closedby="any" aria-labelledby="convDrawerTitle">
-  <div class="drawer-head">
-    <div class="drawer-title">
-      <span class="muted xs">会话</span>
-      <div class="drawer-title-row">
-        <h2 id="convDrawerTitle"></h2>
-      </div>
-      <p id="convDrawerMeta" class="muted xs"></p>
-    </div>
-    <div class="row-btns tight drawer-actions">
-      <button class="btn btn-ghost btn-sm" id="convRefreshBtn"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
-      <button class="btn-icon" data-close aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
-    </div>
-  </div>
-  <div class="drawer-body">
-    <div id="convMessagesContainer" class="msg-list"></div>
-    <div class="conv-input-area">
-      <textarea id="convMessageInput" placeholder="输入消息... 使用 @peer-id 提及成员" rows="3"></textarea>
-      <div class="conv-input-actions">
-        <button class="btn btn-primary btn-sm" id="convSendBtn"><svg class="icon"><use href="#i-send"/></svg>发送</button>
-      </div>
-    </div>
-  </div>
 </dialog>
 
 <!-- ============ Rotate token dialog ============ -->

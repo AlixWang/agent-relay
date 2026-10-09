@@ -151,6 +151,63 @@ func TestConsolePagesRenderWithResolvableAssets(t *testing.T) {
 	}
 }
 
+// Every admin route the console's assets call must exist. v0.15.0 removed the
+// v0.14.0 conversation endpoints but left the single-page console's dead
+// 会话 page in place, so "create group chat" in the SPA POSTed to
+// /admin/conversations and got a 404 — while CI was green, because nothing
+// compared UI calls against the router. This walks the shipped JS/HTML and
+// requires every /admin/... literal to answer something other than 404
+// (401/400/405 are fine: they mean the route exists).
+func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
+	f := newFixture(t)
+	f.mux = f.srv.Handler(web.Handler())
+	cookie := f.adminLogin(t)
+
+	substRe := regexp.MustCompile(`\$\{[^}]*\}`)
+	candRe := regexp.MustCompile(`/admin/[A-Za-z0-9/_.\-]*`)
+	for _, asset := range []string{"/app.js", "/"} {
+		code, body := getRaw(t, f, asset, cookie)
+		if code != 200 {
+			t.Fatalf("asset %s: %d", asset, code)
+		}
+		normalized := substRe.ReplaceAllString(body, "x")
+		seen := map[string]bool{}
+		for _, cand := range candRe.FindAllString(normalized, -1) {
+			cand = strings.TrimRight(cand, "/.-")
+			if i := strings.IndexAny(cand, "?#"); i >= 0 {
+				cand = cand[:i]
+			}
+			if cand == "/admin" || seen[cand] {
+				continue
+			}
+			seen[cand] = true
+			// The literal may be a prefix of a templ path: only fail when no
+			// method answers at all.
+			ok := false
+			for _, method := range []string{"GET", "POST", "PATCH", "DELETE"} {
+				status := probeRoute(t, f, method, cand, cookie)
+				if status != 404 {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				t.Fatalf("%s calls %s, which no route serves (404)", asset, cand)
+			}
+		}
+	}
+}
+
+func probeRoute(t *testing.T, f *fixture, method, path, cookie string) int {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: cookie})
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	return rec.Code
+}
+
 func truncate(s string) string {
 	if len(s) > 200 {
 		return s[:200] + "…"

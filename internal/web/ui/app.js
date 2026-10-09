@@ -236,7 +236,6 @@ let peerRefreshTimer = null;
 const routeMeta = {
   members: { title: '成员', desc: '注册助手状态、在线心跳与路由能力' },
   threads: { title: '消息 & 线程', desc: '会话流转、熔断保护与安全审批' },
-  conversations: { title: '会话', desc: '群组聊天与私聊管理' },
   prompts: { title: '邀请 & Prompt', desc: '助手入驻凭据签发与版本指令生成' },
   audit:   { title: '审计日志', desc: '管理事件、状态流转与安全审计追踪' },
   tokens:  { title: 'Token 管理', desc: '凭证轮换、前缀核验与实时吊销' },
@@ -266,7 +265,6 @@ function setRoute(r) {
   // Trigger page-specific refresh
   if (r === 'members') refreshPeers();
   else if (r === 'threads') refreshThreads();
-  else if (r === 'conversations') refreshConversations();
   else if (r === 'audit') refreshAudit();
   else if (r === 'tokens') refreshTokens();
   else if (r === 'system') refreshSystem();
@@ -369,6 +367,14 @@ async function refreshStats() {
 
     $('stThreads').textContent = s.threads_total || 0;
     $('stTokens').textContent = s.tokens_active || 0;
+
+    // 指挥台 lives in the templ console; this nav entry just carries its badge.
+    const navInbox = $('navInbox');
+    if (navInbox) {
+      const inbox = s.inbox_unread || 0;
+      navInbox.textContent = inbox > 0 ? inbox : '';
+      navInbox.hidden = inbox === 0;
+    }
 
     if (s.prompt_version) serverPromptVersion = s.prompt_version;
     if (s.client_version) serverClientVersion = s.client_version;
@@ -1613,244 +1619,11 @@ $('updApply').onclick = async () => {
 };
 
 /* =========================================================================
-   Conversations Page
-   ========================================================================= */
-let conversationsCache = [];
-let activePeers = [];
-
-async function refreshConversations() {
-  try {
-    const data = await api('/admin/conversations?limit=50');
-    conversationsCache = data.conversations || [];
-    renderConversations();
-  } catch (e) {
-    toast('加载会话失败: ' + e.message, 'bad');
-  }
-}
-
-function renderConversations() {
-  const list = $('convList');
-  if (!list) return;
-
-  if (conversationsCache.length === 0) {
-    list.innerHTML = '<div class="empty"><svg class="icon lg"><use href="#i-message"/></svg><p>暂无会话</p></div>';
-    return;
-  }
-
-  list.innerHTML = conversationsCache.map(conv => {
-    const createdDate = fmtTs(conv.created_at);
-    const typeLabel = conv.type === 'dm' ? '私聊' : '群组';
-    return `
-      <div class="card clickable" data-conv-id="${esc(conv.id)}">
-        <div class="card-head">
-          <div class="card-ic info"><svg class="icon"><use href="#i-message"/></svg></div>
-          <div>
-            <h3>${esc(conv.title || conv.id)}</h3>
-            <p class="muted xs">${typeLabel} · ${conv.member_count} 成员 · 创建于 ${createdDate}</p>
-          </div>
-        </div>
-        <div class="card-body">
-          <div class="stat-row">
-            <span><strong>${conv.latest_seq || 0}</strong> 条消息</span>
-            <span>连续助手回复: <strong>${conv.agent_streak || 0}</strong></span>
-          </div>
-        </div>
-      </div>
-    `;
-  }).join('');
-
-  // Add click handlers
-  list.querySelectorAll('.card').forEach(card => {
-    card.onclick = () => {
-      const convId = card.dataset.convId;
-      openConversationDrawer(convId);
-    };
-  });
-}
-
-async function openConversationDrawer(convId) {
-  const drawer = $('convDrawer');
-  if (!drawer) return;
-
-  try {
-    // Load conversation details and messages
-    const [convData, messagesData] = await Promise.all([
-      api(`/admin/conversations?limit=100`).then(d => d.conversations.find(c => c.id === convId)),
-      api(`/admin/conversations/${convId}/messages?limit=50`)
-    ]);
-
-    if (!convData) {
-      toast('会话不存在', 'bad');
-      return;
-    }
-
-    // Set title
-    $('convDrawerTitle').textContent = convData.title || convId;
-    $('convDrawerMeta').textContent = `${convData.type === 'dm' ? '私聊' : '群组'} · ${convData.member_count} 成员`;
-
-    // Render messages
-    renderConversationMessages(messagesData.messages || []);
-
-    // Store current conv ID for sending
-    drawer.dataset.convId = convId;
-
-    drawer.showModal();
-  } catch (e) {
-    toast('加载会话失败: ' + e.message, 'bad');
-  }
-}
-
-function renderConversationMessages(messages) {
-  const container = $('convMessagesContainer');
-  if (!container) return;
-
-  if (messages.length === 0) {
-    container.innerHTML = '<div class="empty"><p class="muted">暂无消息</p></div>';
-    return;
-  }
-
-  container.innerHTML = messages.map(msg => {
-    const ts = fmtTs(msg.created_at);
-    const senderColor = hashHue(msg.sender);
-    return `
-      <div class="msg-item">
-        <div class="msg-head">
-          ${avatar(msg.sender, 'sm')}
-          <strong style="color: hsl(${senderColor}, 60%, 50%)">${esc(msg.sender)}</strong>
-          <span class="muted xs">${ts}</span>
-        </div>
-        <div class="msg-body">${esc(msg.payload)}</div>
-      </div>
-    `;
-  }).join('');
-
-  // Scroll to bottom
-  container.scrollTop = container.scrollHeight;
-}
-
-async function handleSendConversationMessage() {
-  const drawer = $('convDrawer');
-  const input = $('convMessageInput');
-  const convId = drawer.dataset.convId;
-
-  if (!convId || !input) return;
-
-  const payload = input.value.trim();
-  if (!payload) {
-    toast('请输入消息内容', 'warn');
-    return;
-  }
-
-  try {
-    await api(`/admin/conversations/${convId}/messages`, {
-      method: 'POST',
-      body: JSON.stringify({ payload })
-    });
-
-    toast('消息已发送', 'ok');
-    input.value = '';
-
-    // Refresh messages
-    const messagesData = await api(`/admin/conversations/${convId}/messages?limit=50`);
-    renderConversationMessages(messagesData.messages || []);
-  } catch (e) {
-    toast('发送失败: ' + e.message, 'bad');
-  }
-}
-
-async function openCreateConversationDialog() {
-  const dlg = $('createConvDlg');
-  if (!dlg) return;
-
-  // Load active peers for member selection
-  try {
-    const data = await api('/admin/peers');
-    activePeers = (data.peers || []).filter(p => p.status === 'active');
-
-    // Render member checkboxes
-    const memberList = $('convMemberList');
-    if (memberList) {
-      memberList.innerHTML = activePeers.map(p => `
-        <label class="checkbox-label">
-          <input type="checkbox" name="member" value="${esc(p.id)}">
-          ${avatar(p.id, 'xs')} <span>${esc(p.id)}</span>
-        </label>
-      `).join('');
-    }
-
-    dlg.showModal();
-  } catch (e) {
-    toast('加载成员列表失败: ' + e.message, 'bad');
-  }
-}
-
-async function handleCreateConversation(e) {
-  e.preventDefault();
-
-  const type = $('convType').value;
-  const title = $('convTitle').value.trim();
-  const selectedMembers = Array.from(document.querySelectorAll('input[name="member"]:checked')).map(cb => cb.value);
-
-  if (!title) {
-    toast('请输入会话标题', 'warn');
-    return;
-  }
-
-  if (selectedMembers.length === 0) {
-    toast('请至少选择一个成员', 'warn');
-    return;
-  }
-
-  try {
-    await api('/admin/conversations', {
-      method: 'POST',
-      body: JSON.stringify({
-        type,
-        title,
-        member_ids: selectedMembers
-      })
-    });
-
-    toast('会话创建成功', 'ok');
-    $('createConvDlg').close();
-    refreshConversations();
-  } catch (e) {
-    toast('创建失败: ' + e.message, 'bad');
-  }
-}
-
-/* =========================================================================
    Initialization
    ========================================================================= */
 (async () => {
   initTheme();
   initNavigation();
-
-  // Conversation event handlers
-  const createConvBtn = $('createConvBtn');
-  if (createConvBtn) createConvBtn.onclick = openCreateConversationDialog;
-
-  const refreshConvsBtn = $('refreshConvs');
-  if (refreshConvsBtn) refreshConvsBtn.onclick = refreshConversations;
-
-  const createConvForm = $('createConvForm');
-  if (createConvForm) createConvForm.onsubmit = handleCreateConversation;
-
-  const convSendBtn = $('convSendBtn');
-  if (convSendBtn) convSendBtn.onclick = handleSendConversationMessage;
-
-  const convRefreshBtn = $('convRefreshBtn');
-  if (convRefreshBtn) {
-    convRefreshBtn.onclick = async () => {
-      const drawer = $('convDrawer');
-      const convId = drawer?.dataset.convId;
-      if (convId) {
-        const messagesData = await api(`/admin/conversations/${convId}/messages?limit=50`);
-        renderConversationMessages(messagesData.messages || []);
-        toast('已刷新', 'ok');
-      }
-    };
-  }
 
   // Initial check
   const loggedIn = await refreshStats();
