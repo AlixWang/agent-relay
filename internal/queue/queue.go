@@ -2,6 +2,7 @@
 package queue
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -28,6 +29,10 @@ type SendRequest struct {
 	Detail        string `json:"detail"`          // kind=permission_request
 	Decision      string `json:"decision"`        // kind=permission_decision: allow|deny
 	ExpiresInSecs int64  `json:"expires_in_secs"` // kind=permission_request
+	// Conversation fields (§v12):
+	ConvID   string   `json:"conv_id"`   // conversation ID for group chat
+	SeenSeq  int64    `json:"seen_seq"`  // freshness check for unsolicited replies
+	Mentions []string `json:"mentions"`  // @-mentioned peer IDs
 }
 
 // Service ties guard + store together.
@@ -89,6 +94,9 @@ func (s *Service) Send(req *SendRequest, now int64) (int64, bool, string, error)
 		Detail:           req.Detail,
 		Decision:         req.Decision,
 		ExpiresInSecs:    req.ExpiresInSecs,
+		ConvID:           req.ConvID,
+		SeenSeq:          req.SeenSeq,
+		Mentions:         req.Mentions,
 	}
 	verdict, err := s.guard.Check(env, now)
 	if err != nil {
@@ -113,6 +121,14 @@ func (s *Service) Send(req *SendRequest, now int64) (int64, bool, string, error)
 	if verdict.Held {
 		approvalState = "pending"
 	}
+
+	// Convert mentions to JSON
+	mentionsJSON := ""
+	if len(req.Mentions) > 0 {
+		b, _ := json.Marshal(req.Mentions)
+		mentionsJSON = string(b)
+	}
+
 	seq, err := s.st.InsertMessage(&store.Message{
 		ID:               req.ID,
 		Sender:           req.From,
@@ -130,6 +146,8 @@ func (s *Service) Send(req *SendRequest, now int64) (int64, bool, string, error)
 		Detail:           req.Detail,
 		Decision:         req.Decision,
 		ExpiresAt:        expiresAt,
+		ConvID:           req.ConvID,
+		Mentions:         mentionsJSON,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
@@ -150,6 +168,15 @@ func (s *Service) Send(req *SendRequest, now int64) (int64, bool, string, error)
 			return 0, false, "", fmt.Errorf("permission row: %w", err)
 		}
 	}
+
+	// Update conversation streak if this is a conversation message (§v12)
+	if req.ConvID != "" {
+		if err := s.guard.UpdateConversationStreak(req.ConvID, req.From); err != nil {
+			// Non-fatal: log but continue
+			// The message is already inserted, don't roll back for streak update failure
+		}
+	}
+
 	s.guard.RecordHit(req.From, now)
 	auditAction := "message.sent"
 	switch kind {

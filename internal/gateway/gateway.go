@@ -461,11 +461,26 @@ func (s *Server) sendRejection(w http.ResponseWriter, err error) {
 			writeJSON(w, 403, map[string]any{"ok": false, "error": rej.Error()})
 			return
 		}
+		// Conversation membership violation: 403 Forbidden
+		if rej.Code == "not_member" {
+			writeJSON(w, 403, map[string]any{"ok": false, "error": rej.Error()})
+			return
+		}
+		// Stale conversation state: 409 Conflict with latest_seq hint
+		if rej.Code == "stale" {
+			writeJSON(w, 409, map[string]any{
+				"ok":         false,
+				"error":      rej.Error(),
+				"latest_seq": rej.LatestSeq,
+			})
+			return
+		}
 		code := 400
 		switch rej.Code {
 		case "duplicate_id", "loop_fuse_tripped", "loop_guard",
 			"permission_already_decided", "permission_expired",
-			"bad_permission_ref", "permission_rate_limited", "progress_throttled":
+			"bad_permission_ref", "permission_rate_limited", "progress_throttled",
+			"agent_turn_budget":
 			code = 409
 		}
 		writeJSON(w, code, map[string]any{"ok": false, "error": rej.Error()})
