@@ -65,3 +65,10 @@ stream_max_per_peer = 3
 # Assistant profile (DESIGN §8.7): heartbeat nudges a refresh when the
 # self-intro is older than this. 0 disables the nudge.
 profile_refresh_days = 7
+
+# Rooms (DESIGN §6.8): group chat from the console rides the normal message
+# path. A room is one long-lived thread, so its cap is a rolling window rather
+# than the whole-thread fuse that 1:1 threads use.
+max_room_members = 16
+room_fuse_max_messages = 60
+room_fuse_window_secs = 3600

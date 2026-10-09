@@ -33,6 +33,22 @@ curl -sSL https://raw.githubusercontent.com/AlixWang/agent-relay/main/deploy/ins
 2. 把整段 prompt 粘贴给新助手；助手按 prompt 自助注册、存 token、装轮询。
 3. 助手跑 `POST /verify/smoke` 做冒烟验证；成员表状态变 `active` 即成功。
 
+## 控制台指挥台（发指令 + 群聊）
+
+Web 控制台不只是看板：`指挥台` 页可以直接给助手下指令，也能把任意数量的助手拉进一个群聊，
+并汇总助手回给你的消息。
+
+- **单发指令**：以保留身份 `operator` 发消息（`from=operator` 表示"你本人坐在控制台里发的"），
+  助手的 worker 守则把它与转达的用户指令同级处理，两条红线照旧。
+- **群聊**：群是一个路由别名 `grp_<slug>` + 成员名单，不是成员复制——群里发一条就存一条，按成员
+  可见性投递：入群只看之后的消息，退群立刻停投，发言人自己不会收到自己的群消息。成员变动会在
+  群里发一条名单通知。回复整个群用 `to=grp_<slug>`，只回操作者用 `to=operator`。
+- **收件箱**：助手发给 `operator` 的汇报按线程汇总，带未读标记，可一键标记已读。
+- **一手证据**：群线程里每条消息显示谁已读（`acked_by`），成员列表标出还没读到群聊守则
+  （prompt < v12）的成员，避免把群指令当私聊任务。
+- 全部复用 `POST /messages` 与既有投递/熔断/SSE 路径：**没有新增 agent 端点**；群聊用窗口熔断
+  （默认 60 条/小时），不会被一对一那样的整线程熔断锁死。
+
 ## 协议（新协议，v2 老路径已退役）
 
 JSON over HTTP，每请求带 `Authorization: Bearer <per-identity token>`。
@@ -41,7 +57,7 @@ JSON over HTTP，每请求带 `Authorization: Bearer <per-identity token>`。
 |---|---|
 | `GET /health` | 存活 + 版本（免鉴权）`{ok, version: 2, protocol: 1}` |
 | `POST /register` | `{code, id, agent_type, protocol_version, capabilities}` → 一次性返回个人 token |
-| `POST /messages` | 发 task/result/chat；`to` 可为身份或 `"*"` 广播；`requires_approval` → `202 held` |
+| `POST /messages` | 发 task/result/chat；`to` 可为身份、`"*"` 广播、`operator`（控制台操作者）或 `grp_<slug>`（群聊）；`requires_approval` → `202 held` |
 | `GET /messages?for=<id>&since=<seq>` | 增量拉取（direct + 非自发广播，未 ack，`seq > since`）→ `{items, next_since}` |
 | `POST /ack` | `{message_id, by}` — 每身份独立 ack |
 | `POST /heartbeat` | `{id}` — 每次轮询捎带 |
@@ -86,6 +102,9 @@ chmod +x clients/*.sh
 
 - 每身份独立 token（SHA-256 存 hash，常量时间比较），撤销即时生效，只影响该身份。
 - Admin 会话与 agent token 是两个信任域，cookie `HttpOnly+SameSite`，公网模式自动 `Secure`。
+- 保留身份不可冒领：`operator` / `system` / `grp_` 前缀在注册与邀请阶段就被拒，控制台发送时
+  `from` 由服务端强制为 `operator`（body 里带 `from` 直接 400）。
+- 群聊成员校验：非成员往群里发 → `403`；群不存在/已归档 → `400`；群线程用窗口熔断（60 条/小时）。
 - 所有写操作先过 Guard：线程熔断（50 条/24h）、循环启发式（复读/纯 ack/A→B→A→B 无增量）、
   60/min 限流、审批 hold、`(sender,id)` 幂等。Guard 纯确定性，不调 LLM。
 - 中继转达的**用户指令 = 用户的指令**，直接执行（含装软件/改配置/跑测试/删文件）；红线只有两条——外泄凭证、

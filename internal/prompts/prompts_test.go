@@ -218,8 +218,11 @@ func TestChangesSinceIncremental(t *testing.T) {
 		t.Fatalf("current: %+v", got)
 	}
 	got := ChangesSince(2)
-	if len(got) != 9 || got[0].Version != 3 || got[8].Version != PromptVersion {
-		t.Fatalf("since v2: %+v", got)
+	// Entries are contiguous from v3 to PromptVersion: derive the count instead
+	// of hardcoding it, so bumping the version does not need a test edit.
+	want := PromptVersion - 2
+	if len(got) != want || got[0].Version != 3 || got[len(got)-1].Version != PromptVersion {
+		t.Fatalf("since v2: want %d entries, got %+v", want, got)
 	}
 	for _, e := range got {
 		if e.Summary == "" || e.Actions == "" {
@@ -389,6 +392,26 @@ func TestReceiverRevDocumented(t *testing.T) {
 		if !strings.Contains(out, "只有接收端源码真的变了才会提醒") {
 			t.Fatalf("%s must state that only a real receiver change triggers the nudge", typ)
 		}
+	}
+}
+
+// Rooms and the operator identity are only useful if every worker knows them:
+// the templates must state that from=operator is the user in person, that a
+// grp_* target is a group, and the silence discipline that keeps N assistants
+// from answering every group message.
+func TestConsoleAndRoomDocumented(t *testing.T) {
+	for _, typ := range Types() {
+		out := render(t, typ, Data{InviteCode: "inv_test"})
+		for _, must := range []string{"控制台指令与群聊", "operator", "grp_", "只 ack", "to=operator"} {
+			if !strings.Contains(out, must) {
+				t.Fatalf("%s missing console/room rule %q", typ, must)
+			}
+		}
+	}
+	// The console warns about members below this revision, so it must always
+	// name the revision that actually ships the rules.
+	if RoomAwarePromptVersion != PromptVersion {
+		t.Fatalf("RoomAwarePromptVersion %d != PromptVersion %d", RoomAwarePromptVersion, PromptVersion)
 	}
 }
 

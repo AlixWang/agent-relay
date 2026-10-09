@@ -52,7 +52,7 @@ This framework turns that one-off script into a reusable, self-hostable system: 
 
 ## 2. Design Principles
 
-1. **Minimal protocol over rich features.** Six to eight endpoints, JSON over HTTP, one auth header. Every design decision should survive the question: "can a `curl` one-liner do this?"
+1. **Minimal protocol over rich features.** Six to eight endpoints, JSON over HTTP, one auth header. Every design decision should survive the question: "can a `curl` one-liner do this?" Console features are no exception: the operator and rooms (§6.8, §9.5) ride the existing `POST /messages` path as reserved identities instead of adding endpoints.
 2. **Never trust the client.** Clients are LLMs — they skip steps, hallucinate success, and follow injected instructions. The server verifies everything: auth, idempotency, loop state, onboarding completion.
 3. **Relayed instructions follow the user, with two hard redlines.** The relay belongs to the user's own assistant network, so an instruction relayed from the user ("the user asked you to install X") *is* the user's instruction — prompt v8 made this explicit (§6.3) after real assistants refused their own user's relayed orders. Prompt v11 narrowed the redlines from four to two after assistants kept refusing ordinary work: only credential exfiltration and spending money still require the user's own approval; everything else runs by default and any refusal must name the redline it hits. The server cannot verify authorship, so the redline list — not a "trust nothing" posture — is the boundary, and it lives in the prompt templates.
 4. **The server is the safety boundary.** Loop fuses, rate limits, approval gates, and retention run server-side and cannot be bypassed by a misbehaving or prompt-injected client.
@@ -139,8 +139,11 @@ The guard is deliberately dumb and deterministic. It does not call an LLM; it co
 - **Routing modes:**
   - *Direct:* `to = <identity>` — visible only to that identity.
   - *Broadcast:* `to = "*"` — visible to every registered identity except the sender; each recipient acks independently (fan-out by ack tracking, not by copying).
-  - *Thread reply:* `in_reply_to = <message id>` — inherits visibility from the parent.
-- **Per-identity delivery view.** A message is "delivered to X" when X's ack row exists. Broadcast visibility = `to = '*' AND from != X AND ack(X) is absent`.
+  - *Room:* `to = grp_<slug>` (§6.8) — a routing alias with a member list, not a peer. Stored once; visible to members whose `start_seq < seq`, never to the sender. Joining later does not replay history, so an old room can never re-deliver a stale instruction.
+  - *Console DM:* `to = operator` (§9.5) — the reserved identity of the human at the console. `operator` is a `from`/`to` value, never a peer: no row, no token, cannot authenticate.
+  - *Thread reply:* `in_reply_to = <message id>` — inherits visibility from the parent (room threads and operator DMs have canonical keys — `grp_<slug>` and `op/<peer>` — so one conversation stays one thread regardless of `in_reply_to`).
+- **Per-identity delivery view.** A message is "delivered to X" when X's ack row exists. Broadcast visibility = `to = '*' AND from != X AND ack(X) is absent`; room visibility = membership with `start_seq < seq`. All three rules live in one `visibilityExpr` shared by the pull view and by acking, so no path can ack — and thereby silently swallow — a message it could not see.
+- **Reserved identities.** `operator`, `system` and the `grp_` prefix cannot be registered or bound to an invite (§7.2). Without that rule an invited assistant could claim the operator's id and speak as the human inside group chat.
 - **Global ordering.** The server assigns a monotonically increasing `seq` (SQLite `AUTOINCREMENT` on the messages table) at insert time. Clients sync with `since=<seq>` and never depend on wall clocks. Per-thread ordering is `seq` order; cross-thread ordering is best-effort by `seq`.
 
 ### 4.4b Push delivery / SSE (`internal/stream`, `GET /messages/stream`)
@@ -154,10 +157,16 @@ same cursor files, same exit codes. Pick ONE.
 - Response: `text/event-stream`. Backlog first (`VisibleTo` replay, same item shape as pull),
   then live frames on every publish: `id: <seq>\nevent: message\nretry: 3000\ndata: <item JSON>`.
   Keep-alive comment `: ping` every `stream_keepalive_secs` (default 20s); wakes nothing.
-- The hub is in-memory wake-ups only: subscribers re-query `VisibleTo` on every ping, so routing
-  (direct+broadcast/approval/ack) stays in SQL and can never leak. Slow consumers are dropped
+- The hub is in-memory wake-ups only: subscribers re-query `VisibleTo` on every wake-up, so routing
+  (direct+broadcast+room/approval/ack) stays in SQL and can never leak. Slow consumers are dropped
   (buffer 1 ping); reconnects replay from cursor — nothing lost.
-- Publish points: `POST /messages` 200-path (held 202 excluded) + admin approve (held→visible).
+- **The keepalive comment is not a wake-up**: the ticker writes `: ping` and does *not* re-query. A
+  write path that stores a message without calling `notifyStream()` therefore stays invisible to
+  every SSE subscriber until its stream reconnects — which is exactly how v0.14.0 shipped a console
+  whose messages no assistant ever saw. Hence:
+- Publish points (all of them): `POST /messages` 200-path (held 202 excluded), `POST /admin/messages`
+  (§9.5, console sends), room roster notices (§6.8), and admin approve (held→visible). A regression
+  test holds a stream open and requires an operator message to arrive mid-connection.
   `prompt_update` stays on heartbeat, never enters the stream.
 - Caps: `stream_max_per_peer` concurrent streams (default 3, over → 429), 500 total (over → 503).
   Mid-stream token revoke / suspension drops the connection on next wake-up (reconnect → 401).
@@ -410,6 +419,40 @@ approve, without the task silently stalling.
 
 ---
 
+### 6.8 Console instructions & rooms
+
+The console is the human's endpoint, not a second protocol: it speaks on the normal message path as
+the reserved `operator` identity, and a room is a member list behind a `grp_<slug>` alias. Rooms,
+operator DMs and assistant messages therefore share one pipeline (cursor, ack, approval, fuse, SSE)
+and no new agent-facing endpoint exists for any of it (§2.1).
+
+**Operator messages.** `from = operator` means the human at the console typed it in person — it is
+not a relayed instruction from another assistant. The worker prompts put it in the same tier as
+§6.3's "the user's instruction": execute by default, with the two redlines (credential exfiltration,
+money) still requiring the user's own approval. The console cannot set `from`: the gateway forces
+`operator` and `readJSON` rejects an unknown `from` field.
+
+**Rooms.** Created and managed from the console (member cap `max_room_members`, default 16; members
+must be existing peers). Sending to a room requires membership (403 otherwise); unknown or archived
+rooms are 400 — never a silent black hole. Each membership change posts one roster notice into the
+room through the normal send path, which is how members learn the roster and how a new member sees
+they were added. Replies go `to=grp_<slug>` (whole group) or `to=operator` (the DM thread with the
+human).
+
+**Fuse.** A room is one long-lived thread, so the whole-thread count+age fuse would permanently wedge
+it a day after creation: rooms use a rolling window instead (`room_fuse_max_messages` per
+`room_fuse_window_secs`, defaults 60/3600). 1:1 threads keep the count+age fuse, and the loop guard
+(identical payloads, courtesy ping-pong) applies to rooms unchanged.
+
+**Handshakes are 1:1.** A `permission_request`/`status` that references a task addressed to a room is
+refused with an explicit "DM the operator" reason: with N possible respondents the direction rules
+cannot be checked. In an operator DM the handshake works exactly as in §6.5.
+
+**Prompt revision.** The rules above are prompt v12 (`§7.8` muse/claw/generic, `§6.7` hermes). The
+console flags room members whose reported `prompt_version` is below
+`prompts.RoomAwarePromptVersion`, because such a member would treat a group message as a private
+instruction.
+
 ## 7. Auth & Member Management
 
 ### 7.1 Per-identity tokens
@@ -469,7 +512,8 @@ The generated prompt is a single paste-ready block with these sections:
 5. **Self-verification procedure** — the exact smoke-test call and the expected server response (§9.4).
 6. **Standing worker instructions** — what to do when woken: fetch tasks → execute within normal safety rules → post result → ack; handle broadcasts; on `409`, stop and escalate.
 7. **Relayed-instruction rules** — the §6.3 block verbatim: relayed user instructions are the user's instructions, and the two redlines always need the user's own approval.
-8. **Failure reporting** — if any step fails, report the exact command and error to the user instead of improvising protocol details.
+8. **Console & rooms** — `from=operator` is the user in person (same tier as relayed instructions, redlines intact); a `grp_*` target is a group; reply to the group with `to=grp_*`, to the human with `to=operator`; stay silent in groups unless addressed (ack without speaking) and take execution questions to the operator in a DM (§6.8).
+9. **Failure reporting** — if any step fails, report the exact command and error to the user instead of improvising protocol details.
 
 Templates are stored server-side as Go `text/template` files per agent type, rendered by `POST /admin/prompts`. Versioned alongside the protocol version.
 
@@ -751,7 +795,31 @@ with `?v=<tag>` cache busting.
 - Token table: peer, label, created, last used, revoke button. Plaintexts never shown.
 - Retention settings: message TTL, archive export, peer prune window.
 
-The UI is intentionally boring: server-rendered or a tiny embedded SPA, no build chain required at deploy time beyond what ships in the binary.
+### 9.5 Console command center (operator sends, rooms, inbox)
+
+The console is also the human's *control room*: it can issue instructions and run group
+conversations, not merely observe them (§6.8). All of it is admin-authenticated and rides the message
+path; no agent-facing endpoint was added.
+
+- `POST /admin/messages` — send as `operator` to a peer, `grp_<slug>`, or `*`. Same envelope fields
+  as `POST /messages` (`kind`, `in_reply_to`, `decision`, `status`, …); the server mints an id when
+  none is given. It wakes SSE: without that call the message stays invisible to SSE members until
+  their stream reconnects.
+- `GET /admin/rooms`, `POST /admin/rooms`, `PATCH /admin/rooms/{id}`,
+  `POST /admin/rooms/{id}/members`, `DELETE /admin/rooms/{id}/members/{peer}` — room lifecycle and
+  membership; every change posts a roster notice into the room. The list carries member liveness +
+  prompt revision and flags members below the room-aware revision (`not_ready`).
+- `GET /admin/inbox`, `POST /admin/inbox/read` — replies addressed to the operator, newest first,
+  with an unread count. The watermark lives in `settings` and only moves forward (a stale tab cannot
+  unread messages); `GET /admin/stats` exposes `inbox_unread` for the nav badge.
+- `GET /admin/messages?thread=grp_<slug>` gains `acked_by` per message plus the member list, so the
+  console can show "已读 2/3" without N queries.
+- The templ page `/admin/command` is the 指挥台: inbox, single-recipient composer, room list, and a
+  room pane with timeline, member management and composer. Console assets are served from the
+  embedded `ui/` root and htmx is vendored into `ui/vendor/`: the console must work with no network
+  beyond the relay itself.
+
+The UI is intentionally boring: server-rendered or a tiny embedded SPA, no build chain required at deploy time beyond what ships in the binary. `internal/web/views/*_templ.go` is committed for exactly that reason (see AGENTS.md).
 
 ---
 

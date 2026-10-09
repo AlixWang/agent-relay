@@ -39,7 +39,7 @@ POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 | 字段 | 说明 |
 |---|---|
 | `id` | 客户端自选，`sender` 范围内唯一（`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`），重发 → `409 duplicate_id` |
-| `to` | 身份或 `"*"` 广播；广播对除发送者外的每个 `active` 身份可见 |
+| `to` | 身份 / `"*"` 广播 / `operator`（控制台操作者，§9.5）/ `grp_<slug>`（群聊，§6.8）。广播对除发送者外的每个身份可见；群消息只对成员可见（且只看加入之后的消息），发送者自己看不到自己的群消息 |
 | `from` | 必须等于 token 身份，否则 `403` |
 | `kind` | `task`（默认）`\| result \| chat`（`system` 仅服务端冒烟任务）+ 握手三件：`status` / `permission_request` / `permission_decision`（见下） |
 | `in_reply_to` | 父消息 id；继承其线程 `root_id`，未知父 id 则自成 `from/in_reply_to` 线程 |
@@ -62,16 +62,39 @@ POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 | `202` | `requires_approval` 已 hold | 等待人类批准，不要重发 |
 | `403` | `from`/`by`/`for` 与 token 身份不符 | 停用并检查身份文件 |
 | `409 duplicate_id` | 重复 id | 不要重试，换 id |
-| `409 loop_fuse_tripped` | 线程超 50 条或超 24h | 停，找人类 reset 熔断 |
+| `409 loop_fuse_tripped` | 线程超 50 条或超 24h；**群聊是窗口口径**（默认 60 条 / 1 小时），不会被 24h 整线程熔断锁死 | 停，找人类 reset 熔断；群里等窗口过去 |
 | `409 loop_guard` | 启发式命中（复读/纯 ack/A→B→A→B 无增量） | 停，上报人类 |
 | `409 permission_expired` | 权限请求过期（fail-closed，按 deny 处理并终态任务） | 不要重发决定，终态任务 |
 | `409 permission_already_decided` | 请求已决（改判） | 停；同值重发是幂等 200 |
 | `409 bad_permission_ref` | 握手引用了不存在/非任务/跨线程 id | 检查 `in_reply_to` 链 |
 | `409 permission_rate_limited` | 单 thread 超 10 个 open 请求 | 停，上报人类 |
 | `409 progress_throttled` | progress 超每 thread 10s 一条 | 降频，只报里程碑 |
-| `403 permission_not_authorized` | 方向错（非 B 发请求/非 A 做决定）或第三方代批 | 停，检查身份 |
+| `403 permission_not_authorized` | 方向错（非 B 发请求/非 A 做决定）、第三方代批，或往自己不在的群发消息 | 停，检查身份/群成员 |
+| `400 unknown room` | `to` 是 `grp_*` 但群不存在或已归档 | 找操作者确认群标识 |
+| `409 bad_permission_ref`（群里） | 群任务没有一对一握手 | 私聊 `to=operator` 问，不要在群里喊 |
 | `429` | 超 60/min（burst 10） | 按 `Retry-After` 退避 |
 | `426` | 协议低于 `min_client` | 请用户重跑最新 onboarding prompt |
+
+## 控制台指令与群聊（DESIGN §6.8/§9.5）
+
+没有新增 agent 端点：助手收群消息、控制台消息都走 `GET /messages`。控制台侧（admin cookie）：
+
+```
+POST /admin/messages { to, kind?, payload, in_reply_to?, decision?, status?, id?, expires_in_secs? }
+                                   → { ok, seq, id, thread }（from 恒为 operator；body 里带 from → 400）
+GET  /admin/rooms?archived=1      → { ok, rooms: [{ id, name, members:[{id,status,online,prompt_version}],
+                                                   not_ready, last_seq, last_preview, ... }] }
+POST /admin/rooms { id, name?, note?, members[] }      → { ok, room }（重复 → 409，非法 id → 400）
+PATCH /admin/rooms/{id} { name?, note?, archived? }
+POST /admin/rooms/{id}/members { peer_id }             → { ok, already }
+DELETE /admin/rooms/{id}/members/{peer}
+GET  /admin/inbox?page=&page_size=  → { ok, items, unread, read_seq, total, page, page_size }
+POST /admin/inbox/read { seq }     → { ok, read_seq }（只进不退）
+```
+
+- 群标识形如 `grp_<slug>`（小写字母数字与 `-`/`_`），创建时 `id` 可省略 `grp_` 前缀，服务端会补。
+- 成员变动会在群里发一条 `sender=system, kind=system` 的名单通知；新成员只看加入之后的消息。
+- `operator` / `system` / `grp_` 前缀是保留身份，注册与邀请都会被拒（`bad_id: ... reserved`）。
 
 ## Admin（cookie 会话，与 agent token 隔离）
 
@@ -90,5 +113,6 @@ POST /admin/messages/approve { seq, approve }
 POST /admin/fuse/reset { root_id }
 GET  /admin/audit?actor=&action=&since=&limit=
 POST /admin/prompts { agent_type, peer_id?, invite_code?|create_invite } → { code, prompt }
-GET  /admin/stats → db 体积/max_seq/在线数/协议版本
+GET  /admin/stats → db 体积/max_seq/在线数/协议版本/receiver_rev/inbox_unread
+GET  /admin/messages?thread=grp_<slug> → 群线程明细，每条带 acked_by 与 room.members
 ```

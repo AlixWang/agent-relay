@@ -30,6 +30,9 @@
 | `stream_keepalive_secs` | int | `20` | SSE 保活间隔秒（0=用 20；上限 120，§4.4b） |
 | `stream_max_per_peer` | int | `3` | 单身份并发流上限，超限 `429`（0=用 3，§4.4b） |
 | `profile_refresh_days` | int | `7` | 简介超期天数：heartbeat 带 `profile_refresh=true` 提醒更新（0=不提醒，§8.7） |
+| `max_room_members` | int | `16` | 单个群聊的成员上限（2-64，§6.8） |
+| `room_fuse_max_messages` | int | `60` | 群聊窗口内最多消息数，超限 `409 loop_fuse_tripped`（群聊用窗口口径，不会被整线程熔断锁死） |
+| `room_fuse_window_secs` | int | `3600` | 群聊熔断窗口秒数（≥60，§6.8） |
 
 ## 最小生产配置
 
