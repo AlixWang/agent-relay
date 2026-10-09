@@ -109,6 +109,11 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	// Prompt distribution (§8.6): peers pull worker-instruction updates
 	// here when heartbeat signals prompt_update. Authed, per-identity.
 	mux.HandleFunc("GET /prompts/current", s.handlePromptCurrent)
+	// Conversation APIs (§v12): assistant-facing conversation management.
+	mux.HandleFunc("POST /conversations", s.handleCreateConversation)
+	mux.HandleFunc("GET /conversations", s.handleListConversations)
+	mux.HandleFunc("GET /conversations/{id}/messages", s.handleGetConversationMessages)
+	mux.HandleFunc("POST /conversations/{id}/leave", s.handleLeaveConversation)
 
 	mux.HandleFunc("POST /admin/login", s.handleAdminLogin)
 	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)
@@ -129,6 +134,12 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("POST /admin/prompts", s.requireAdmin(s.handleAdminPrompts))
 	mux.HandleFunc("GET /admin/stats", s.requireAdmin(s.handleAdminStats))
 	mux.HandleFunc("GET /admin/config", s.requireAdmin(s.handleAdminConfig))
+	// Conversation admin APIs (§v12): admin conversation management.
+	mux.HandleFunc("GET /admin/conversations", s.requireAdmin(s.handleAdminListConversations))
+	mux.HandleFunc("POST /admin/conversations", s.requireAdmin(s.handleAdminCreateConversation))
+	mux.HandleFunc("PATCH /admin/conversations/{id}/members", s.requireAdmin(s.handleAdminManageMembers))
+	mux.HandleFunc("POST /admin/conversations/{id}/messages", s.requireAdmin(s.handleAdminSendMessage))
+	mux.HandleFunc("GET /admin/conversations/{id}/messages", s.requireAdmin(s.handleAdminGetConversationMessages))
 	// Web self-update (DESIGN §10.4): releases-only, verified, systemd-only.
 	mux.HandleFunc("GET /admin/update/status", s.requireAdmin(s.handleAdminUpdateStatus))
 	mux.HandleFunc("POST /admin/update/check", s.requireAdmin(s.handleAdminUpdateCheck))
@@ -812,6 +823,16 @@ func (s *Server) isAdmin(r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+func (s *Server) requirePeer(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		peer, _ := s.authed(w, r)
+		if peer == nil {
+			return // authed already wrote error response
+		}
+		next(w, r)
+	}
 }
 
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
