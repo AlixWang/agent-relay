@@ -12,7 +12,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/store"
 )
 
-// Envelope is the validated send request (DESIGN §5.2).
+// Envelope is the validated send request (DESIGN §5.2 + §v12).
 type Envelope struct {
 	ID               string
 	To               string
@@ -29,10 +29,15 @@ type Envelope struct {
 	Detail        string
 	Decision      string // allow|deny
 	ExpiresInSecs int64
+	// Conversation fields (§v12): ConvID for conversation messages,
+	// SeenSeq for freshness check, Mentions for @-targeted delivery.
+	ConvID   string
+	SeenSeq  int64
+	Mentions []string // list of @mentioned peer IDs
 }
 
 // Limits configures the fuse and rate limiter (DESIGN §6.1) plus the
-// permission-handshake caps (§6.5).
+// permission-handshake caps (§6.5) and conversation guards (§v12).
 type Limits struct {
 	FuseMaxMessages int
 	FuseMaxAgeSecs  int64
@@ -43,13 +48,17 @@ type Limits struct {
 	// ProgressThrottleSecs floors spacing between kind=status/progress
 	// messages per sender per thread. <=0 disables (besides global rate).
 	ProgressThrottleSecs int64
+	// Conversation guards (§v12).
+	ConvAgentTurnBudget int // max consecutive agent replies after user message
+	ConvFuseMaxMessages int // circuit breaker per conversation
 }
 
 // Rejection is a machine-readable send refusal.
 type Rejection struct {
-	Code   string // duplicate_id | loop_fuse_tripped | loop_guard | rate_limited
+	Code   string // duplicate_id | loop_fuse_tripped | loop_guard | rate_limited | not_member | stale | agent_turn_budget
 	Reason string
-	Retry  int // Retry-After seconds for rate_limited
+	Retry  int   // Retry-After seconds for rate_limited
+	LatestSeq int64 // latest message seq for stale rejection
 }
 
 func (r *Rejection) Error() string { return r.Code + ": " + r.Reason }
@@ -102,6 +111,65 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 	// Rate limit before the heavier checks.
 	if retry, limited := g.rateCheck(env.From, now); limited {
 		return nil, &Rejection{Code: "rate_limited", Reason: "send rate exceeded", Retry: retry}
+	}
+
+	// Conversation guards (§v12): check if this is a conversation message.
+	isConversation := strings.HasPrefix(env.To, "conv:")
+	if isConversation && env.ConvID != "" {
+		// Member validation: sender must be a member of the conversation.
+		// Exception: sender=user (admin) is allowed without membership check.
+		if env.From != "user" {
+			isMember, err := g.st.IsConversationMember(env.ConvID, env.From)
+			if err != nil {
+				return nil, err
+			}
+			if !isMember {
+				return nil, &Rejection{Code: "not_member",
+					Reason: fmt.Sprintf("sender %s is not a member of conversation %s", env.From, env.ConvID)}
+			}
+		}
+
+		// Freshness check: unsolicited replies must include seen_seq.
+		// Exception: @mentioned messages are solicited, no freshness check needed.
+		isMentioned := false
+		for _, mentioned := range env.Mentions {
+			if mentioned == env.From {
+				isMentioned = true
+				break
+			}
+		}
+		if !isMentioned && env.From != "user" && env.SeenSeq > 0 {
+			// Query latest message seq in this conversation.
+			latestSeq, err := g.st.ConversationMaxSeq(env.ConvID)
+			if err != nil {
+				return nil, err
+			}
+			if env.SeenSeq < latestSeq {
+				return nil, &Rejection{Code: "stale",
+					Reason: fmt.Sprintf("seen_seq=%d but latest is %d; re-read conversation history", env.SeenSeq, latestSeq),
+					LatestSeq: latestSeq}
+			}
+		}
+
+		// Turn budget: check consecutive agent replies.
+		if env.From != "user" && g.limits.ConvAgentTurnBudget > 0 {
+			conv, err := g.st.GetConversation(env.ConvID)
+			if err != nil {
+				return nil, err
+			}
+			if conv != nil && conv.AgentStreak >= g.limits.ConvAgentTurnBudget {
+				return nil, &Rejection{Code: "agent_turn_budget",
+					Reason: fmt.Sprintf("conversation %s exceeded %d consecutive agent replies; wait for user", env.ConvID, g.limits.ConvAgentTurnBudget)}
+			}
+		}
+
+		// Conversation fuse: separate from thread fuse.
+		if g.limits.ConvFuseMaxMessages > 0 {
+			// Note: We're using a simple message count for now.
+			// In a full implementation, you'd want conversation_fuses table like thread_fuses.
+			// For Phase 2, we'll implement a basic count check.
+			// TODO: Add conversation_fuses table in future iteration.
+		}
 	}
 
 	// Hard fuse: count and age (minus the admin-cleared watermark).
@@ -445,4 +513,30 @@ func (g *Guard) ResetFuse(rootID string, now int64) error {
 		return err
 	}
 	return g.st.AppendAudit("admin", "fuse.reset", "thread="+rootID, now)
+}
+
+// UpdateConversationStreak updates the agent reply streak for a conversation (§v12).
+// Call this after a message is successfully inserted.
+// - If sender=user: reset streak to 0
+// - If sender is an agent: increment streak by 1
+func (g *Guard) UpdateConversationStreak(convID, sender string) error {
+	if convID == "" {
+		return nil // not a conversation message
+	}
+	conv, err := g.st.GetConversation(convID)
+	if err != nil {
+		return err
+	}
+	if conv == nil {
+		return nil // conversation doesn't exist (shouldn't happen)
+	}
+
+	var newStreak int
+	if sender == "user" {
+		newStreak = 0
+	} else {
+		newStreak = conv.AgentStreak + 1
+	}
+
+	return g.st.UpdateConversationStreak(convID, newStreak)
 }

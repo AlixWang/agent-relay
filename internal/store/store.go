@@ -236,6 +236,8 @@ type Store interface {
 	IsConversationMember(convID, memberID string) (bool, error)
 	GetConversationMember(convID, memberID string) (*ConversationMember, error)
 	CountConversationMembers(convID string) (int, error)
+	// ConversationMaxSeq returns the latest message seq in a conversation.
+	ConversationMaxSeq(convID string) (int64, error)
 	// verify (§8.4)
 	SetSmoke(peerID, smokeID string, ts int64) error
 	GetSmoke(peerID string) (smokeID string, ts int64, err error)
@@ -1304,6 +1306,12 @@ func (s *sqliteStore) CountConversationMembers(convID string) (int, error) {
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM conversation_members
 		WHERE conv_id=? AND (left_at=0 OR left_at IS NULL)`, convID).Scan(&count)
 	return count, err
+}
+
+func (s *sqliteStore) ConversationMaxSeq(convID string) (int64, error) {
+	var seq int64
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conv_id=?`, convID).Scan(&seq)
+	return seq, err
 }
 
 func (s *sqliteStore) Close() error { return s.db.Close() }
