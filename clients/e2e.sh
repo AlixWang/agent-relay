@@ -259,5 +259,121 @@ else
   bad "stream unauth 401"
 fi
 
+# ---- console command center + rooms (DESIGN §6.8/§9.5) ----
+# The operator speaks as the reserved identity through POST /admin/messages; a
+# room is a routing alias whose members receive one stored message.
+jq_ok "room created" '.ok == true and .room.id == "grp_ops" and (.room.members | length) == 2' \
+  curl -s -b "$JAR" -X POST "$BASE/admin/rooms" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"ops","name":"运维群","members":["t-alice","t-bob"]}'
+
+if curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X POST "$BASE/admin/rooms" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"grp_ops","members":["t-alice"]}' | grep -q 409; then
+  ok "duplicate room 409"
+else
+  bad "duplicate room 409"
+fi
+
+OP_SEND="$(curl -s -b "$JAR" -X POST "$BASE/admin/messages" \
+  -H 'Content-Type: application/json' \
+  --data '{"to":"grp_ops","kind":"task","payload":"@t-alice 控制台指令：回报一次状态"}')"
+if echo "$OP_SEND" | jq -e '.ok == true and .thread == "grp_ops"' >/dev/null 2>&1; then
+  ok "operator room send"
+else
+  bad "operator room send" "$OP_SEND"
+fi
+if curl -s -b "$JAR" -X POST "$BASE/admin/messages" -H 'Content-Type: application/json' \
+    --data '{"to":"t-alice","payload":"x","from":"t-alice"}' -o /dev/null -w '%{http_code}' | grep -q 400; then
+  ok "operator from-override rejected"
+else
+  bad "operator from-override rejected"
+fi
+
+ROOM_VIEW="$(curl -s "$BASE/messages?for=t-bob&since=0" "${AUTH_B[@]}")"
+if echo "$ROOM_VIEW" | jq -e '[.items[] | select(.to == "grp_ops" and .from == "operator")] | length > 0' >/dev/null 2>&1; then
+  ok "room message reaches member"
+else
+  bad "room message reaches member" "$ROOM_VIEW"
+fi
+# The message author never receives its own room message back. The operator
+# authored the one above; for a member-authored message we check after the
+# reply below. Here: the member DID get the operator's message (it is a group
+# message to the whole room, not a private one).
+SELF_VIEW="$(curl -s "$BASE/messages?for=t-alice&since=0" "${AUTH_A[@]}")"
+if echo "$SELF_VIEW" | jq -e '[.items[] | select(.payload | test("控制台指令"))] | length == 1' >/dev/null 2>&1; then
+  ok "room message delivered to addressed member"
+else
+  bad "room message delivered to addressed member" "$SELF_VIEW"
+fi
+jq_ok "member acks room message" '.ok == true' \
+  curl -s -X POST "$BASE/ack" "${AUTH_A[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"message_id":"'"$(echo "$SELF_VIEW" | jq -r '[.items[] | select(.to=="grp_ops")][0].id // "none"')"'","by":"t-alice"}'
+
+# A non-member cannot post into the room (403, not a silent black hole).
+UNINVITED_CODE="$(mk_invite muse t-carol)"
+UNINVITED_TOK="$(do_register "$UNINVITED_CODE" t-carol muse)"
+if curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/messages" \
+    -H "Authorization: Bearer $UNINVITED_TOK" -H 'Content-Type: application/json' \
+    --data '{"id":"outsider-1","to":"grp_ops","kind":"chat","payload":"outsider"}' | grep -q 403; then
+  ok "room non-member 403"
+else
+  bad "room non-member 403"
+fi
+
+# A member replies to the group; the operator's inbox collects direct reports.
+jq_ok "member room reply" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_A[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"room-reply-1","to":"grp_ops","kind":"result","payload":"状态：一切正常"}'
+AFTER_REPLY="$(curl -s "$BASE/messages?for=t-alice&since=0" "${AUTH_A[@]}")"
+if echo "$AFTER_REPLY" | jq -e '[.items[] | select(.payload | test("一切正常"))] | length == 0' >/dev/null 2>&1; then
+  ok "own room message not echoed to sender"
+else
+  bad "own room message not echoed to sender" "$AFTER_REPLY"
+fi
+if echo "$AFTER_REPLY" | jq -e '[.items[] | select(.from == "operator")] | length == 1' >/dev/null 2>&1; then
+  ok "sender still sees other room messages"
+else
+  bad "sender still sees other room messages"
+fi
+jq_ok "agent reports to operator" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"dm-report-1","to":"operator","kind":"result","payload":"回执：无需处理"}'
+
+INBOX="$(curl -s -b "$JAR" "$BASE/admin/inbox")"
+if echo "$INBOX" | jq -e '.unread >= 1 and ([.items[] | select(.from == "t-bob")] | length) >= 1' >/dev/null 2>&1; then
+  ok "operator inbox unread"
+else
+  bad "operator inbox unread" "$INBOX"
+fi
+INBOX_SEQ="$(echo "$INBOX" | jq -r '.items[0].seq')"
+jq_ok "inbox marked read" '.ok == true' \
+  curl -s -b "$JAR" -X POST "$BASE/admin/inbox/read" \
+    -H 'Content-Type: application/json' --data "{\"seq\":$INBOX_SEQ}"
+jq_ok "inbox unread cleared" '.unread == 0' \
+  curl -s -b "$JAR" "$BASE/admin/inbox"
+jq_ok "stats exposes inbox_unread" '.inbox_unread == 0' \
+  curl -s -b "$JAR" "$BASE/admin/stats"
+
+# Room thread view carries per-member ack state and the member list.
+ROOM_THREAD="$(curl -s -b "$JAR" "$BASE/admin/messages?thread=grp_ops")"
+if echo "$ROOM_THREAD" | jq -e '.room.members | length == 2' >/dev/null 2>&1; then
+  ok "room thread members"
+else
+  bad "room thread members" "$ROOM_THREAD"
+fi
+
+# Reserved identities cannot be registered, so nobody can speak as the human.
+if curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/register" \
+    -H 'Content-Type: application/json' \
+    --data '{"code":"whatever","id":"operator","agent_type":"muse","protocol_version":1}' | grep -q 400; then
+  ok "reserved id rejected at register"
+else
+  bad "reserved id rejected at register"
+fi
+
 echo "== pass=$pass fail=$fail =="
 test "$fail" -eq 0
