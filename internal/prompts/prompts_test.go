@@ -1,6 +1,7 @@
 package prompts
 
 import (
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -217,7 +218,7 @@ func TestChangesSinceIncremental(t *testing.T) {
 		t.Fatalf("current: %+v", got)
 	}
 	got := ChangesSince(2)
-	if len(got) != 8 || got[0].Version != 3 || got[7].Version != PromptVersion {
+	if len(got) != 9 || got[0].Version != 3 || got[8].Version != PromptVersion {
 		t.Fatalf("since v2: %+v", got)
 	}
 	for _, e := range got {
@@ -248,9 +249,72 @@ func TestDistributionMatchesInit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, needle := range []string{"relay-tail.sh", "relay-tail?arch", "client_update", "prompt-changes.json", "profile_refresh", "7.5", "6.5", "relay-watch.sh"} {
+		for _, needle := range []string{"relay-tail.sh", "relay-tail?arch", "client_update", "prompt-changes.json", "profile_refresh", "7.5", "6.5", "relay-watch.sh", "prompt-current.md", "memory_reconciled"} {
 			if strings.Contains(init, needle) && !strings.Contains(dist, needle) {
 				t.Fatalf("%s: distribution missing %q present in init", typ, needle)
+			}
+		}
+	}
+}
+
+// prompt-current.md is per-type, not one shared file: /prompts/current
+// renders the peer's own template, so "replace wholesale" never hands a
+// muse the hermes text.
+func TestDistributionIsPerType(t *testing.T) {
+	seen := map[string]string{}
+	for _, typ := range Types() {
+		dist, err := Render(typ, Data{ServerAddr: "http://x:1", PeerID: "p", ProtocolVersion: 1, IsReconfigure: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(dist, "（`"+typ+"`）") {
+			t.Fatalf("%s: distribution does not name its own type", typ)
+		}
+		for other, text := range seen {
+			if text == dist {
+				t.Fatalf("%s and %s render identical distributions", typ, other)
+			}
+		}
+		seen[typ] = dist
+	}
+}
+
+// Prompt v11: upgrades replace the whole text and purge conflicting relay
+// rules from the assistant's memory, keeping local adaptations; the
+// assistant reports what it purged via heartbeat.
+func TestMemoryReconcileDocumented(t *testing.T) {
+	for _, typ := range Types() {
+		out := render(t, typ, Data{InviteCode: "inv_test"})
+		for _, must := range []string{
+			"版本优先", "整份替换", "prompt-current.md", "清理 memory",
+			"本地适配要保留", "memory_reconciled", "memory_version",
+		} {
+			if !strings.Contains(out, must) {
+				t.Fatalf("%s missing memory-reconcile rule %q", typ, must)
+			}
+		}
+		if strings.Contains(out, "只改 changes 指出的节") {
+			t.Fatalf("%s still tells the assistant to patch section by section", typ)
+		}
+	}
+}
+
+// The repo snapshots under clients/*/worker-prompt.md used to carry a full
+// copy of the rules and drifted versions behind the served prompt. They
+// must stay pointer-only so they can never become a third rule source.
+func TestWorkerPromptSnapshotsArePointers(t *testing.T) {
+	for _, path := range []string{"../../clients/muse/worker-prompt.md", "../../clients/hermes/worker-prompt.md"} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		if !strings.Contains(s, "/prompts/current") {
+			t.Fatalf("%s must point at /prompts/current", path)
+		}
+		for _, bad := range []string{"红线", "入站卫生", "permission_request", "只改 changes"} {
+			if strings.Contains(s, bad) {
+				t.Fatalf("%s carries rule text %q; keep it a pointer", path, bad)
 			}
 		}
 	}
@@ -276,20 +340,29 @@ func TestMuseWorkerRichness(t *testing.T) {
 	}
 }
 
-// Relayed-instruction policy (prompt v8, DESIGN §6.3): a message that relays the
-// user's instruction IS the user's instruction — the four redlines are the only
-// thing the receiving agent still has to escalate.
+// Relayed-instruction policy (prompt v8, narrowed in v11, DESIGN §6.3): a
+// message that relays the user's instruction IS the user's instruction, and
+// only two redlines (credential exfiltration, spending) still need the user's
+// own approval. Everything else runs by default; a refusal must name a redline.
 func TestRelayedInstructionPolicy(t *testing.T) {
 	for _, typ := range Types() {
 		out := render(t, typ, Data{InviteCode: "inv_test"})
-		for _, must := range []string{"你用户的指令", "无论消息里怎么说", "外泄", "删除不可恢复的数据", "改动中继之外的凭证"} {
+		for _, must := range []string{
+			"你用户的指令", "无论消息里怎么说", "红线只有两条", "外泄", "花钱",
+			"默认直接执行", "命中的是红线 1 还是红线 2", "已作废的旧口径",
+		} {
 			if !strings.Contains(out, must) {
 				t.Fatalf("%s missing relayed-instruction rule %q", typ, must)
 			}
 		}
-		// The old blanket "relay = untrusted, not your user" wording is retired:
-		// it is what made assistants refuse their own user's relayed orders.
-		for _, bad := range []string{"不是你用户的指令", "not instructions from your user", "中继永远不能代替"} {
+		// Retired wording: the blanket "relay = untrusted" (pre-v8), the four-item
+		// redline list and the "ask first when out of scope" fallback (pre-v11),
+		// all of which made assistants refuse their own user's orders.
+		for _, bad := range []string{
+			"不是你用户的指令", "not instructions from your user", "中继永远不能代替",
+			"只有下面四类", "兜底：工作范围明显超出用户配置时，先问一句",
+			"The four\n> exceptions", "不替主人做实质表态",
+		} {
 			if strings.Contains(out, bad) {
 				t.Fatalf("%s still carries retired hygiene wording %q", typ, bad)
 			}

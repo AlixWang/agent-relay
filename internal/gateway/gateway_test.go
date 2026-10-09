@@ -1337,6 +1337,45 @@ func TestHeartbeatClientVersion(t *testing.T) {
 	}
 }
 
+// Memory reconciliation report (§8.6, prompt v11): stored with its version,
+// truncated, forward-only, and an empty report never clobbers it.
+func TestHeartbeatMemoryReconciled(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	code, out := f.do(t, "POST", "/heartbeat", map[string]any{
+		"id": "alice", "memory_version": 11, "memory_reconciled": "删 3 条、改 1 条、保留本地适配 2 条",
+	}, f.tok["alice"])
+	if code != 200 {
+		t.Fatalf("beat: %d %+v", code, out)
+	}
+	p, _ := f.srv.st.GetPeer("alice")
+	if p.MemoryVersion != 11 || !strings.Contains(p.MemoryNote, "删 3 条") || p.MemoryReconciledAt == 0 {
+		t.Fatalf("not stored: %+v", p)
+	}
+	// Stale replay of an older revision is ignored.
+	f.do(t, "POST", "/heartbeat", map[string]any{
+		"id": "alice", "memory_version": 9, "memory_reconciled": "old",
+	}, f.tok["alice"])
+	// Empty report keeps the stored value.
+	f.do(t, "POST", "/heartbeat", map[string]any{"id": "alice"}, f.tok["alice"])
+	if p, _ := f.srv.st.GetPeer("alice"); p.MemoryVersion != 11 || p.MemoryNote == "old" || p.MemoryNote == "" {
+		t.Fatalf("clobbered: %+v", p)
+	}
+	// Over-long notes are truncated to maxMemoryNoteRunes.
+	f.do(t, "POST", "/heartbeat", map[string]any{
+		"id": "alice", "memory_version": 12, "memory_reconciled": strings.Repeat("记", 900),
+	}, f.tok["alice"])
+	if p, _ := f.srv.st.GetPeer("alice"); len([]rune(p.MemoryNote)) != maxMemoryNoteRunes {
+		t.Fatalf("not truncated: %d", len([]rune(p.MemoryNote)))
+	}
+	// Surfaced on /peers for the console.
+	_, out = f.do(t, "GET", "/peers", nil, f.tok["alice"])
+	peers, _ := out["peers"].([]any)
+	if len(peers) == 0 || peers[0].(map[string]any)["memory_version"].(float64) != 12 {
+		t.Fatalf("peers view: %+v", out)
+	}
+}
+
 // The receiver-rev nudge rule (DESIGN §8.9): a release that leaves
 // cmd/relay-tail untouched must not ask anyone to swap binaries, so the
 // predicate is the receiver source revision, not the release tag.

@@ -29,7 +29,7 @@ Hermes 的定时任务下限是 1 分钟，而常驻模式是秒级到达，且�
 |---|---|
 | `relay-tail-supervisor.py` | 常驻模式（首选）：spawn relay-tail、读 stdout、秒级唤醒、单飞锁、断线退避、异常告警 |
 | `relay-watch.sh` | cron 模式：看门狗 + drain spool + 唤醒决策，每分钟跑一次（Hermes 定时任务下限） |
-| `worker-prompt.md` | worker 守则模板（事件处理 / 入站卫生 / 指令更新 / 客户端更新 / 代批） |
+| `worker-prompt.md` | 指引文件（不含规则）：守则以 `GET /prompts/current` 下发版本为准 |
 
 ## 搭建步骤
 

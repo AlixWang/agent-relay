@@ -201,3 +201,28 @@ func TestTailSupervisorScriptEmbedded(t *testing.T) {
 		t.Fatal("internal/web/clients/relay-tail-supervisor.py diverged from clients/hermes/relay-tail-supervisor.py")
 	}
 }
+
+// The wake layers inject their text into every Hermes wake, so a rule copy
+// there re-teaches stale rules on each task. They must defer to the served
+// prompt-current.md instead of enumerating redlines themselves.
+func TestWakeLayersDeferRulesToServedPrompt(t *testing.T) {
+	for name, s := range map[string]string{
+		"relay-watch-hermes.sh":    WatchHermesScript(),
+		"relay-tail-supervisor.py": TailSupervisorScript(),
+		"relay-watch.sh":           WatchScript(),
+	} {
+		for _, bad := range []string{"四类红线", "删不可恢复数据", "对外发布或花钱", "三步走"} {
+			if strings.Contains(s, bad) {
+				t.Fatalf("%s carries stale rule text %q", name, bad)
+			}
+		}
+	}
+	for name, s := range map[string]string{
+		"relay-watch-hermes.sh":    WatchHermesScript(),
+		"relay-tail-supervisor.py": TailSupervisorScript(),
+	} {
+		if !strings.Contains(s, "prompt-current.md") {
+			t.Fatalf("%s must point the worker at prompt-current.md", name)
+		}
+	}
+}

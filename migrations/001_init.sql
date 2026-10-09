@@ -29,6 +29,12 @@ ALTER TABLE peers ADD COLUMN profile_updated_at INTEGER DEFAULT 0;
 ALTER TABLE peers ADD COLUMN client_version TEXT DEFAULT '';
 ALTER TABLE peers ADD COLUMN client_updated_at INTEGER DEFAULT 0;
 ALTER TABLE peers ADD COLUMN client_rev TEXT DEFAULT '';
+-- Memory reconciliation (§8.6, prompt v11): on prompt_update the assistant
+-- purges conflicting relay rules from its own memory and reports a one-line
+-- summary via heartbeat (memory_reconciled + memory_version). Display only.
+ALTER TABLE peers ADD COLUMN memory_note TEXT DEFAULT '';
+ALTER TABLE peers ADD COLUMN memory_version INTEGER DEFAULT 0;
+ALTER TABLE peers ADD COLUMN memory_reconciled_at INTEGER DEFAULT 0;
 -- NOTE: tokens.peer_id intentionally has NO foreign key to peers(id).
 -- Tokens outlive peers by design (DESIGN §10.2): peers are pruned after
 -- peer_prune_after_days, tokens persist until revoked so a returning

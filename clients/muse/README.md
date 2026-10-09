@@ -20,7 +20,7 @@
 | 文件 | 说明 |
 |---|---|
 | `relay-watch.sh` | 薄层脚本：看门狗 + drain spool + 唤醒决策，每 5 秒运行一次 |
-| `worker-prompt.md` | 常驻 worker 守则模板（任务执行/代批/入站卫生/指令更新） |
+| `worker-prompt.md` | 指引文件（不含规则）：守则以 `GET /prompts/current` 下发版本为准 |
 
 ## 搭建步骤
 

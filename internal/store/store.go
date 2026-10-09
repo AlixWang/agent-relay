@@ -34,6 +34,11 @@ type Peer struct {
 	ClientVersion    string // receiver client version tag (§8.9); "" = not reporting
 	ClientUpdatedAt  int64  // when the client version was last reported
 	ClientRev        string // receiver source revision (§8.9); "" = not reporting
+	// Memory reconciliation (§8.6, prompt v11): the assistant's own summary
+	// of which relay rules it purged from memory, and for which revision.
+	MemoryNote         string
+	MemoryVersion      int
+	MemoryReconciledAt int64
 }
 
 type TokenRow struct {
@@ -133,6 +138,9 @@ type Store interface {
 	// overwrites unconditionally — client builds are opaque tags, not
 	// ordered revisions, so no forward-only gate.
 	UpdatePeerClient(id, clientVersion string, ts int64) error
+	// UpdatePeerMemory records the assistant's memory-reconciliation report
+	// (§8.6). Forward-only on version, same rule as UpdatePeerPrompt.
+	UpdatePeerMemory(id, note string, version int, ts int64) error
 	TouchPeer(id string, ts int64) error
 	PrunePeers(olderThan int64) (int64, error)
 	// DeletePeer removes the peer row, revokes all its tokens and clears
@@ -316,10 +324,12 @@ func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 	err := s.db.QueryRow(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen,
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
-		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,'') FROM peers WHERE id=?`, id).
+		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
+		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0) FROM peers WHERE id=?`, id).
 		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
-			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev)
+			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
+			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -333,7 +343,8 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 	rows, err := s.db.Query(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen,
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
-		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,'') FROM peers ORDER BY id`)
+		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
+		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0) FROM peers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +354,8 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 		var p Peer
 		if err := rows.Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
-			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev); err != nil {
+			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
+			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
@@ -388,6 +400,12 @@ func (s *sqliteStore) UpdatePeerClient(id, clientVersion string, ts int64) error
 func (s *sqliteStore) UpdatePeerClientRev(id, clientRev string, ts int64) error {
 	_, err := s.db.Exec(`UPDATE peers SET client_rev=?, client_updated_at=? WHERE id=?`,
 		clientRev, ts, id)
+	return err
+}
+
+func (s *sqliteStore) UpdatePeerMemory(id, note string, version int, ts int64) error {
+	_, err := s.db.Exec(`UPDATE peers SET memory_note=?, memory_version=?, memory_reconciled_at=?
+		WHERE id=? AND COALESCE(memory_version,0)<=?`, note, version, ts, id, version)
 	return err
 }
 

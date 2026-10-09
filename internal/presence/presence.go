@@ -40,6 +40,11 @@ type PeerView struct {
 	// actually decides whether the peer needs a new binary. A version-tag
 	// mismatch with an equal rev is not an update.
 	ClientRev string `json:"client_rev,omitempty"`
+	// Memory reconciliation (§8.6): the assistant's report of which
+	// conflicting relay rules it purged from memory, for which revision.
+	MemoryNote         string `json:"memory_note,omitempty"`
+	MemoryVersion      int    `json:"memory_version"`
+	MemoryReconciledAt int64  `json:"memory_reconciled_at,omitempty"`
 	// Transport (§4.4b): how the peer currently receives messages.
 	// "sse" = holding a live /messages/stream; "poll" = short-polling
 	// (or offline/unknown). Computed from the stream hub, not stored.
@@ -87,6 +92,15 @@ func (s *Service) BeatClientRev(peerID, clientRev string, now int64) error {
 		return nil
 	}
 	return s.st.UpdatePeerClientRev(peerID, clientRev, now)
+}
+
+// BeatMemory records a memory-reconciliation report (§8.6). Empty note
+// means "not reporting" and never clobbers a stored value.
+func (s *Service) BeatMemory(peerID, note string, version int, now int64) error {
+	if note == "" || version <= 0 {
+		return nil
+	}
+	return s.st.UpdatePeerMemory(peerID, note, version, now)
 }
 
 func (s *Service) Beat(peerID string, protocolVer int, capabilities string, promptVersion int, profile string, clientVersion string, now int64) error {
@@ -144,7 +158,8 @@ func (s *Service) List(now int64, live map[string]bool) ([]*PeerView, error) {
 			PromptVersion: p.PromptVersion, PromptUpdatedAt: p.PromptUpdatedAt,
 			Profile: p.Profile, ProfileUpdatedAt: p.ProfileUpdatedAt,
 			ClientVersion: p.ClientVersion, ClientUpdatedAt: p.ClientUpdatedAt,
-			ClientRev: p.ClientRev,
+			ClientRev:  p.ClientRev,
+			MemoryNote: p.MemoryNote, MemoryVersion: p.MemoryVersion, MemoryReconciledAt: p.MemoryReconciledAt,
 		}
 		var caps any
 		if err := json.Unmarshal([]byte(orEmptyJSON(p.Capabilities)), &caps); err == nil {

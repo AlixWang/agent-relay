@@ -585,7 +585,15 @@ type heartbeatReq struct {
 	// update nudge compares: a release that only touches the server, docs
 	// or prompt templates leaves it unchanged, so nobody gets nagged.
 	ClientRev string `json:"client_rev"`
+	// MemoryReconciled is the assistant's one-line summary of the relay
+	// rules it purged or rewrote in its own memory while applying a
+	// prompt_update (§8.6). MemoryVersion is the revision it reconciled
+	// against; 0 falls back to prompt_version, then the server's current.
+	MemoryReconciled string `json:"memory_reconciled"`
+	MemoryVersion    int    `json:"memory_version"`
 }
+
+const maxMemoryNoteRunes = 500
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	peer, _ := s.authed(w, r)
@@ -617,6 +625,22 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.presence.BeatClientRev(peer.ID, req.ClientRev, now)
+	if note := strings.TrimSpace(req.MemoryReconciled); note != "" {
+		if r := []rune(note); len(r) > maxMemoryNoteRunes {
+			note = string(r[:maxMemoryNoteRunes])
+		}
+		mv := req.MemoryVersion
+		if mv <= 0 {
+			mv = req.PromptVersion
+		}
+		if mv <= 0 {
+			mv = prompts.PromptVersion
+		}
+		if err := s.presence.BeatMemory(peer.ID, note, mv, now); err == nil {
+			_ = s.st.AppendAudit(peer.ID, "peer.memory_reconciled",
+				fmt.Sprintf("version=%d note=%s", mv, note), now)
+		}
+	}
 	p2, _ := s.st.GetPeer(peer.ID)
 	if p2 != nil && !s.checkVersion(w, p2) {
 		return

@@ -407,6 +407,21 @@ const promptBadge = (p) => {
   return `<span class="badge warn mono" title="确认于 ${esc(when)} → 最新 v${serverPromptVersion}">v${v} → v${serverPromptVersion}</span>`;
 };
 
+// Memory reconciliation (§8.6): the assistant's own report of which stale
+// relay rules it purged after an upgrade. Missing/older than the prompt it
+// runs means old rules may still be competing with the current text.
+const memoryBadge = (p) => {
+  const mv = p.memory_version ?? 0;
+  const pv = p.prompt_version ?? 0;
+  if (!mv) {
+    return pv ? '<span class="badge warn" title="尚未上报 memory 清理（旧规则可能仍残留）">mem ?</span>' : '';
+  }
+  const when = p.memory_reconciled_at ? fmtTime(p.memory_reconciled_at) : '未知';
+  const tip = `v${mv} · ${when}\n${p.memory_note || ''}`;
+  const cls = mv >= pv ? 'ok' : 'warn';
+  return `<span class="badge ${cls} mono" title="${esc(tip)}">mem v${mv}</span>`;
+};
+
 const clientBadge = (p) => {
   const v = p.client_version || '';
   if (!v) return '<span class="muted xs">—</span>';
@@ -519,6 +534,7 @@ async function refreshPeers() {
           <div class="ver-stack">
             <span class="badge mono" title="协议版本">p${p.protocol_version ?? '?'}</span>
             ${promptBadge(p)}
+            ${memoryBadge(p)}
             ${clientBadge(p)}
           </div>
         </td>
