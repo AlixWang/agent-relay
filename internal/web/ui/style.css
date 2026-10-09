@@ -170,6 +170,18 @@ main { padding: 24px 28px 48px; max-width: 1400px; width: 100%; margin: 0 auto; 
   padding: 12px 14px; border-bottom: 1px solid var(--border);
 }
 .bar-left, .bar-right { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.panel-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.steps { list-style: none; display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; }
+.steps li { display: flex; gap: 8px; align-items: flex-start; font-size: 0.82rem; color: var(--muted-2); }
+.steps li .icon { width: 14px; height: 14px; margin-top: 2px; flex: none; }
+.steps li.done { color: var(--fg-2); }
+.steps li.done .icon { color: var(--ok); }
+.steps li.active { color: var(--fg); font-weight: 550; }
+.steps li.active .icon { color: var(--brand); animation: spin 1.6s linear infinite; }
+.steps li.failed { color: var(--bad); }
+.steps li.failed .icon { color: var(--bad); }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .steps li.active .icon { animation: none; } }
 .bar-right { margin-left: auto; }
 .hint { display: flex; gap: 6px; align-items: center; color: var(--muted-2); font-size: 0.78rem; }
 

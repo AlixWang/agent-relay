@@ -34,6 +34,13 @@
 | `room_fuse_max_messages` | int | `60` | 群聊窗口内最多消息数，超限 `409 loop_fuse_tripped`（群聊用窗口口径，不会被整线程熔断锁死） |
 | `room_fuse_window_secs` | int | `3600` | 群聊熔断窗口秒数（≥60，§6.8） |
 
+## 环境变量（部署相关）
+
+- `AGENT_RELAY_UPDATE_MODE` = `systemd` | `docker` | `unknown`：覆盖 Web 一键更新的部署模式自动探测。
+  默认依据 `/.dockerenv` 与二进制路径（`/usr/local/bin/` 前缀视为 systemd 安装）；装在别处但由
+  systemd 管理的服务（例如 `/opt/agent-relay/`）需显式声明，否则控制台会以“非 systemd 环境”为由
+  禁用一键更新（只给出 docker 命令提示）。
+
 ## 最小生产配置
 
 ```toml

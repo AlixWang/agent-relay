@@ -53,7 +53,8 @@ type Server struct {
 	adminHash []byte
 	mu        sync.Mutex
 	sessions  map[string]int64 // session token -> expiry unix
-	updMgr    *updateManager   // web self-update jobs (lazy init)
+	// Update jobs live on disk (update-jobs/), not here: the helper
+	// restarts this process mid-job. See internal/gateway/update.go.
 
 	serverAddr string // advertised in prompts, e.g. http://100.x.y.z:18789
 }

@@ -313,3 +313,50 @@ func truncate(s string) string {
 	}
 	return s
 }
+
+// The update panel is the one screen an operator watches while the service
+// restarts underneath them. Reported from production: it showed a bare
+// "running" with no log and then sat there forever, and the only way to find
+// out whether the update worked was a manual refresh. Pin the three things
+// that were missing: a live job panel, the helper log in it, and a page that
+// reloads itself into the new version.
+func TestConsoleUpdatePanelWiring(t *testing.T) {
+	f := newFixture(t)
+	f.mux = f.srv.Handler(web.Handler())
+	cookie := f.adminLogin(t)
+
+	code, page := getRaw(t, f, "/", cookie)
+	if code != 200 {
+		t.Fatalf("console page: %d", code)
+	}
+	for _, need := range []string{
+		`id="updJob"`, `id="updSteps"`, `id="updLog"`, `id="updJobHint"`, `id="updJobState"`,
+	} {
+		if !strings.Contains(page, need) {
+			t.Fatalf("update panel markup lost %s", need)
+		}
+	}
+	code, js := getRaw(t, f, "/app.js", cookie)
+	if code != 200 {
+		t.Fatalf("app.js: %d", code)
+	}
+	// Console test files (underscore-prefixed, so //go:embed ui/* skips them)
+	// must never be reachable from the internet.
+	for _, notServed := range []string{"/_update-panel.test.mjs", "/app.test.mjs"} {
+		if c, _ := getRaw(t, f, notServed, cookie); c != 404 {
+			t.Fatalf("%s must not be served, got %d", notServed, c)
+		}
+	}
+	for _, need := range []string{
+		"location.reload()",    // success lands the operator in the new version
+		"/admin/update/status", // polls the job
+		"j.phases",             // renders the phase checklist
+		"j.log",                // renders the helper log live
+		"updSeenInFlight",      // only self-reload for a job this view watched
+		"服务重启中",                // tolerates the restart window
+	} {
+		if !strings.Contains(js, need) {
+			t.Fatalf("update panel behaviour lost %q", need)
+		}
+	}
+}

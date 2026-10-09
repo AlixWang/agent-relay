@@ -115,4 +115,29 @@ GET  /admin/audit?actor=&action=&since=&limit=
 POST /admin/prompts { agent_type, peer_id?, invite_code?|create_invite } → { code, prompt }
 GET  /admin/stats → db 体积/max_seq/在线数/协议版本/receiver_rev/inbox_unread
 GET  /admin/messages?thread=grp_<slug> → 群线程明细，每条带 acked_by 与 room.members
+GET  /admin/update/status → { current{version,tag,protocol,min_client,prompt_version}, mode, job }
+POST /admin/update/check  { version }（空=GitHub 最新）→ { version, protocol_change, min_client_change, unknown }
+POST /admin/update/apply  { version, acknowledge_protocol_change } → { job_id }；409 update_in_progress
 ```
+
+### 升级任务视图（DESIGN §10.4）
+
+`job` 为 `null`（从未升级过）或：
+
+```json
+{
+  "id": "upd-1791…", "version": "v0.15.4",
+  "status": "queued|running|ok|rolled_back|failed",
+  "detail": "health-failed",
+  "started_at": 1791556420, "ended_at": 0, "elapsed_secs": 42,
+  "confirmed": false,
+  "hint": "已排队 3 分仍未被取件：root timer 可能没有在运行…",
+  "log": "10:00:01 STEP queue …\n10:00:14 UPDATE_RESULT ok v0.15.4",
+  "phases": [ { "name": "下载并校验 release 文件", "status": "done|active|pending|failed", "detail": "checksum ok" } ]
+}
+```
+
+- 任务状态存在服务端磁盘（`data_dir/update-jobs/`），所以升级过程中服务重启也不会丢；
+  控制台因此可以跨重启持续轮询，`status=ok` 时自动刷新页面。
+- `confirmed=true` 表示当前进程运行的就是目标版本（即升级已生效）。
+- `hint` 是“卡住了”的可操作提示（排队超 90 秒 / 日志 5 分钟没有增长）。

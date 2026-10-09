@@ -16,6 +16,16 @@
 
 ## Change checklists (things that silently break when forgotten)
 
+- The web-update worker has **one source of truth**: `cmd/agent-relay/update-helper.sh`
+  (embedded in the binary, extracted by `install.sh` via `--print-update-helper`, and
+  self-refreshed from the new binary after each successful update). Never add a second copy
+  to `install.sh`. Its log protocol (`STEP …` / `UPDATE_RESULT …`) is parsed by
+  `internal/gateway/update.go`; `TestUpdateHelperProtocolContract` fails on drift.
+- Update-job state is disk-backed on purpose (`data_dir/update-jobs/`): the worker restarts
+  the gateway mid-job, so anything kept only in memory is lost to the console — that is how
+  a successful update ended up displayed as “running” forever. The console JS that follows a
+  job has its own test: `make test-ui-js` (`internal/web/ui/_update-panel.test.mjs`, run in
+  CI, excluded from the embedded assets by its `_` prefix).
 - `relay-watch.sh` exists as **two byte-identical copies**
   (`clients/muse/` + `internal/web/clients/`); edit one, `cp` the other.
   `internal/web` tests compare them.

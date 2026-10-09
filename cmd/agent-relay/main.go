@@ -33,6 +33,8 @@ var (
 	configPath = flag.String("config", "", "path to config.toml")
 	hashPass   = flag.String("hash", "", "bcrypt-hash the given admin password and exit")
 	showVer    = flag.Bool("version", false, "print version and exit")
+	showHelper = flag.Bool("print-update-helper", false,
+		"print the web-update helper script (deploy/install.sh extracts it) and exit")
 )
 
 const (
@@ -43,7 +45,13 @@ const (
 func main() {
 	flag.Parse()
 	if *showVer {
-		fmt.Printf("agent-relay v%d (protocol %d)\n", serverVersion, protocolVersion)
+		// The release tag is what the update worker compares against before
+		// installing anything (cmd/agent-relay/update-helper.sh).
+		fmt.Printf("agent-relay v%d (protocol %d, release %s)\n", serverVersion, protocolVersion, web.AssetVersion())
+		return
+	}
+	if *showHelper {
+		fmt.Print(updateHelperScript)
 		return
 	}
 	if *hashPass != "" {
@@ -115,6 +123,10 @@ func main() {
 	}
 
 	handler := withLogging(gw.Handler(web.Handler()))
+
+	// A web update restarts this process in the middle of its own job: book the
+	// outcome of whatever the helper finished while we were down (§10.4).
+	gw.ReconcileUpdateJobs()
 
 	srv := &http.Server{
 		Addr:              bind,

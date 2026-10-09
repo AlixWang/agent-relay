@@ -1544,17 +1544,124 @@ async function refreshSystem() {
       $('updCurrent').innerHTML += ` <span class="muted xs">（非 systemd 环境，Web 自动更新已禁用）</span>`;
       $('updApply').disabled = true;
     }
-    if (s.job) renderUpdJob(s.job);
+    if (s.job) {
+      renderUpdJob(s.job);
+      if (!updIsFinal(s.job.status)) {
+        updSeenInFlight.add(s.job.id);
+        updPollStart();
+      }
+    } else if (!updJobTimer) {
+      // No update was ever requested on this install: keep the panel out of
+      // the way. (It starts visible so that a browser still running the
+      // previous console build — which only writes into #updLog — shows this
+      // very update's log while it runs.)
+      $('updJob').hidden = true;
+    }
   } catch (e) {
     $('updCurrent').textContent = '读取更新状态失败: ' + e.message;
   }
 }
 
+/* Update job progress.
+   The job is tracked on the server (data_dir/update-jobs), because applying an
+   update restarts the gateway: the panel keeps following it across that
+   restart, and when the new version is serving, the page reloads itself. */
+const UPD_LABEL = { queued: '排队中', running: '升级中', ok: '成功', rolled_back: '已回滚', failed: '失败' };
+const UPD_TONE = { queued: 'warn', running: 'info', ok: 'ok', rolled_back: 'bad', failed: 'bad' };
+let updSeenInFlight = new Set();   // job ids we watched run, this page view
+let updJobFails = 0;
+
+function updIsFinal(st) { return st && st !== 'queued' && st !== 'running'; }
+
 function renderUpdJob(j) {
-  const st = j.status === 'ok' ? 'ok' : (j.status === 'running' ? 'warn' : 'bad');
-  $('updLog').textContent = `[Job ${j.id}] 目标版本: ${j.version} → 状态: ${j.status}\n` + (j.log || '');
-  $('updLog').dataset.state = st;
+  const card = $('updJob');
+  card.hidden = false;
+  const state = $('updJobState');
+  state.className = 'badge ' + (UPD_TONE[j.status] || 'info');
+  state.textContent = UPD_LABEL[j.status] || j.status;
+  $('updJobVer').textContent = j.version || '—';
+  const meta = [];
+  if (j.started_at) meta.push(fmtTime(j.started_at));
+  if (j.elapsed_secs) meta.push((updIsFinal(j.status) ? '用时 ' : '已用 ') + j.elapsed_secs + 's');
+  if (j.confirmed) meta.push('已生效');
+  else if (j.status === 'ok') meta.push('等待服务重启');
+  $('updJobMeta').textContent = meta.join(' · ');
+
+  $('updSteps').innerHTML = (j.phases || []).map((p) => {
+    const ic = p.status === 'done' ? 'ok' : (p.status === 'failed' ? 'err' : (p.status === 'active' ? 'rotate' : 'clock'));
+    const detail = p.detail && p.status === 'failed' ? '：' + p.detail : '';
+    return `<li class="${esc(p.status)}"${p.detail ? ` title="${esc(p.detail)}"` : ''}>${icon(ic, 'xs')}<span>${esc(p.name)}${esc(detail)}</span></li>`;
+  }).join('');
+
+  $('updJobToggle').hidden = false;
+
+  const hint = $('updJobHint');
+  if (j.hint) {
+    hint.hidden = false;
+    hint.innerHTML = `${icon('alert')}<span>${esc(j.hint)}</span>`;
+  } else {
+    hint.hidden = true;
+  }
+
+  // Follow the tail unless the operator scrolled up to read something.
+  const log = $('updLog');
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 32;
+  log.textContent = j.log || '（helper 还没有输出）';
+  log.dataset.state = UPD_TONE[j.status] || 'info';
+  if (atBottom) log.scrollTop = log.scrollHeight;
 }
+
+function updPollStop() {
+  if (updJobTimer) { clearInterval(updJobTimer); updJobTimer = null; }
+}
+
+function updPollStart() {
+  updPollStop();
+  updJobFails = 0;
+  updJobTimer = setInterval(updPoll, 2000);
+}
+
+async function updPoll() {
+  let s;
+  try {
+    s = await api('/admin/update/status');
+    updJobFails = 0;
+  } catch (e) {
+    // The update restarts the gateway: a few polls fail by design.
+    updJobFails++;
+    $('updJob').hidden = false;
+    $('updJobState').className = 'badge warn';
+    $('updJobState').textContent = '服务重启中';
+    $('updJobMeta').textContent = `第 ${updJobFails} 次重试（等待新版本起来）…`;
+    return;
+  }
+  if (!s.job) {
+    // Between "helper restarted the service" and "the new process answers".
+    $('updJob').hidden = false;
+    $('updJobState').className = 'badge warn';
+    $('updJobState').textContent = '服务重启中';
+    $('updJobMeta').textContent = '等待新进程报告任务结果…';
+    return;
+  }
+  renderUpdJob(s.job);
+  if (!updIsFinal(s.job.status)) updSeenInFlight.add(s.job.id);
+  if (!updIsFinal(s.job.status)) return;
+  updPollStop();
+  refreshSystem();
+  if (s.job.status === 'ok') {
+    toast(`已升级到 ${s.job.version}，正在刷新页面…`, 'ok');
+    // Land the operator in the new version instead of asking for a manual
+    // refresh (assets are versioned by the release tag).
+    if (updSeenInFlight.has(s.job.id)) setTimeout(() => location.reload(), 1600);
+  } else {
+    toast(`升级未完成: ${s.job.status}`, 'bad');
+  }
+}
+
+$('updJobToggle').onclick = () => {
+  const log = $('updLog');
+  log.hidden = !log.hidden;
+};
 
 $('updCheck').onclick = async () => {
   const v = $('updVer').value.trim();
@@ -1603,22 +1710,16 @@ $('updApply').onclick = async () => {
       method: 'POST',
       body: JSON.stringify({ version: v, acknowledge_protocol_change: $('updAck').checked }),
     });
-    $('updLog').textContent = `[Job ${r.job_id}] 升级任务已启动，正在轮询日志…\n`;
-    clearInterval(updJobTimer);
-    updJobTimer = setInterval(async () => {
-      try {
-        const s = await api('/admin/update/status');
-        if (s.job) {
-          renderUpdJob(s.job);
-          if (s.job.status !== 'running') {
-            clearInterval(updJobTimer);
-            refreshSystem();
-            if (s.job.status === 'ok') toast(`成功升级到 ${v}`, 'ok');
-            else toast(`升级异常中断: ${s.job.status}`, 'bad');
-          }
-        }
-      } catch {}
-    }, 2500);
+    // This page view started the job, so it may reload itself on success.
+    updSeenInFlight.add(r.job_id);
+    $('updJob').hidden = false;
+    $('updJobState').className = 'badge warn';
+    $('updJobState').textContent = '排队中';
+    $('updJobVer').textContent = v;
+    $('updJobMeta').textContent = `任务 ${r.job_id}`;
+    $('updLog').textContent = '触发已写入，等待 root timer（最长 30 秒）取件…';
+    updPollStart();
+    updPoll();
   } catch (e) {
     toast('升级触发失败: ' + e.message, 'bad');
   }

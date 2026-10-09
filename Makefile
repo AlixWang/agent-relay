@@ -1,4 +1,4 @@
-.PHONY: generate generate-check build build-prod test test-coverage clean watch install-templ setup fmt lint run help
+.PHONY: generate generate-check build build-prod test test-ui-js test-coverage clean watch install-templ setup fmt lint run help
 
 # Regenerate internal/web/views/*_templ.go AFTER editing a .templ file.
 # The generated code is committed on purpose: a clean checkout must build with
@@ -18,8 +18,14 @@ build:
 	go build -o bin/agent-relay ./cmd/agent-relay
 
 # Run tests
-test:
+test: test-ui-js
 	go test ./...
+
+# Console behaviour that only exists in the browser JS (the update panel that
+# follows an update across the restart it performs). Slices the real app.js.
+test-ui-js:
+	@command -v node >/dev/null || (echo "Error: node not installed (needed for test-ui-js)" && exit 1)
+	node internal/web/ui/_update-panel.test.mjs
 
 # Run tests with coverage
 test-coverage:

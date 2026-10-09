@@ -349,7 +349,27 @@
           </div>
           <div id="updWarn"></div>
           <label class="check" id="updAckRow" hidden><input type="checkbox" id="updAck"> 我已知晓协议变更，继续更新</label>
-          <pre id="updLog" class="log"></pre>
+
+          <!-- Update job. Progress is read from data_dir/update-jobs, so the
+               panel survives the restart the update itself performs and the
+               page reloads by itself once the new version is serving. -->
+          <div id="updJob" class="panel">
+            <div class="panel-bar">
+              <div class="bar-left">
+                <span class="badge" id="updJobState">—</span>
+                <b class="mono" id="updJobVer">—</b>
+                <span class="muted xs" id="updJobMeta"></span>
+              </div>
+              <div class="bar-right">
+                <button class="btn btn-ghost btn-xs" id="updJobToggle" hidden><svg class="icon xs"><use href="#i-chev-d"/></svg>日志</button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <ol class="steps" id="updSteps"></ol>
+              <div class="alert alert-warn" id="updJobHint" hidden></div>
+              <pre id="updLog" class="log"></pre>
+            </div>
+          </div>
         </div>
         <div class="card" id="updDockerCard" hidden>
           <div class="card-head">

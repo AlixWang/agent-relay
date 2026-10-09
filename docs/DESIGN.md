@@ -842,15 +842,54 @@ The console's 更新 tab offers one-click updates for systemd installs (releases
 - `GET /admin/update/status` shows running tag/protocol/min_client + deploy mode + latest job.
 - `POST /admin/update/check {version}` guards downgrades and flags protocol/min_client changes
   (via GitHub release metadata; unreachable → forced acknowledgement).
-- `POST /admin/update/apply {version, acknowledge_protocol_change}` starts an async job that runs
-  the root-owned helper `agent-relay-update apply <v*>` via sudo: download → SHA256 (`SHA256SUMS`)
-  → backup → install → `systemctl restart` → health check → auto-rollback on failure.
-  Job log survives the restart on disk (`data_dir/update-jobs/`); audit `update.check/apply/ok|rolled_back|failed`.
-- Privilege model: the service user never self-elevates. `install.sh` plants the helper (root, 0700)
-  + a sudoers rule allowing ONLY `agent-relay-update apply v*`. One manual `install.sh` re-run is
-  needed to plant it; afterwards all updates go through the Web.
+- `POST /admin/update/apply {version, acknowledge_protocol_change}` writes the job on disk and drops
+  the root timer's trigger: download → SHA256 (`SHA256SUMS`, matched by asset name) → backup →
+  install → `systemctl restart` → health check → auto-rollback on failure.
 - Docker mode: apply is refused (400); the console shows the equivalent `docker pull/rm/run` commands.
 - Cross-protocol targets require the acknowledgement checkbox (assistants may need re-onboarding).
+
+**Job state lives on disk, never in memory** (`data_dir/update-jobs/`):
+
+| path | written by | contents |
+|---|---|---|
+| `jobs/<ver>.json` | gateway (on apply) | job id, version, start time, `audited` marker |
+| `pending/<ver>.req` | gateway (on apply) | job id; the timer's trigger |
+| `<ver>.log` | the root helper | progress + terminal line `UPDATE_RESULT <ok\|rolled_back\|failed> <detail>` |
+
+The helper restarts the gateway in the middle of a job, so everything the console reports has to
+survive that restart. In-memory job state is what made a stalled "running" panel possible: the
+process that accepted the job was gone, its successor had never heard of the job, and the browser
+kept rendering the last status it had seen. The status endpoint therefore derives its answer from
+the three files above plus the running binary version:
+
+- `queued` → trigger written, timer has not picked it up (hint after 90s: the timer is probably not
+  running); `running` → the helper is logging (hint when the log stops growing for 5 min); `ok` /
+  `rolled_back` / `failed` → terminal `UPDATE_RESULT`. Logs are keyed by target version, so a missing
+  result line plus "the running binary is already the target" is reported as success instead of as a
+  job that never ends.
+- `phases[]` is a checklist derived from the log, so the console shows *where* an update is. Both
+  helper generations are understood: current helpers print `STEP <phase> <detail>`, installs from
+  before that only print `checksum ok` / `installed, restarting` / `health ok` style lines.
+- The console polls while a job is in flight, renders the log live, tolerates the restart window
+  (polls fail; the panel reads 服务重启中 and keeps retrying) and **reloads the page itself** once the
+  job succeeds — only for a job that page view watched in flight, so re-opening the panel cannot loop.
+- Audit (`update.check|apply|ok|rolled_back|failed`) is booked exactly once per job: by the watcher
+  that started it, or at the next boot (`ReconcileUpdateJobs`) when the restart swallowed the watcher.
+
+**Privilege model.** The service user never self-elevates: the gateway only writes files into its own
+`data_dir` (its unit makes `/run` read-only, so escalation cannot even start), and a root systemd
+timer (`agent-relay-update.timer`, every 30s) runs the root-owned helper in a clean mount namespace,
+triggered by file creation alone.
+
+**Worker ownership.** The helper has one source of truth: `cmd/agent-relay/update-helper.sh`, embedded
+in the binary. `install.sh` extracts it with `agent-relay --print-update-helper` (never a second copy),
+and after a successful update the worker refreshes *itself* from the newly installed binary — so worker
+improvements ship with a release instead of needing another `install.sh` run (that one manual re-run is
+what switches an existing server onto the extracted copy). `TestUpdateHelperProtocolContract` fails if
+the worker's phases and the gateway's parser ever drift. `AGENT_RELAY_UPDATE_MODE=systemd|docker|unknown`
+overrides mode detection (a systemd install outside `/usr/local/bin`, or the flow's own e2e test).
+The console JS that follows a job is verified by `make test-ui-js`
+(`internal/web/ui/_update-panel.test.mjs`, run in CI).
 
 ### 10.2 Retention & storage hygiene
 

@@ -520,73 +520,13 @@ fi
 # 还继承只读 /usr，备份/安装也必败。文件触发彻底避开提权。
 if [ "$MODE" = "systemd" ]; then
   HELPER="/usr/local/sbin/agent-relay-update"
-  cat > "$HELPER" <<HELPER_EOF
-#!/usr/bin/env bash
-# agent-relay-update — Web 一键更新 helper (installed by deploy/install.sh).
-# Runs as root from the timer (clean mount namespace, no ProtectSystem).
-# Scans PENDING_DIR for <ver>.req, processes the oldest, deletes the req.
-# Logs to job file, tail line: UPDATE_RESULT <ok|rolled_back|failed> <detail>
-set -uo pipefail
-REPO="$REPO"
-BIN_PATH="$BIN_PATH"
-HELPER_EOF
-  cat >> "$HELPER" <<EOF
-JOB_DIR="$DATA_DIR/update-jobs"
-PENDING_DIR="\$JOB_DIR/pending"
-logf() { printf '[update] %s\n' "\$*" >&2; }
-result() { printf 'UPDATE_RESULT %s %s\n' "\$1" "\$2"; }
-
-mkdir -p "\$PENDING_DIR"
-REQ="\$(ls "\$PENDING_DIR"/*.req 2>/dev/null | head -1 || true)"
-[ -n "\$REQ" ] || exit 0
-ver="\$(basename "\$REQ" .req)"
-rm -f "\$REQ"
-case "\$ver" in v[0-9]*) ;; *) exit 0;; esac
-case "\$ver" in *[^A-Za-z0-9._-]* ) exit 0;; esac
-
-ARCH_RAW="\$(uname -m)"
-case "\$ARCH_RAW" in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) result failed "unsupported arch"; exit 1;; esac
-
-mkdir -p "\$JOB_DIR"
-JOB="\$JOB_DIR/\$ver.log"
-: > "\$JOB"
-{
-logf "target \$ver arch \$ARCH"
-TMP="\$(mktemp -d)"
-URL="https://github.com/\$REPO/releases/download/\$ver/agent-relay-linux-\$ARCH"
-SUMS="https://github.com/\$REPO/releases/download/\$ver/SHA256SUMS"
-curl -fSL -o "\$TMP/agent-relay" "\$URL" || { logf "download failed"; result failed "download"; exit 1; }
-EXPECTED="\$(curl -fSL "\$SUMS" | grep "agent-relay-linux-\$ARCH" | awk '{print \$1}')" || { logf "sums download failed"; result failed "sums"; exit 1; }
-ACTUAL="\$(sha256sum "\$TMP/agent-relay" | awk '{print \$1}')"
-[ -n "\$EXPECTED" ] && [ "\$EXPECTED" = "\$ACTUAL" ] || { logf "checksum mismatch"; result failed "checksum"; exit 1; }
-logf "checksum ok"
-TS="\$(date +%Y%m%d%H%M%S)"
-cp "\$BIN_PATH" "\$BIN_PATH.bak.\$TS" || { logf "backup failed"; result failed "backup"; exit 1; }
-install -m 755 "\$TMP/agent-relay" "\$BIN_PATH" || { logf "install failed"; result failed "install"; exit 1; }
-rm -rf "\$TMP"
-logf "installed, restarting"
-systemctl restart agent-relay || { logf "restart failed, rolling back"; cp "\$BIN_PATH.bak.\$TS" "\$BIN_PATH"; systemctl restart agent-relay || true; result rolled_back "restart-failed"; exit 1; }
-# 健康检查：读 config 找端口/模式（与 install.sh §8 同逻辑简化版）
-PORT="\$(grep -E '^port = ' "$CONFIG_PATH" | awk '{print \$3}' || echo 18789)"
-sleep 3
-if curl -sk --max-time 5 "http://127.0.0.1:\$PORT/health" | grep -q '"ok":true'; then
-  logf "health ok"
-  ls -t \$BIN_PATH.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f
-  result ok "\$ver"
-  exit 0
-fi
-logf "health failed, rolling back"
-cp "\$BIN_PATH.bak.\$TS" "\$BIN_PATH"
-systemctl restart agent-relay || true
-sleep 3
-if curl -sk --max-time 5 "http://127.0.0.1:\$PORT/health" | grep -q '"ok":true'; then
-  result rolled_back "health-failed"
-else
-  result failed "health-failed-rollback-uncertain"
-fi
-exit 1
-} 2>&1 | tee -a "\$JOB"
-EOF
+  # The worker lives in the binary (cmd/agent-relay/update-helper.sh, embedded):
+  # one source of truth, and it refreshes itself from the new binary after every
+  # successful update, so worker improvements ship with a release instead of
+  # needing a re-run of this script.
+  if ! "$BIN_PATH" --print-update-helper > "$HELPER" 2>/dev/null || [ ! -s "$HELPER" ]; then
+    die "无法从 $BIN_PATH 提取更新 helper（--print-update-helper）；镜像/二进制可能过旧"
+  fi
   chmod 700 "$HELPER"
   chown root:root "$HELPER"
   # Root timer: polls pending/ every 30s in a clean namespace.
@@ -600,6 +540,11 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=root
+Environment=AGENT_RELAY_REPO=$REPO
+Environment=AGENT_RELAY_BIN=$BIN_PATH
+Environment=AGENT_RELAY_CONFIG=$CONFIG_PATH
+Environment=AGENT_RELAY_DATA=$DATA_DIR
+Environment=AGENT_RELAY_HELPER=$HELPER
 ExecStart=$HELPER
 SVC_EOF
   cat > /etc/systemd/system/agent-relay-update.timer <<TIMER_EOF

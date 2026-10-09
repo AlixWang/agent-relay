@@ -8,7 +8,11 @@ import (
 	"strings"
 )
 
-//go:embed ui/*
+// The directory form (not ui/*) matters: it excludes files whose names start
+// with '_' or '.', which is how the console's node test (_update-panel.test.mjs)
+// lives next to app.js without ever being served to browsers.
+//
+//go:embed ui
 var raw embed.FS
 
 //go:embed clients/relay-poll.sh
