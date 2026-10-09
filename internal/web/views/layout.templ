@@ -13,18 +13,18 @@ templ Layout(title string, content templ.Component) {
 		<script src={ "/htmx-config.js?v=" + assetVersion } defer></script>
 	</head>
 	<body>
-		<div id="app" class="app">
+		<div id="app" class="shell">
 			@Sidebar()
 			<div class="main-col">
 				<header class="topbar">
 					<button class="btn-icon" id="menuBtn" aria-label="菜单">
 						<svg class="icon"><use href="#i-menu"></use></svg>
 					</button>
-					<div class="topbar-title">
+					<div class="tb-title">
 						<h1 id="pageTitle">{ title }</h1>
 						<p id="pageDesc" class="muted xs"></p>
 					</div>
-					<div class="topbar-right">
+					<div class="tb-right">
 						<button class="btn-icon" id="themeToggle" aria-label="切换主题">
 							<svg class="icon"><use href="#i-sun"></use></svg>
 						</button>
@@ -36,7 +36,7 @@ templ Layout(title string, content templ.Component) {
 			</div>
 		</div>
 		@Icons()
-		<div id="toasts" class="toast-container" aria-live="polite"></div>
+		<div id="toasts" class="toasts" aria-live="polite"></div>
 		<script src={ "/app-minimal.js?v=" + assetVersion }></script>
 	</body>
 	</html>

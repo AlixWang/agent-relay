@@ -256,6 +256,57 @@ func probeRoute(t *testing.T, f *fixture, method, path, cookie string) int {
 	return rec.Code
 }
 
+// The templ console must use the class names the stylesheet actually defines,
+// and the same shell containers as the SPA that stylesheet was written for.
+// v0.15.2 shipped the 指挥台 with class="app" (the stylesheet has ".shell") and
+// .topbar-title/.topbar-right (the stylesheet has .tb-title/.tb-right), so the
+// sidebar and the content column stacked instead of rendering as a flex shell:
+// the page looked broken and parts of it could not be clicked. Nothing compared
+// markup against CSS, so it shipped green.
+func TestTemplConsoleMarkupMatchesStylesheet(t *testing.T) {
+	f := newFixture(t)
+	f.mux = f.srv.Handler(web.Handler())
+	cookie := f.adminLogin(t)
+	_, css := getRaw(t, f, "/style.css", cookie)
+	defined := map[string]bool{}
+	for _, m := range regexp.MustCompile(`\.([A-Za-z][A-Za-z0-9_-]*)`).FindAllStringSubmatch(css, -1) {
+		defined[m[1]] = true
+	}
+	classRe := regexp.MustCompile(`class="([^"]*)"`)
+
+	// Pages and fragments: fragments carry the same classes and are swapped in
+	// on their own, so an undefined class there is just as visible.
+	pages := []string{"/admin/command", "/admin/command/rooms", "/admin/command/inbox", "/admin/command/room/grp_ops"}
+	for _, page := range pages {
+		code, body := getRaw(t, f, page, cookie)
+		if code != 200 {
+			t.Fatalf("%s: %d", page, code)
+		}
+		for _, m := range classRe.FindAllStringSubmatch(body, -1) {
+			for _, tok := range strings.Fields(m[1]) {
+				if !defined[tok] {
+					t.Fatalf("%s uses class %q, which style.css does not define (it would render unstyled)", page, tok)
+				}
+			}
+		}
+	}
+	// Shell parity with the single-page console, which the stylesheet targets.
+	_, page := getRaw(t, f, "/admin/command", cookie)
+	for _, needle := range []string{
+		`<div id="app" class="shell">`,
+		`class="main-col"`,
+		`class="topbar"`,
+		`class="tb-title"`,
+		`class="tb-right"`,
+		`class="toasts"`,
+		`id="page-command"`,
+	} {
+		if !strings.Contains(page, needle) {
+			t.Fatalf("console shell is missing %s", needle)
+		}
+	}
+}
+
 func truncate(s string) string {
 	if len(s) > 200 {
 		return s[:200] + "…"

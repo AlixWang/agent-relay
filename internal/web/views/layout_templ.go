@@ -82,7 +82,7 @@ func Layout(title string, content templ.Component) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "\" defer></script></head><body><div id=\"app\" class=\"app\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "\" defer></script></head><body><div id=\"app\" class=\"shell\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -90,7 +90,7 @@ func Layout(title string, content templ.Component) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<div class=\"main-col\"><header class=\"topbar\"><button class=\"btn-icon\" id=\"menuBtn\" aria-label=\"菜单\"><svg class=\"icon\"><use href=\"#i-menu\"></use></svg></button><div class=\"topbar-title\"><h1 id=\"pageTitle\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<div class=\"main-col\"><header class=\"topbar\"><button class=\"btn-icon\" id=\"menuBtn\" aria-label=\"菜单\"><svg class=\"icon\"><use href=\"#i-menu\"></use></svg></button><div class=\"tb-title\"><h1 id=\"pageTitle\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -103,7 +103,7 @@ func Layout(title string, content templ.Component) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</h1><p id=\"pageDesc\" class=\"muted xs\"></p></div><div class=\"topbar-right\"><button class=\"btn-icon\" id=\"themeToggle\" aria-label=\"切换主题\"><svg class=\"icon\"><use href=\"#i-sun\"></use></svg></button></div></header><main>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</h1><p id=\"pageDesc\" class=\"muted xs\"></p></div><div class=\"tb-right\"><button class=\"btn-icon\" id=\"themeToggle\" aria-label=\"切换主题\"><svg class=\"icon\"><use href=\"#i-sun\"></use></svg></button></div></header><main>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -119,7 +119,7 @@ func Layout(title string, content templ.Component) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "<div id=\"toasts\" class=\"toast-container\" aria-live=\"polite\"></div><script src=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "<div id=\"toasts\" class=\"toasts\" aria-live=\"polite\"></div><script src=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

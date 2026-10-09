@@ -87,10 +87,10 @@ templ CommandPage(d CommandData) {
 templ CommandBody(d CommandData) {
 	<section id="page-command" class="page">
 		if d.Error != "" {
-			<div class="toast bad" role="alert">{ d.Error }</div>
+			<div class="alert alert-bad" role="alert">{ d.Error }</div>
 		}
 		if d.Notice != "" {
-			<div class="toast ok" role="status">{ d.Notice }</div>
+			<div class="alert alert-ok" role="status">{ d.Notice }</div>
 		}
 		<div class="grid-2">
 			<div class="card">
@@ -140,8 +140,8 @@ templ InboxPanel(d CommandData) {
 
 // InboxRow is one inbox entry.
 templ InboxRow(m InboxItem) {
-	<div class="msg-row">
-		<div class="msg-meta">
+	<div class="msg">
+		<div class="msg-head">
 			<strong>{ displayName(m.From) }</strong>
 			<span class="badge xs">{ m.Kind }</span>
 			<span class="muted xs">#{ fmt.Sprintf("%d", m.Seq) } { formatTime(m.At) }</span>
@@ -152,7 +152,7 @@ templ InboxRow(m InboxItem) {
 				<span class="badge xs">{ m.Thread }</span>
 			}
 		</div>
-		<p>{ m.Payload }</p>
+		<div class="msg-body">{ m.Payload }</div>
 	</div>
 }
 
@@ -194,7 +194,7 @@ templ ComposeCard(d CommandData) {
 		</label>
 		<div class="chips">
 			for _, p := range d.Peers {
-				<button type="button" class="chip" data-mention={ p.ID }>{ "@" + p.ID }</button>
+				<button type="button" class="pill" data-mention={ p.ID }>{ "@" + p.ID }</button>
 			}
 		</div>
 		<div class="bar-right">
@@ -215,12 +215,12 @@ templ RoomsPanel(d CommandData) {
 			</p>
 		</div>
 	</div>
-	<form class="inline-form" hx-post="/admin/command/rooms" hx-target="#room-list" hx-swap="innerHTML">
+	<form class="form-row" hx-post="/admin/command/rooms" hx-target="#room-list" hx-swap="innerHTML">
 		<input name="id" placeholder="短名（英文，如 ops）" required="required"/>
 		<input name="name" placeholder="显示名（可中文）"/>
 		<div class="chips">
 			for _, p := range d.Peers {
-				<label class="chip"><input type="checkbox" name="members" value={ p.ID }/> { p.ID }</label>
+				<label class="pill"><input type="checkbox" name="members" value={ p.ID }/> { p.ID }</label>
 			}
 		</div>
 		<button class="btn btn-primary btn-sm" type="submit">新建群聊</button>
@@ -228,7 +228,7 @@ templ RoomsPanel(d CommandData) {
 	<div id="room-list" class="card-grid">
 		@RoomCards(d)
 	</div>
-	<div id="room-pane" class="panel-body">
+	<div id="room-pane">
 		if d.Room != nil {
 			@RoomPane(d)
 		} else {
@@ -258,7 +258,7 @@ templ RoomCards(d CommandData) {
 				</p>
 				<p>{ r.LastPreview }</p>
 				if len(r.NotReady) > 0 {
-					<p class="warn xs">
+					<p class="alert alert-warn xs">
 						⚠ { joinIDs(r.NotReady) } 还没读到群聊守则（指令 v12 以下）：群消息可能被当成私聊任务。
 					</p>
 				}
@@ -277,7 +277,7 @@ templ RoomPane(d CommandData) {
 		</div>
 		<div class="chips">
 			for _, m := range d.Room.Members {
-				<span class="chip">
+				<span class="pill">
 					{ peerLabel(m) }
 					<form hx-post={ "/admin/command/rooms/" + d.Room.ID + "/members" }
 						hx-target="#room-pane" hx-swap="innerHTML">
@@ -289,7 +289,7 @@ templ RoomPane(d CommandData) {
 			}
 		</div>
 		if len(d.Room.NonMembers) > 0 {
-			<form class="inline-form"
+			<form class="form-row"
 				hx-post={ "/admin/command/rooms/" + d.Room.ID + "/members" }
 				hx-target="#room-pane" hx-swap="innerHTML">
 				<input type="hidden" name="action" value="add"/>
@@ -306,8 +306,8 @@ templ RoomPane(d CommandData) {
 				<p class="muted xs">群里还没有消息。下面说第一句。</p>
 			} else {
 				for _, m := range d.Room.Messages {
-					<div class="msg-row">
-						<div class="msg-meta">
+					<div class="msg">
+						<div class="msg-head">
 							<strong>{ displayName(m.From) }</strong>
 							<span class="badge xs">{ m.Kind }</span>
 							<span class="muted xs">#{ fmt.Sprintf("%d", m.Seq) } { formatTime(m.At) }</span>
@@ -317,7 +317,7 @@ templ RoomPane(d CommandData) {
 								</span>
 							}
 						</div>
-						<p>{ m.Payload }</p>
+						<div class="msg-body">{ m.Payload }</div>
 					</div>
 				}
 			}
@@ -342,20 +342,20 @@ templ RoomPane(d CommandData) {
 // SendResult reports the outcome of a single-recipient send.
 templ SendResult(notice, errMsg string) {
 	if errMsg != "" {
-		<div class="toast bad" role="alert">{ errMsg }</div>
+		<div class="alert alert-bad" role="alert">{ errMsg }</div>
 	}
 	if notice != "" {
-		<div class="toast ok" role="status">{ notice }</div>
+		<div class="alert alert-ok" role="status">{ notice }</div>
 	}
 }
 
 // RoomCardsFragment renders the room list for an htmx swap, with toasts.
 templ RoomCardsFragment(d CommandData) {
 	if d.Error != "" {
-		<div class="toast bad" role="alert">{ d.Error }</div>
+		<div class="alert alert-bad" role="alert">{ d.Error }</div>
 	}
 	if d.Notice != "" {
-		<div class="toast ok" role="status">{ d.Notice }</div>
+		<div class="alert alert-ok" role="status">{ d.Notice }</div>
 	}
 	@RoomCards(d)
 }
@@ -363,10 +363,10 @@ templ RoomCardsFragment(d CommandData) {
 // RoomPaneFragment renders the room pane for an htmx swap, with toasts.
 templ RoomPaneFragment(d CommandData) {
 	if d.Error != "" {
-		<div class="toast bad" role="alert">{ d.Error }</div>
+		<div class="alert alert-bad" role="alert">{ d.Error }</div>
 	}
 	if d.Notice != "" {
-		<div class="toast ok" role="status">{ d.Notice }</div>
+		<div class="alert alert-ok" role="status">{ d.Notice }</div>
 	}
 	@RoomPane(d)
 }
@@ -374,10 +374,10 @@ templ RoomPaneFragment(d CommandData) {
 // InboxPanelFragment renders the inbox for an htmx swap, with toasts.
 templ InboxPanelFragment(d CommandData) {
 	if d.Error != "" {
-		<div class="toast bad" role="alert">{ d.Error }</div>
+		<div class="alert alert-bad" role="alert">{ d.Error }</div>
 	}
 	if d.Notice != "" {
-		<div class="toast ok" role="status">{ d.Notice }</div>
+		<div class="alert alert-ok" role="status">{ d.Notice }</div>
 	}
 	@InboxPanel(d)
 }
