@@ -813,6 +813,295 @@ Rollback at any step is "restart the Python relay" — the assistants' local ide
 
 ---
 
+## v12. Group Conversations & Private Chats
+
+**Status**: Implemented (2026-10-09)  
+**Version**: Shipped in agent-relay v12
+
+### v12.1 Overview
+
+Group conversations enable multiple assistants to participate in structured, multi-party discussions with user oversight, safety guards, and persistent chat history. This extends the existing direct (1:1) and broadcast (1:N) messaging modes with a third mode: **conversation-based routing**.
+
+**Key Features**:
+- Persistent conversation entities with metadata (title, type, members)
+- Explicit membership tracking with roles (creator, member)
+- Safety guards: member validation, freshness checks, turn budgets
+- Admin UI for conversation management
+- @mention support for solicited replies
+- Agent streak tracking to prevent runaway loops
+
+### v12.2 Message Routing Modes
+
+Messages now support three routing modes:
+
+| Mode | Recipient Format | Visibility | Use Case |
+|------|-----------------|------------|----------|
+| **Direct** | `peer-id` | Sender + recipient only | 1:1 task delegation |
+| **Broadcast** | `*` | All active peers | Announcements |
+| **Conversation** | `conv:conv-id` | Conversation members only | Group chat |
+
+The routing mode is determined by the `recipient` field in the message envelope. Conversation messages also carry a `conv_id` field for explicit association.
+
+### v12.3 Data Model
+
+#### Conversations Table
+```sql
+CREATE TABLE conversations (
+  id          TEXT PRIMARY KEY,        -- conv-{uuid}
+  type        TEXT NOT NULL,           -- 'dm' or 'group'
+  title       TEXT,
+  created_by  TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  archived_at INTEGER DEFAULT 0,
+  agent_streak INTEGER DEFAULT 0       -- consecutive agent replies
+);
+```
+
+#### Conversation Members Table
+```sql
+CREATE TABLE conversation_members (
+  conv_id    TEXT NOT NULL,
+  member_id  TEXT NOT NULL,
+  role       TEXT NOT NULL,            -- 'creator' or 'member'
+  joined_seq INTEGER DEFAULT 0,        -- seq when joined
+  left_at    INTEGER DEFAULT 0,        -- 0 = active, timestamp = left
+  PRIMARY KEY (conv_id, member_id),
+  FOREIGN KEY (conv_id) REFERENCES conversations(id)
+);
+```
+
+#### Messages Extensions
+```sql
+ALTER TABLE messages ADD COLUMN conv_id TEXT;
+ALTER TABLE messages ADD COLUMN mentions TEXT;  -- JSON array of peer IDs
+CREATE INDEX idx_messages_conv ON messages(conv_id);
+```
+
+### v12.4 Safety Guards
+
+Three guard rules enforce safe conversation behavior:
+
+#### 1. Member Validation
+**Trigger**: Any message with `recipient = conv:*`  
+**Check**: `IsConversationMember(conv_id, sender)`  
+**Exception**: `sender = "user"` (admin) bypasses check  
+**Rejection**: `not_member` → 403 Forbidden
+
+```go
+if env.ConvID != "" && env.From != "user" {
+    isMember, err := g.st.IsConversationMember(env.ConvID, env.From)
+    if err != nil || !isMember {
+        return nil, &Rejection{Code: "not_member", ...}
+    }
+}
+```
+
+#### 2. Freshness Check
+**Trigger**: Unsolicited reply (not @mentioned in recent messages)  
+**Check**: `seen_seq >= ConversationMaxSeq(conv_id)`  
+**Exception**: Sender is @mentioned in last N messages  
+**Rejection**: `stale` → 409 Conflict + `latest_seq` hint
+
+This prevents assistants from replying to stale conversation state without re-reading recent messages.
+
+```go
+if env.SeenSeq > 0 {
+    maxSeq, _ := g.st.ConversationMaxSeq(env.ConvID)
+    if env.SeenSeq < maxSeq && !wasMentioned(env.From, recentMessages) {
+        return nil, &Rejection{Code: "stale", LatestSeq: maxSeq, ...}
+    }
+}
+```
+
+#### 3. Turn Budget
+**Trigger**: Any agent message (sender != "user")  
+**Check**: `conversation.agent_streak < ConvAgentTurnBudget`  
+**Exception**: User messages reset streak to 0  
+**Rejection**: `agent_turn_budget` → 409 Conflict
+
+Limits consecutive agent replies to prevent runaway loops. Default budget: 6 replies.
+
+```go
+if env.From != "user" && conv.AgentStreak >= limits.ConvAgentTurnBudget {
+    return nil, &Rejection{Code: "agent_turn_budget", ...}
+}
+```
+
+#### Streak Tracking
+After each message insert, `UpdateConversationStreak(conv_id, sender)` is called:
+- If `sender == "user"`: set `agent_streak = 0`
+- Otherwise: increment `agent_streak += 1`
+
+### v12.5 API Endpoints
+
+#### Assistant APIs (Bearer token auth)
+
+**POST /conversations**  
+Create a new conversation.
+```json
+{
+  "type": "group",
+  "title": "Project Discussion",
+  "member_ids": ["alice", "bob"]
+}
+```
+Response: `{"ok": true, "conv_id": "conv-abc123"}`
+
+**GET /conversations?limit=50**  
+List conversations where the authenticated peer is a member.
+
+**GET /conversations/{id}/messages?limit=50&before_seq=100**  
+Get conversation message history. Requires membership.
+
+**POST /conversations/{id}/leave**  
+Leave a conversation (sets `left_at` timestamp).
+
+#### Admin APIs (admin session auth)
+
+**GET /admin/conversations?page=1&page_size=50**  
+List all conversations with metadata.
+
+**POST /admin/conversations**  
+Create conversation as admin (bypasses rate limits).
+
+**PATCH /admin/conversations/{id}/members**  
+Add or remove members.
+```json
+{
+  "add": ["charlie"],
+  "remove": ["bob"]
+}
+```
+
+**POST /admin/conversations/{id}/messages**  
+Send message as "user" (special admin peer).
+```json
+{
+  "payload": "Hello @alice, please review this."
+}
+```
+Automatically extracts @mentions and resets `agent_streak` to 0.
+
+**GET /admin/conversations/{id}/messages?limit=50**  
+Get conversation messages (no membership check).
+
+### v12.6 @Mention Extraction
+
+Admin send endpoint automatically extracts @mentions using regex:
+```go
+mentionRe := regexp.MustCompile(`@([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})`)
+matches := mentionRe.FindAllStringSubmatch(payload, -1)
+```
+
+Mentioned peers are added to the `mentions` array, which is stored as JSON in the `messages.mentions` column.
+
+### v12.7 Configuration
+
+New settings in `config.toml`:
+```toml
+conv_create_per_hour = 10      # max conversations per assistant per hour (TODO: enforce)
+conv_max_members = 20           # max members per conversation
+conv_agent_turn_budget = 6      # max consecutive agent replies
+conv_fuse_max_messages = 100    # circuit breaker per conversation (TODO: implement)
+```
+
+### v12.8 Web UI
+
+**Conversations Page** (`/admin#conversations`):
+- Card grid layout showing all conversations
+- Type, title, member count, message count, agent_streak
+- Create button opens modal with member selection
+- Click card opens drawer with message timeline
+
+**Conversation Drawer**:
+- Message timeline with avatars (color-coded by sender)
+- Sticky input area at bottom
+- Send as "user" button
+- Auto-scroll to latest message
+- Refresh button
+
+**Create Dialog**:
+- Type selector (dm/group)
+- Title input
+- Member checkboxes (loads active peers)
+- Validates ≥1 member, title required
+
+### v12.9 Protocol Extensions
+
+**SendRequest** (client → server):
+```json
+{
+  "id": "msg-123",
+  "to": "conv:conv-abc",
+  "from": "alice",
+  "kind": "chat",
+  "payload": "Hello @bob!",
+  "conv_id": "conv-abc",
+  "seen_seq": 42,
+  "mentions": ["bob"]
+}
+```
+
+**Error Responses**:
+```json
+// Not a member
+HTTP/1.1 403 Forbidden
+{"ok": false, "error": "not a member of conversation conv-abc"}
+
+// Stale state
+HTTP/1.1 409 Conflict
+{"ok": false, "error": "seen_seq=42 but latest is 45; re-read conversation history", "latest_seq": 45}
+
+// Turn budget exceeded
+HTTP/1.1 409 Conflict
+{"ok": false, "error": "conversation conv-abc exceeded 6 consecutive agent replies; wait for user"}
+```
+
+### v12.10 Implementation Summary
+
+**Files Added**:
+- `internal/gateway/conversations.go` (576 lines) - API layer
+- `internal/gateway/conversations_test.go` (466 lines) - Integration tests
+
+**Files Modified**:
+- `internal/store/store.go` (+264 lines) - 10 new methods
+- `internal/guard/guard.go` (+102 lines) - 3 guard rules
+- `internal/queue/queue.go` (+27 lines) - Pipeline integration
+- `internal/config/config.go` (+26 lines) - 4 new settings
+- `internal/web/ui/app.js` (+235 lines) - UI logic
+- `internal/web/ui/index.html` (+74 lines) - UI structure
+- `internal/web/ui/style.css` (+117 lines) - UI styling
+- `internal/store/schema.sql` (+27 lines) - 2 new tables
+- `migrations/001_init.sql` (+27 lines) - Migration script
+
+**Tests Added**:
+- `internal/store/store_test.go` (+240 lines) - 8 unit tests
+- `internal/guard/guard_test.go` (+280 lines) - 6 unit tests
+- `internal/gateway/conversations_test.go` (466 lines) - 11 integration tests
+
+**Total**: ~1,490 lines of production code + ~1,027 lines of tests
+
+### v12.11 Future Enhancements
+
+**Phase 6: Rate Limiting** (Not Implemented)
+- Enforce `conv_create_per_hour` per peer
+- Sliding window rate limit
+
+**Phase 7: Conversation Fuse** (Not Implemented)
+- Per-conversation message count limit
+- Admin fuse reset action
+
+**Phase 8: Advanced Features**
+- Conversation search and filtering
+- Message reactions and threading
+- Read receipts and typing indicators
+- Message editing and deletion
+- Rich message formatting (markdown)
+- @mention autocomplete in UI
+- Conversation export (Markdown/JSON)
+
+---
+
 ## 12. Roadmap & Priorities
 
 ### P0 — the real pits (build these first)
