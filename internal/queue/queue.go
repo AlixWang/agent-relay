@@ -234,6 +234,10 @@ func (s *Service) Visible(peerID string, since int64, limit int) ([]*store.Messa
 
 // AckByID marks every message with client id visible to `by` as acked.
 // Unknown ids are a no-op success (idempotent, mirrors relay v2).
+//
+// Visibility comes from the store's shared rule (direct, broadcast, room
+// membership) rather than a second copy of it here: a peer must never be able
+// to ack — and thereby silently swallow — a message it could not see.
 func (s *Service) AckByID(messageID, by string, now int64) (bool, error) {
 	cands, err := s.st.GetByIDAnySender(messageID)
 	if err != nil {
@@ -241,17 +245,16 @@ func (s *Service) AckByID(messageID, by string, now int64) (bool, error) {
 	}
 	acked := false
 	for _, m := range cands {
-		visible := m.Recipient == by || (m.Recipient == "*" && m.Sender != by)
-		if !visible {
-			continue
-		}
 		if m.ApprovalState == "pending" {
 			continue
 		}
-		if err := s.st.Ack(m.Seq, by, now); err != nil {
+		ok, err := s.st.AckIfVisible(m.Seq, by, now)
+		if err != nil {
 			return false, err
 		}
-		acked = true
+		if ok {
+			acked = true
+		}
 	}
 	return acked, nil
 }

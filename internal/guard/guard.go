@@ -9,6 +9,7 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/AlixWang/agent-relay/internal/auth"
 	"github.com/AlixWang/agent-relay/internal/store"
 )
 
@@ -43,6 +44,12 @@ type Limits struct {
 	// ProgressThrottleSecs floors spacing between kind=status/progress
 	// messages per sender per thread. <=0 disables (besides global rate).
 	ProgressThrottleSecs int64
+	// Room caps (§6.8): rooms are long-lived conversations, so the fuse is a
+	// rolling window (messages within RoomFuseWindowSecs) instead of the
+	// whole-thread count/age pair, which would permanently fuse every room
+	// after FuseMaxAgeSecs. <=0 disables.
+	RoomFuseMaxMessages int
+	RoomFuseWindowSecs  int64
 }
 
 // Rejection is a machine-readable send refusal.
@@ -94,6 +101,10 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 		return nil, &Rejection{Code: "duplicate_id", Reason: "sender already used id " + env.ID}
 	}
 
+	if err := g.checkRoomTarget(env); err != nil {
+		return nil, err
+	}
+
 	rootID, err := g.resolveRoot(env)
 	if err != nil {
 		return nil, err
@@ -109,21 +120,40 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 	if err != nil {
 		return nil, err
 	}
-	count, err := g.st.CountThreadSince(rootID, wm)
-	if err != nil {
-		return nil, err
-	}
-	if count >= g.limits.FuseMaxMessages {
-		_ = g.st.AppendAudit(env.From, "fuse.tripped",
-			fmt.Sprintf("thread=%s count=%d", rootID, count), now)
-		return nil, &Rejection{Code: "loop_fuse_tripped",
-			Reason: fmt.Sprintf("thread %s exceeded %d messages; ask a human to reset the fuse", rootID, g.limits.FuseMaxMessages)}
-	}
-	if oldest, err := g.st.ThreadOldestTs(rootID); err != nil {
-		return nil, err
-	} else if oldest != 0 && now-oldest > g.limits.FuseMaxAgeSecs {
-		return nil, &Rejection{Code: "loop_fuse_tripped",
-			Reason: fmt.Sprintf("thread %s is older than %d hours", rootID, g.limits.FuseMaxAgeSecs/3600)}
+	if isRoomThread(rootID) {
+		// Rooms are long-lived by design: a rolling window bounds chatter
+		// without ever fusing the room itself. The age rule is skipped on
+		// purpose — applying it would wedge every room after a day.
+		if g.limits.RoomFuseMaxMessages > 0 && g.limits.RoomFuseWindowSecs > 0 {
+			count, err := g.st.CountRoomMessagesSince(rootID, wm, now-g.limits.RoomFuseWindowSecs)
+			if err != nil {
+				return nil, err
+			}
+			if count >= g.limits.RoomFuseMaxMessages {
+				_ = g.st.AppendAudit(env.From, "room.fuse_tripped",
+					fmt.Sprintf("room=%s count=%d window=%ds", rootID, count, g.limits.RoomFuseWindowSecs), now)
+				return nil, &Rejection{Code: "loop_fuse_tripped",
+					Reason: fmt.Sprintf("room %s exceeded %d messages in %d minutes; wait before posting again",
+						rootID, g.limits.RoomFuseMaxMessages, g.limits.RoomFuseWindowSecs/60)}
+			}
+		}
+	} else {
+		count, err := g.st.CountThreadSince(rootID, wm)
+		if err != nil {
+			return nil, err
+		}
+		if count >= g.limits.FuseMaxMessages {
+			_ = g.st.AppendAudit(env.From, "fuse.tripped",
+				fmt.Sprintf("thread=%s count=%d", rootID, count), now)
+			return nil, &Rejection{Code: "loop_fuse_tripped",
+				Reason: fmt.Sprintf("thread %s exceeded %d messages; ask a human to reset the fuse", rootID, g.limits.FuseMaxMessages)}
+		}
+		if oldest, err := g.st.ThreadOldestTs(rootID); err != nil {
+			return nil, err
+		} else if oldest != 0 && now-oldest > g.limits.FuseMaxAgeSecs {
+			return nil, &Rejection{Code: "loop_fuse_tripped",
+				Reason: fmt.Sprintf("thread %s is older than %d hours", rootID, g.limits.FuseMaxAgeSecs/3600)}
+		}
 	}
 
 	// Handshake kinds skip the loop heuristic: allow/deny/started are short
@@ -158,6 +188,22 @@ func (g *Guard) RecordHit(sender string, now int64) {
 }
 
 func (g *Guard) resolveRoot(env *Envelope) (string, error) {
+	// Both console-routed targets have a canonical thread key, independent of
+	// in_reply_to: a room is one long conversation, and every message between
+	// a peer and the operator belongs to their single DM thread (§6.8). This
+	// keeps the console timeline stable and the fuse per room/DM rather than
+	// forking a new thread per message.
+	if isRoomThread(env.To) {
+		return env.To, nil
+	}
+	if env.To == auth.OperatorID {
+		return "op/" + env.From, nil
+	}
+	if env.From == auth.OperatorID && !isRoomThread(env.To) {
+		// The operator's side of a DM shares the peer's thread, so the console
+		// timeline is one conversation per peer instead of a thread per reply.
+		return "op/" + env.To, nil
+	}
 	if env.InReplyTo != "" {
 		parents, err := g.st.GetByIDAnySender(env.InReplyTo)
 		if err != nil {
@@ -353,6 +399,13 @@ func (g *Guard) checkHandshake(env *Envelope, rootID string, now int64) error {
 	if task == nil || task.Kind != "task" {
 		return &Rejection{Code: "bad_permission_ref", Reason: "in_reply_to does not reference a task"}
 	}
+	// Handshakes are a 1:1 contract (§6.5): a task addressed to a room has N
+	// possible respondents, so the direction rules ("from the task recipient
+	// back to its sender") cannot apply. Ask the operator in a DM instead.
+	if isRoomThread(task.Recipient) {
+		return &Rejection{Code: "bad_permission_ref",
+			Reason: "tasks addressed to a room have no 1:1 handshake; DM the operator (to=" + auth.OperatorID + ") instead"}
+	}
 	if task.RootID != "" && rootID != task.RootID {
 		return &Rejection{Code: "bad_permission_ref", Reason: "handshake is in a different thread than its task"}
 	}
@@ -430,6 +483,44 @@ func (g *Guard) checkHandshake(env *Envelope, rootID string, now int64) error {
 			return &Rejection{Code: "permission_expired", Reason: "request expired; the recipient must treat it as denied"}
 		}
 		return nil
+	}
+	return nil
+}
+
+// isRoomThread reports whether a thread key or target names a room.
+func isRoomThread(s string) bool { return strings.HasPrefix(s, "grp_") }
+
+// checkRoomTarget validates a send addressed to a room (§6.8): the room must
+// exist and be open, and the sender must be a member. The operator (console)
+// may post into any room. A non-member gets 403 (identity misuse), an unknown
+// or archived room 400 — never a silent black hole, which is what a typo in a
+// room alias would otherwise produce.
+func (g *Guard) checkRoomTarget(env *Envelope) error {
+	if !isRoomThread(env.To) {
+		return nil
+	}
+	room, err := g.st.GetRoom(env.To)
+	if err != nil {
+		return err
+	}
+	if room == nil {
+		return &Rejection{Code: "bad_message", Reason: "unknown room " + env.To}
+	}
+	if room.ArchivedAt != 0 {
+		return &Rejection{Code: "bad_message", Reason: "room " + env.To + " is archived"}
+	}
+	// The relay's own identities speak in every room: the console operator
+	// (the human) and system notices (roster changes).
+	if env.From == auth.OperatorID || env.From == auth.SystemID {
+		return nil
+	}
+	member, err := g.st.IsRoomMember(env.To, env.From)
+	if err != nil {
+		return err
+	}
+	if !member {
+		return &Rejection{Code: "permission_not_authorized",
+			Reason: fmt.Sprintf("sender %s is not a member of room %s", env.From, env.To)}
 	}
 	return nil
 }

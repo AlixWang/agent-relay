@@ -37,7 +37,10 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { st.Close() })
 	au := auth.New(st, 3600)
-	g := guard.New(st, guard.Limits{FuseMaxMessages: 50, FuseMaxAgeSecs: 86400, RatePerMinute: 60})
+	// Prod-like limits through the same mapping main uses (§6.1, §6.8): a
+	// fixture that hand-builds Limits can pass while production knobs are
+	// silently unwired — exactly how the v0.14.0 room caps ended up dead.
+	g := guard.New(st, guard.LimitsFromConfig(cfg))
 	q := queue.New(st, g)
 	p := presence.New(st, 300, "")
 	v := verify.New(st, 600)

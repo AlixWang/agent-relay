@@ -135,6 +135,18 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /admin/stats", s.requireAdmin(s.handleAdminStats))
 	mux.HandleFunc("GET /admin/config", s.requireAdmin(s.handleAdminConfig))
 
+	// Console command center (§9.5): operator sends, rooms, inbox. The
+	// operator speaks on the normal message path as the reserved "operator"
+	// identity, so there are no new agent-facing endpoints (§2.1).
+	mux.HandleFunc("POST /admin/messages", s.requireAdmin(s.handleAdminSend))
+	mux.HandleFunc("GET /admin/rooms", s.requireAdmin(s.handleAdminListRooms))
+	mux.HandleFunc("POST /admin/rooms", s.requireAdmin(s.handleAdminCreateRoom))
+	mux.HandleFunc("PATCH /admin/rooms/{id}", s.requireAdmin(s.handleAdminPatchRoom))
+	mux.HandleFunc("POST /admin/rooms/{id}/members", s.requireAdmin(s.handleAdminAddRoomMember))
+	mux.HandleFunc("DELETE /admin/rooms/{id}/members/{peer}", s.requireAdmin(s.handleAdminRemoveRoomMember))
+	mux.HandleFunc("GET /admin/inbox", s.requireAdmin(s.handleAdminInbox))
+	mux.HandleFunc("POST /admin/inbox/read", s.requireAdmin(s.handleAdminInboxRead))
+
 	// Web self-update (DESIGN §10.4): releases-only, verified, systemd-only.
 	mux.HandleFunc("GET /admin/update/status", s.requireAdmin(s.handleAdminUpdateStatus))
 	mux.HandleFunc("POST /admin/update/check", s.requireAdmin(s.handleAdminUpdateCheck))
@@ -1144,18 +1156,46 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "thread failed")
 		return
 	}
+	// Room threads carry per-member ack detail so the console can show who has
+	// picked a message up ("已读 2/3") without N queries.
+	var acksBySeq map[int64][]string
+	roomMembers := []string{}
+	if strings.HasPrefix(thread, "grp_") {
+		seqs := make([]int64, 0, len(msgs))
+		for _, m := range msgs {
+			seqs = append(seqs, m.Seq)
+		}
+		acksBySeq, _ = s.st.AcksForSeqs(seqs)
+		if rows, err := s.st.ListRoomMembers(thread); err == nil {
+			for _, rm := range rows {
+				roomMembers = append(roomMembers, rm.PeerID)
+			}
+		}
+	}
 	items := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		acked, _ := s.st.AckedCount(m.Seq)
-		items = append(items, map[string]any{
+		item := map[string]any{
 			"seq": m.Seq, "id": m.ID, "sender": m.Sender, "recipient": m.Recipient,
 			"kind": m.Kind, "in_reply_to": m.InReplyTo, "payload": m.Payload,
 			"approval_state": m.ApprovalState, "acked_count": acked, "created_at": m.CreatedAt,
 			"status": m.Status, "op": m.Op, "target": m.Target,
 			"detail": m.Detail, "decision": m.Decision, "expires_at": m.ExpiresAt,
-		})
+		}
+		if acksBySeq != nil {
+			who := acksBySeq[m.Seq]
+			if who == nil {
+				who = []string{}
+			}
+			item["acked_by"] = who
+		}
+		items = append(items, item)
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "items": items})
+	body := map[string]any{"ok": true, "items": items}
+	if roomMembers != nil {
+		body["room"] = map[string]any{"id": thread, "members": roomMembers}
+	}
+	writeJSON(w, 200, body)
 }
 
 // handleAdminExport dumps one thread as Markdown or JSONL (DESIGN §9.3).
@@ -1411,6 +1451,10 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		"prompt_version": prompts.PromptVersion,
 		"client_version": web.BinaryVersion(),
 		"receiver_rev":   ReceiverRev(),
+	}
+	// Console nav badge (§9.5): replies waiting for the operator.
+	if unread, err := s.st.CountInboxSince(s.operatorReadSeq()); err == nil {
+		body["inbox_unread"] = unread
 	}
 	if c, err := s.st.AdminCounts(); err == nil {
 		body["threads_total"] = c.Threads

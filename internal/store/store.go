@@ -198,6 +198,27 @@ type Store interface {
 	FuseWatermark(rootID string) (int64, error)
 	SetFuseWatermark(rootID string, seq int64) error
 	ClearFuseWatermark(rootID string) error
+	// Delivery visibility (§4.4): one rule shared by VisibleTo, acking and any
+	// future reader — see visibilityExpr.
+	MessageVisibleTo(seq int64, peerID string) (bool, error)
+	AckIfVisible(messageSeq int64, peerID string, ts int64) (bool, error)
+	AcksForSeqs(seqs []int64) (map[int64][]string, error)
+	// rooms (§6.8): group chat as a routing alias with a member list.
+	CreateRoom(r *Room) error
+	GetRoom(id string) (*Room, error)
+	ListRoomsWithStats(includeArchived bool) ([]*RoomStats, error)
+	UpdateRoom(id, name, note string) error
+	SetRoomArchived(id string, ts int64) error
+	AddRoomMember(roomID, peerID string, startSeq, ts int64) error
+	RemoveRoomMember(roomID, peerID string) error
+	ListRoomMembers(roomID string) ([]*RoomMember, error)
+	IsRoomMember(roomID, peerID string) (bool, error)
+	CountRoomMessagesSince(roomID string, sinceSeq, sinceTs int64) (int, error)
+	// settings + operator inbox (§9.5)
+	GetSetting(key string) (string, error)
+	SetSetting(key, value string, ts int64) error
+	InboxMessages(limit, offset int) ([]*Message, int, error)
+	CountInboxSince(seq int64) (int, error)
 	// verify (§8.4)
 	SetSmoke(peerID, smokeID string, ts int64) error
 	GetSmoke(peerID string) (smokeID string, ts int64, err error)
@@ -685,22 +706,37 @@ func (s *sqliteStore) GetByIDAnySender(id string) ([]*Message, error) {
 	return out, rows.Err()
 }
 
+// visibilityExpr is the single source of truth for "which messages can a peer
+// see" (DESIGN §4.4): direct, broadcast, or a room the peer belongs to. It
+// takes four peer-id parameters in order (direct, broadcast sender, room
+// sender, room member). VisibleTo and MessageVisibleTo share it verbatim so two
+// implementations of the delivery rule cannot drift; acking (AckIfVisible)
+// reuses MessageVisibleTo for the same reason.
+const visibilityExpr = `((m.recipient = ?)
+		  OR (m.recipient = '*' AND m.sender != ?)
+		  OR (m.recipient LIKE 'grp_%' AND m.sender != ? AND EXISTS (
+		       SELECT 1 FROM room_members rm
+		       WHERE rm.room_id = m.recipient AND rm.peer_id = ? AND rm.start_seq < m.seq)))`
+
+// visibleSelect is the column list every message read shares.
+const visibleSelect = `SELECT m.seq,m.id,m.sender,m.recipient,m.kind,m.in_reply_to,m.root_id,
+		m.requires_approval,m.approval_state,m.payload,m.created_at,
+		m.status,m.op,m.target,m.detail,m.decision,m.expires_at
+		FROM messages m`
+
 // VisibleTo implements the per-identity delivery view (DESIGN §4.4):
-// direct (recipient=peer) + broadcast (recipient='*' AND sender!=peer),
-// seq > since, not yet acked by peer, not held in pending approval.
+// direct + broadcast + room membership, seq > since, not yet acked by the
+// peer, not held in pending approval.
 func (s *sqliteStore) VisibleTo(peerID string, since int64, limit int) ([]*Message, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	rows, err := s.db.Query(`SELECT m.seq,m.id,m.sender,m.recipient,m.kind,m.in_reply_to,m.root_id,
-		m.requires_approval,m.approval_state,m.payload,m.created_at,
-		m.status,m.op,m.target,m.detail,m.decision,m.expires_at
-		FROM messages m
+	rows, err := s.db.Query(visibleSelect+`
 		WHERE m.seq > ?
 		  AND m.approval_state NOT IN ('pending','rejected')
 		  AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.message_seq = m.seq AND a.peer_id = ?)
-		  AND ((m.recipient = ?) OR (m.recipient = '*' AND m.sender != ?))
-		ORDER BY m.seq ASC LIMIT ?`, since, peerID, peerID, peerID, limit)
+		  AND `+visibilityExpr+`
+		ORDER BY m.seq ASC LIMIT ?`, since, peerID, peerID, peerID, peerID, peerID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -714,6 +750,31 @@ func (s *sqliteStore) VisibleTo(peerID string, since int64, limit int) ([]*Messa
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// MessageVisibleTo reports whether one message is visible to peerID under the
+// same rule VisibleTo uses. Acking goes through this, so a peer can never ack
+// (and thereby silently swallow) a message it was not entitled to see.
+func (s *sqliteStore) MessageVisibleTo(seq int64, peerID string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages m
+		WHERE m.seq = ?
+		  AND m.approval_state NOT IN ('pending','rejected')
+		  AND `+visibilityExpr, seq, peerID, peerID, peerID, peerID).Scan(&n)
+	return n > 0, err
+}
+
+// AckIfVisible acks one message when it is visible to that peer, reporting
+// whether the ack was applied.
+func (s *sqliteStore) AckIfVisible(messageSeq int64, peerID string, ts int64) (bool, error) {
+	ok, err := s.MessageVisibleTo(messageSeq, peerID)
+	if err != nil || !ok {
+		return false, err
+	}
+	if err := s.Ack(messageSeq, peerID, ts); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *sqliteStore) ThreadMessages(rootID string, limit int) ([]*Message, error) {

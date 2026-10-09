@@ -80,13 +80,7 @@ func main() {
 		permTTLMax = queue.MaxPermissionTTL
 	}
 	queue.SetDefaultPermissionTTL(permTTLMax)
-	g := guard.New(st, guard.Limits{
-		FuseMaxMessages:      cfg.FuseMaxMessages,
-		FuseMaxAgeSecs:       int64(cfg.FuseMaxAgeSecs),
-		RatePerMinute:        cfg.RatePerMinute,
-		MaxOpenPermissions:   cfg.MaxOpenPermissions,
-		ProgressThrottleSecs: cfg.ProgressThrottleSecs,
-	})
+	g := guard.New(st, guard.LimitsFromConfig(cfg))
 	q := queue.New(st, g)
 	p := presence.New(st, int64(cfg.OnlineTimeoutSecs), cfg.OfflineWebhookURL)
 	v := verify.New(st, int64(cfg.VerifyTimeoutSecs))

@@ -66,6 +66,14 @@ type Config struct {
 	// The server nudges online peers to refresh via heartbeat when the
 	// profile is older than this. 0 disables the nudge.
 	ProfileRefreshDays int `toml:"profile_refresh_days"`
+
+	// Rooms (§6.8): group chat rides the normal message path — a room is a
+	// routing alias with a member list, not a peer. These bound the blast
+	// radius: member cap, and a time-windowed message cap per room thread
+	// (rooms are long-lived, so the whole-thread fuse would wedge them).
+	MaxRoomMembers      int `toml:"max_room_members"`
+	RoomFuseMaxMessages int `toml:"room_fuse_max_messages"`
+	RoomFuseWindowSecs  int `toml:"room_fuse_window_secs"`
 }
 
 // Default returns the documented defaults (DESIGN §6.1, §10.2).
@@ -92,6 +100,9 @@ func Default() *Config {
 		StreamKeepaliveSecs:  20,
 		StreamMaxPerPeer:     3,
 		ProfileRefreshDays:   7,
+		MaxRoomMembers:       16,
+		RoomFuseMaxMessages:  60,
+		RoomFuseWindowSecs:   3600,
 	}
 }
 
@@ -123,6 +134,8 @@ func Load(path string) (*Config, error) {
 		"offline_webhook_url": true, "max_body_bytes": true,
 		"stream_keepalive_secs": true, "stream_max_per_peer": true,
 		"profile_refresh_days": true,
+		"max_room_members":     true, "room_fuse_max_messages": true,
+		"room_fuse_window_secs": true,
 	}
 	for k := range raw {
 		if !known[k] {
@@ -183,6 +196,15 @@ func (c *Config) Validate() error {
 	}
 	if c.ProfileRefreshDays < 0 {
 		return fmt.Errorf("profile_refresh_days must be >= 0")
+	}
+	if c.MaxRoomMembers < 2 || c.MaxRoomMembers > 64 {
+		return fmt.Errorf("max_room_members must be 2-64")
+	}
+	if c.RoomFuseMaxMessages < 2 {
+		return fmt.Errorf("room_fuse_max_messages must be >= 2")
+	}
+	if c.RoomFuseWindowSecs < 60 {
+		return fmt.Errorf("room_fuse_window_secs must be >= 60")
 	}
 	return nil
 }

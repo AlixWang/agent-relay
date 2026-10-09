@@ -129,6 +129,30 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     decision_id   TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_perm_thread ON permission_requests(thread, status);
+-- Rooms (§6.8): a room is a routing alias with a member list, not a peer: it
+-- never authenticates and gets no token. One room message is stored once
+-- (recipient = room id); membership decides delivery.
+CREATE TABLE IF NOT EXISTS rooms (
+    id            TEXT PRIMARY KEY,
+    name          TEXT DEFAULT '',
+    note          TEXT DEFAULT '',
+    created_at    INTEGER NOT NULL,
+    archived_at   INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS room_members (
+    room_id       TEXT NOT NULL,
+    peer_id       TEXT NOT NULL,
+    added_at      INTEGER NOT NULL,
+    start_seq     INTEGER DEFAULT 0,
+    PRIMARY KEY (room_id, peer_id)
+);
+-- Console key/value state (§9.5): currently the operator inbox read watermark.
+CREATE TABLE IF NOT EXISTS settings (
+    key           TEXT PRIMARY KEY,
+    value         TEXT DEFAULT '',
+    updated_at    INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_room_members_peer ON room_members(peer_id, room_id);
 CREATE INDEX IF NOT EXISTS idx_messages_recipient_seq ON messages(recipient, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_root ON messages(root_id, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender, id);

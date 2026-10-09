@@ -112,6 +112,12 @@ func Render(agentType string, d Data) (string, error) {
 // re-reading the full text. Keep entries short: section numbers + actions.
 const PromptVersion = 11
 
+// RoomAwarePromptVersion is the revision that first documents rooms and the
+// operator identity (§7.8 muse/claw/generic, §6.7 hermes). The console uses it
+// to warn before posting a room task: a member below this revision would treat
+// a group message as a private instruction.
+const RoomAwarePromptVersion = 12
+
 // ChangeEntry is one revision's upgrade guide for assistants.
 type ChangeEntry struct {
 	Version int    `json:"version"`
