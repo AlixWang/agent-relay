@@ -341,3 +341,314 @@ func TestHandshakeSkipsLoopCheck(t *testing.T) {
 		t.Fatalf("short status hit loop guard: %v", err)
 	}
 }
+
+// ---- Conversation Guard Tests (§v12) ----
+
+func setupConversation(t *testing.T, st store.Store, convID string, members ...string) {
+	t.Helper()
+	for _, m := range members {
+		if err := st.CreatePeer(&store.Peer{ID: m, Status: "active", CreatedAt: 1000}); err != nil {
+			// Ignore duplicate errors
+		}
+	}
+	conv := &store.Conversation{
+		ID: convID, Type: "group", Title: "Test", CreatedBy: members[0], CreatedAt: 1000,
+	}
+	if err := st.CreateConversation(conv); err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	for i, m := range members {
+		role := "member"
+		if i == 0 {
+			role = "creator"
+		}
+		if err := st.AddConversationMember(convID, m, role, 0); err != nil {
+			t.Fatalf("add member %s: %v", m, err)
+		}
+	}
+}
+
+func TestConversationMemberValidation(t *testing.T) {
+	st := openTestStore(t)
+	setupConversation(t, st, "conv-1", "alice", "bob")
+
+	lim := testLimits()
+	lim.ConvAgentTurnBudget = 6
+	g := New(st, lim)
+	now := time.Now().Unix()
+
+	// Alice (member) can send
+	env := &Envelope{
+		ID: "m1", To: "conv:conv-1", From: "alice", Kind: "chat",
+		Payload: "hello", ConvID: "conv-1",
+	}
+	if _, err := g.Check(env, now); err != nil {
+		t.Fatalf("alice should be allowed: %v", err)
+	}
+
+	// Charlie (non-member) cannot send
+	st.CreatePeer(&store.Peer{ID: "charlie", Status: "active", CreatedAt: 1000})
+	env = &Envelope{
+		ID: "m2", To: "conv:conv-1", From: "charlie", Kind: "chat",
+		Payload: "hello", ConvID: "conv-1",
+	}
+	if _, err := g.Check(env, now); err == nil {
+		t.Fatal("charlie should be rejected")
+	} else if r, ok := err.(*Rejection); !ok || r.Code != "not_member" {
+		t.Fatalf("expected not_member, got: %v", err)
+	}
+
+	// User (admin) can always send
+	env = &Envelope{
+		ID: "m3", To: "conv:conv-1", From: "user", Kind: "chat",
+		Payload: "admin message", ConvID: "conv-1",
+	}
+	if _, err := g.Check(env, now); err != nil {
+		t.Fatalf("user should bypass member check: %v", err)
+	}
+}
+
+func TestConversationFreshnessCheck(t *testing.T) {
+	st := openTestStore(t)
+	setupConversation(t, st, "conv-1", "alice", "bob")
+
+	lim := testLimits()
+	lim.ConvAgentTurnBudget = 6
+	g := New(st, lim)
+	now := time.Now().Unix()
+
+	// Insert first message
+	env := &Envelope{
+		ID: "m1", To: "conv:conv-1", From: "alice", Kind: "chat",
+		Payload: "hello", ConvID: "conv-1",
+	}
+	v, _ := g.Check(env, now)
+	st.InsertMessage(&store.Message{
+		ID: "m1", Sender: "alice", Recipient: "conv:conv-1", Kind: "chat",
+		RootID: v.RootID, Payload: "hello", CreatedAt: now, ConvID: "conv-1",
+		ApprovalState: "n/a",
+	})
+
+	// Bob sends unsolicited reply without seen_seq
+	env = &Envelope{
+		ID: "m2", To: "conv:conv-1", From: "bob", Kind: "chat",
+		Payload: "hi", ConvID: "conv-1", SeenSeq: 0,
+	}
+	if _, err := g.Check(env, now+1); err == nil {
+		t.Fatal("should require seen_seq for unsolicited reply")
+	} else if r, ok := err.(*Rejection); !ok || r.Code != "stale" {
+		t.Fatalf("expected stale, got: %v", err)
+	} else if r.LatestSeq != 1 {
+		t.Fatalf("expected latest_seq=1, got %d", r.LatestSeq)
+	}
+
+	// Bob sends with correct seen_seq
+	env.SeenSeq = 1
+	env.ID = "m3"
+	if _, err := g.Check(env, now+2); err != nil {
+		t.Fatalf("should accept with correct seen_seq: %v", err)
+	}
+
+	// Insert second message
+	st.InsertMessage(&store.Message{
+		ID: "m3", Sender: "bob", Recipient: "conv:conv-1", Kind: "chat",
+		RootID: "conv-1", Payload: "hi", CreatedAt: now + 2, ConvID: "conv-1",
+		ApprovalState: "n/a",
+	})
+
+	// Bob sends with stale seen_seq
+	env = &Envelope{
+		ID: "m4", To: "conv:conv-1", From: "bob", Kind: "chat",
+		Payload: "another", ConvID: "conv-1", SeenSeq: 1, // stale
+	}
+	if _, err := g.Check(env, now+3); err == nil {
+		t.Fatal("should reject stale seen_seq")
+	} else if r, ok := err.(*Rejection); !ok || r.Code != "stale" {
+		t.Fatalf("expected stale, got: %v", err)
+	} else if r.LatestSeq != 2 {
+		t.Fatalf("expected latest_seq=2, got %d", r.LatestSeq)
+	}
+}
+
+func TestConversationMentionBypassesFreshnessCheck(t *testing.T) {
+	st := openTestStore(t)
+	setupConversation(t, st, "conv-1", "alice", "bob")
+
+	lim := testLimits()
+	lim.ConvAgentTurnBudget = 6
+	g := New(st, lim)
+	now := time.Now().Unix()
+
+	// Insert message from alice
+	env := &Envelope{
+		ID: "m1", To: "conv:conv-1", From: "alice", Kind: "chat",
+		Payload: "hello @bob", ConvID: "conv-1", Mentions: []string{"bob"},
+	}
+	v, _ := g.Check(env, now)
+	st.InsertMessage(&store.Message{
+		ID: "m1", Sender: "alice", Recipient: "conv:conv-1", Kind: "chat",
+		RootID: v.RootID, Payload: "hello @bob", CreatedAt: now, ConvID: "conv-1",
+		Mentions: `["bob"]`, ApprovalState: "n/a",
+	})
+
+	// Bob replies without seen_seq but is @mentioned - should be allowed
+	env = &Envelope{
+		ID: "m2", To: "conv:conv-1", From: "bob", Kind: "chat",
+		Payload: "yes?", ConvID: "conv-1", SeenSeq: 0,
+	}
+	if _, err := g.Check(env, now+1); err != nil {
+		t.Fatalf("@mention should bypass freshness check: %v", err)
+	}
+}
+
+func TestConversationTurnBudget(t *testing.T) {
+	st := openTestStore(t)
+	setupConversation(t, st, "conv-1", "user", "alice", "bob")
+
+	lim := testLimits()
+	lim.ConvAgentTurnBudget = 3 // Allow max 3 consecutive agent replies
+	g := New(st, lim)
+	now := time.Now().Unix()
+
+	// User sends initial message
+	env := &Envelope{
+		ID: "m1", To: "conv:conv-1", From: "user", Kind: "chat",
+		Payload: "hello agents", ConvID: "conv-1",
+	}
+	v, _ := g.Check(env, now)
+	st.InsertMessage(&store.Message{
+		ID: "m1", Sender: "user", Recipient: "conv:conv-1", Kind: "chat",
+		RootID: v.RootID, Payload: "hello agents", CreatedAt: now, ConvID: "conv-1",
+		ApprovalState: "n/a",
+	})
+	g.UpdateConversationStreak("conv-1", "user") // Reset to 0
+
+	// Alice sends reply #1
+	env = &Envelope{
+		ID: "m2", To: "conv:conv-1", From: "alice", Kind: "chat",
+		Payload: "hi", ConvID: "conv-1", SeenSeq: 1,
+	}
+	if _, err := g.Check(env, now+1); err != nil {
+		t.Fatalf("first agent reply should be allowed: %v", err)
+	}
+	st.InsertMessage(&store.Message{
+		ID: "m2", Sender: "alice", Recipient: "conv:conv-1", Kind: "chat",
+		RootID: "conv-1", Payload: "hi", CreatedAt: now + 1, ConvID: "conv-1",
+		ApprovalState: "n/a",
+	})
+	g.UpdateConversationStreak("conv-1", "alice") // Increment to 1
+
+	// Bob sends reply #2
+	env = &Envelope{
+		ID: "m3", To: "conv:conv-1", From: "bob", Kind: "chat",
+		Payload: "hello", ConvID: "conv-1", SeenSeq: 2,
+	}
+	if _, err := g.Check(env, now+2); err != nil {
+		t.Fatalf("second agent reply should be allowed: %v", err)
+	}
+	st.InsertMessage(&store.Message{
+		ID: "m3", Sender: "bob", Recipient: "conv:conv-1", Kind: "chat",
+		RootID: "conv-1", Payload: "hello", CreatedAt: now + 2, ConvID: "conv-1",
+		ApprovalState: "n/a",
+	})
+	g.UpdateConversationStreak("conv-1", "bob") // Increment to 2
+
+	// Alice sends reply #3
+	env = &Envelope{
+		ID: "m4", To: "conv:conv-1", From: "alice", Kind: "chat",
+		Payload: "again", ConvID: "conv-1", SeenSeq: 3,
+	}
+	if _, err := g.Check(env, now+3); err != nil {
+		t.Fatalf("third agent reply should be allowed: %v", err)
+	}
+	st.InsertMessage(&store.Message{
+		ID: "m4", Sender: "alice", Recipient: "conv:conv-1", Kind: "chat",
+		RootID: "conv-1", Payload: "again", CreatedAt: now + 3, ConvID: "conv-1",
+		ApprovalState: "n/a",
+	})
+	g.UpdateConversationStreak("conv-1", "alice") // Increment to 3
+
+	// Bob tries reply #4 - should be rejected (budget exceeded)
+	env = &Envelope{
+		ID: "m5", To: "conv:conv-1", From: "bob", Kind: "chat",
+		Payload: "too many", ConvID: "conv-1", SeenSeq: 4,
+	}
+	if _, err := g.Check(env, now+4); err == nil {
+		t.Fatal("fourth agent reply should be rejected")
+	} else if r, ok := err.(*Rejection); !ok || r.Code != "agent_turn_budget" {
+		t.Fatalf("expected agent_turn_budget, got: %v", err)
+	}
+
+	// User sends message - resets streak
+	env = &Envelope{
+		ID: "m6", To: "conv:conv-1", From: "user", Kind: "chat",
+		Payload: "reset", ConvID: "conv-1",
+	}
+	if _, err := g.Check(env, now+5); err != nil {
+		t.Fatalf("user message should always be allowed: %v", err)
+	}
+	st.InsertMessage(&store.Message{
+		ID: "m6", Sender: "user", Recipient: "conv:conv-1", Kind: "chat",
+		RootID: "conv-1", Payload: "reset", CreatedAt: now + 5, ConvID: "conv-1",
+		ApprovalState: "n/a",
+	})
+	g.UpdateConversationStreak("conv-1", "user") // Reset to 0
+
+	// Alice can send again after reset
+	env = &Envelope{
+		ID: "m7", To: "conv:conv-1", From: "alice", Kind: "chat",
+		Payload: "after reset", ConvID: "conv-1", SeenSeq: 6,
+	}
+	if _, err := g.Check(env, now+6); err != nil {
+		t.Fatalf("agent reply after reset should be allowed: %v", err)
+	}
+}
+
+func TestUpdateConversationStreak(t *testing.T) {
+	st := openTestStore(t)
+	conv := &store.Conversation{
+		ID: "conv-1", Type: "group", Title: "Test", CreatedBy: "alice",
+		CreatedAt: 1000, AgentStreak: 0,
+	}
+	st.CreateConversation(conv)
+
+	lim := testLimits()
+	g := New(st, lim)
+
+	// User message resets to 0
+	if err := g.UpdateConversationStreak("conv-1", "user"); err != nil {
+		t.Fatalf("UpdateConversationStreak: %v", err)
+	}
+	conv, _ = st.GetConversation("conv-1")
+	if conv.AgentStreak != 0 {
+		t.Fatalf("user should reset streak to 0, got %d", conv.AgentStreak)
+	}
+
+	// Agent message increments
+	if err := g.UpdateConversationStreak("conv-1", "alice"); err != nil {
+		t.Fatalf("UpdateConversationStreak: %v", err)
+	}
+	conv, _ = st.GetConversation("conv-1")
+	if conv.AgentStreak != 1 {
+		t.Fatalf("agent should increment streak to 1, got %d", conv.AgentStreak)
+	}
+
+	// Another agent message increments again
+	if err := g.UpdateConversationStreak("conv-1", "bob"); err != nil {
+		t.Fatalf("UpdateConversationStreak: %v", err)
+	}
+	conv, _ = st.GetConversation("conv-1")
+	if conv.AgentStreak != 2 {
+		t.Fatalf("agent should increment streak to 2, got %d", conv.AgentStreak)
+	}
+
+	// User message resets again
+	if err := g.UpdateConversationStreak("conv-1", "user"); err != nil {
+		t.Fatalf("UpdateConversationStreak: %v", err)
+	}
+	conv, _ = st.GetConversation("conv-1")
+	if conv.AgentStreak != 0 {
+		t.Fatalf("user should reset streak to 0, got %d", conv.AgentStreak)
+	}
+}
+
