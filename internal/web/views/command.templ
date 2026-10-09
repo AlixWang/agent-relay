@@ -1,0 +1,431 @@
+package views
+
+// Console command center (§9.5): operator sends, rooms, inbox. View models are
+// built by the gateway (internal/gateway/command.go) — templates stay dumb.
+
+import (
+	"fmt"
+	"time"
+)
+
+// PeerOption is one selectable assistant.
+type PeerOption struct {
+	ID            string
+	Status        string
+	Online        bool
+	PromptVersion int
+}
+
+// InboxItem is one reply addressed to the operator.
+type InboxItem struct {
+	Seq     int64
+	From    string
+	Kind    string
+	Payload string
+	At      int64
+	Unread  bool
+	Thread  string
+}
+
+// RoomCard is one room in the room list.
+type RoomCard struct {
+	ID          string
+	Name        string
+	Members     []string
+	Count       int
+	LastSender  string
+	LastPreview string
+	LastAt      int64
+	NotReady    []string
+}
+
+// RoomMessage is one message inside a room pane.
+type RoomMessage struct {
+	Seq     int64
+	From    string
+	Kind    string
+	Payload string
+	At      int64
+	AckedBy []string
+}
+
+// RoomViewData is the selected room: members, timeline and composer context.
+type RoomViewData struct {
+	ID          string
+	Name        string
+	Members     []PeerOption
+	NonMembers  []PeerOption
+	Messages    []RoomMessage
+	NotReady    []string
+	MaxMembers  int
+	FuseWindow  int
+	FuseMax     int
+	JoinedNote  bool
+}
+
+// CommandData is the whole 指挥台 page.
+type CommandData struct {
+	Inbox       []InboxItem
+	Unread      int64
+	ReadSeq     int64
+	Rooms       []RoomCard
+	Peers       []PeerOption
+	Room        *RoomViewData
+	MaxMembers  int
+	FuseWindow  int
+	FuseMax     int
+	Error       string
+	Notice      string
+}
+
+// CommandPage renders the full page.
+templ CommandPage(d CommandData) {
+	@Layout("指挥台", CommandBody(d))
+}
+
+// CommandBody is the page skeleton: inbox + composer on top, rooms below.
+templ CommandBody(d CommandData) {
+	<section id="page-command" class="page">
+		if d.Error != "" {
+			<div class="toast bad" role="alert">{ d.Error }</div>
+		}
+		if d.Notice != "" {
+			<div class="toast ok" role="status">{ d.Notice }</div>
+		}
+		<div class="grid-2">
+			<div class="card">
+				<div id="inbox-panel">
+					@InboxPanel(d)
+				</div>
+			</div>
+			<div class="card">
+				@ComposeCard(d)
+			</div>
+		</div>
+		<div class="panel">
+			@RoomsPanel(d)
+		</div>
+	</section>
+}
+
+// InboxPanel lists replies addressed to the operator.
+templ InboxPanel(d CommandData) {
+	<div class="card-head">
+		<div>
+			<h3>收件箱</h3>
+			<p class="muted xs">助手发给 <code>operator</code> 的汇报都在这里。</p>
+		</div>
+		<div class="bar-right">
+			if d.Unread > 0 {
+				<span class="badge warn">{ fmt.Sprintf("%d 未读", d.Unread) }</span>
+				<button class="btn btn-outline btn-sm"
+					hx-post="/admin/command/inbox/read"
+					hx-target="#inbox-panel"
+					hx-swap="innerHTML">
+					全部已读
+				</button>
+			} else {
+				<span class="badge ok">已读完</span>
+			}
+		</div>
+	</div>
+	if len(d.Inbox) == 0 {
+		<p class="muted xs">还没有助手回复你。发一条指令试试（右侧）。</p>
+	} else {
+		for _, m := range d.Inbox {
+			@InboxRow(m)
+		}
+	}
+}
+
+// InboxRow is one inbox entry.
+templ InboxRow(m InboxItem) {
+	<div class="msg-row">
+		<div class="msg-meta">
+			<strong>{ displayName(m.From) }</strong>
+			<span class="badge xs">{ m.Kind }</span>
+			<span class="muted xs">#{ fmt.Sprintf("%d", m.Seq) } { formatTime(m.At) }</span>
+			if m.Unread {
+				<span class="badge warn xs">未读</span>
+			}
+			if isRoomThread(m.Thread) {
+				<span class="badge xs">{ m.Thread }</span>
+			}
+		</div>
+		<p>{ m.Payload }</p>
+	</div>
+}
+
+// ComposeCard sends a single message as the operator: one peer, a room, or all.
+templ ComposeCard(d CommandData) {
+	<div class="card-head">
+		<div>
+			<h3>发指令</h3>
+			<p class="muted xs">以 <code>operator</code> 身份发送：助手按「你用户本人发的」处理。</p>
+		</div>
+	</div>
+	<form hx-post="/admin/command/send" hx-target="#send-result" hx-swap="innerHTML">
+		<label class="field">
+			<span>收件人</span>
+			<select name="to">
+				for _, p := range d.Peers {
+					<option value={ p.ID }>{ peerLabel(p) }</option>
+				}
+				if len(d.Rooms) > 0 {
+					<optgroup label="群聊">
+						for _, r := range d.Rooms {
+							<option value={ r.ID }>{ r.Name }（{ r.ID }）</option>
+						}
+					</optgroup>
+				}
+				<option value="*">全体成员（广播）</option>
+			</select>
+		</label>
+		<label class="field">
+			<span>类型</span>
+			<select name="kind">
+				<option value="task">指令（task：对方要动手并回报）</option>
+				<option value="chat">闲聊/通知（chat：知会即可）</option>
+			</select>
+		</label>
+		<label class="field">
+			<span>内容</span>
+			<textarea name="payload" rows="4" placeholder="写清要谁做什么、交付什么。群里点名用 @身份。"></textarea>
+		</label>
+		<div class="chips">
+			for _, p := range d.Peers {
+				<button type="button" class="chip" data-mention={ p.ID }>{ "@" + p.ID }</button>
+			}
+		</div>
+		<div class="bar-right">
+			<button class="btn btn-primary" type="submit">发送</button>
+		</div>
+	</form>
+	<div id="send-result"></div>
+}
+
+// RoomsPanel is the room list plus the create form.
+templ RoomsPanel(d CommandData) {
+	<div class="panel-bar">
+		<div class="bar-left">
+			<h2>群聊</h2>
+			<p class="muted xs">
+				群是成员名单 + 路由别名（不是复制消息）：群消息只发给成员，入群只看之后的消息；
+				窗口上限 { fmt.Sprintf("%d 条 / %d 分钟", d.FuseMax, d.FuseWindow/60) }。
+			</p>
+		</div>
+	</div>
+	<form class="inline-form" hx-post="/admin/command/rooms" hx-target="#room-list" hx-swap="innerHTML">
+		<input name="id" placeholder="短名（英文，如 ops）" required="required"/>
+		<input name="name" placeholder="显示名（可中文）"/>
+		<div class="chips">
+			for _, p := range d.Peers {
+				<label class="chip"><input type="checkbox" name="members" value={ p.ID }/> { p.ID }</label>
+			}
+		</div>
+		<button class="btn btn-primary btn-sm" type="submit">新建群聊</button>
+	</form>
+	<div id="room-list" class="card-grid">
+		@RoomCards(d)
+	</div>
+	<div id="room-pane" class="panel-body">
+		if d.Room != nil {
+			@RoomPane(d)
+		} else {
+			<p class="muted xs">点一张卡片打开群聊（时间线、成员管理、发言）。</p>
+		}
+	</div>
+}
+
+// RoomCards renders the room list fragment.
+templ RoomCards(d CommandData) {
+	if len(d.Rooms) == 0 {
+		<p class="muted xs">还没有群聊。勾选成员，起个短名，创建一个。</p>
+	} else {
+		for _, r := range d.Rooms {
+			<div class="card clickable"
+				hx-get={ "/admin/command/room/" + r.ID }
+				hx-target="#room-pane"
+				hx-swap="innerHTML">
+				<div class="card-head">
+					<h3>{ r.Name }</h3>
+					<span class="badge xs">{ r.ID }</span>
+				</div>
+				<p class="muted xs">
+					{ fmt.Sprintf("%d 成员", len(r.Members)) } ·
+					{ fmt.Sprintf("%d 条消息", r.Count) } ·
+					最近 { displayName(r.LastSender) } { formatTime(r.LastAt) }
+				</p>
+				<p>{ r.LastPreview }</p>
+				if len(r.NotReady) > 0 {
+					<p class="warn xs">
+						⚠ { joinIDs(r.NotReady) } 还没读到群聊守则（指令 v12 以下）：群消息可能被当成私聊任务。
+					</p>
+				}
+			</div>
+		}
+	}
+}
+
+// RoomPane is the selected room: members, timeline, composer.
+templ RoomPane(d CommandData) {
+	if d.Room != nil {
+		<div class="card-head">
+			<h3>{ d.Room.Name }</h3>
+			<span class="badge xs">{ d.Room.ID }</span>
+			<span class="muted xs">回复整个群：<code>to={ d.Room.ID }</code>，只回你：<code>to=operator</code></span>
+		</div>
+		<div class="chips">
+			for _, m := range d.Room.Members {
+				<span class="chip">
+					{ peerLabel(m) }
+					<form hx-post={ "/admin/command/rooms/" + d.Room.ID + "/members" }
+						hx-target="#room-pane" hx-swap="innerHTML">
+						<input type="hidden" name="action" value="remove"/>
+						<input type="hidden" name="peer_id" value={ m.ID }/>
+						<button class="btn-icon" type="submit" title="移出群聊">×</button>
+					</form>
+				</span>
+			}
+		</div>
+		if len(d.Room.NonMembers) > 0 {
+			<form class="inline-form"
+				hx-post={ "/admin/command/rooms/" + d.Room.ID + "/members" }
+				hx-target="#room-pane" hx-swap="innerHTML">
+				<input type="hidden" name="action" value="add"/>
+				<select name="peer_id">
+					for _, p := range d.Room.NonMembers {
+						<option value={ p.ID }>{ peerLabel(p) }</option>
+					}
+				</select>
+				<button class="btn btn-outline btn-sm" type="submit">拉进群</button>
+			</form>
+		}
+		<div class="timeline">
+			if len(d.Room.Messages) == 0 {
+				<p class="muted xs">群里还没有消息。下面说第一句。</p>
+			} else {
+				for _, m := range d.Room.Messages {
+					<div class="msg-row">
+						<div class="msg-meta">
+							<strong>{ displayName(m.From) }</strong>
+							<span class="badge xs">{ m.Kind }</span>
+							<span class="muted xs">#{ fmt.Sprintf("%d", m.Seq) } { formatTime(m.At) }</span>
+							if m.AckedBy != nil {
+								<span class="badge ok xs">
+									已读 { fmt.Sprintf("%d/%d", len(m.AckedBy), len(d.Room.Members)) }
+								</span>
+							}
+						</div>
+						<p>{ m.Payload }</p>
+					</div>
+				}
+			}
+		</div>
+		<form hx-post="/admin/command/send" hx-target="#room-pane" hx-swap="innerHTML">
+			<input type="hidden" name="to" value={ d.Room.ID }/>
+			<label class="field">
+				<span>在群里发言（默认 task：点名/相关者动手；chat 只知会）</span>
+				<textarea name="payload" rows="3" placeholder="例如：@alice 查一下证书到期时间，结论回群里。"></textarea>
+			</label>
+			<div class="bar-right">
+				<select name="kind">
+					<option value="task">指令 task</option>
+					<option value="chat">知会 chat</option>
+				</select>
+				<button class="btn btn-primary btn-sm" type="submit">发到群里</button>
+			</div>
+		</form>
+	}
+}
+
+// SendResult reports the outcome of a single-recipient send.
+templ SendResult(notice, errMsg string) {
+	if errMsg != "" {
+		<div class="toast bad" role="alert">{ errMsg }</div>
+	}
+	if notice != "" {
+		<div class="toast ok" role="status">{ notice }</div>
+	}
+}
+
+// RoomCardsFragment renders the room list for an htmx swap, with toasts.
+templ RoomCardsFragment(d CommandData) {
+	if d.Error != "" {
+		<div class="toast bad" role="alert">{ d.Error }</div>
+	}
+	if d.Notice != "" {
+		<div class="toast ok" role="status">{ d.Notice }</div>
+	}
+	@RoomCards(d)
+}
+
+// RoomPaneFragment renders the room pane for an htmx swap, with toasts.
+templ RoomPaneFragment(d CommandData) {
+	if d.Error != "" {
+		<div class="toast bad" role="alert">{ d.Error }</div>
+	}
+	if d.Notice != "" {
+		<div class="toast ok" role="status">{ d.Notice }</div>
+	}
+	@RoomPane(d)
+}
+
+// InboxPanelFragment renders the inbox for an htmx swap, with toasts.
+templ InboxPanelFragment(d CommandData) {
+	if d.Error != "" {
+		<div class="toast bad" role="alert">{ d.Error }</div>
+	}
+	if d.Notice != "" {
+		<div class="toast ok" role="status">{ d.Notice }</div>
+	}
+	@InboxPanel(d)
+}
+
+// ---- helpers ----
+
+// displayName maps the relay's reserved senders onto readable labels.
+func displayName(id string) string {
+	switch id {
+	case "operator":
+		return "你（控制台）"
+	case "system":
+		return "系统"
+	case "":
+		return "—"
+	}
+	return id
+}
+
+func peerLabel(p PeerOption) string {
+	state := p.Status
+	if p.Online {
+		state = "在线"
+	}
+	if p.PromptVersion > 0 {
+		return fmt.Sprintf("%s（%s · 指令 v%d）", p.ID, state, p.PromptVersion)
+	}
+	return fmt.Sprintf("%s（%s）", p.ID, state)
+}
+
+func isRoomThread(thread string) bool {
+	return len(thread) > 4 && thread[:4] == "grp_"
+}
+
+func joinIDs(ids []string) string {
+	out := ""
+	for i, id := range ids {
+		if i > 0 {
+			out += "、"
+		}
+		out += id
+	}
+	return out
+}
+
+func formatTime(ts int64) string {
+	if ts == 0 {
+		return "—"
+	}
+	return time.Unix(ts, 0).Format("01-02 15:04")
+}

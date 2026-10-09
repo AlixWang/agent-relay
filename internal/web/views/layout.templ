@@ -54,36 +54,37 @@ templ Sidebar() {
 		</div>
 		<nav class="sb-nav" aria-label="主导航">
 			<div class="sb-group">运行</div>
-			<a href="/admin/members" class="sb-link">
+			<a href="/#members" class="sb-link">
 				<svg class="icon"><use href="#i-users"></use></svg>
 				<span>成员</span>
 				<em id="navOnline" class="sb-count"></em>
 			</a>
-			<a href="/admin/threads" class="sb-link">
+			<a href="/#threads" class="sb-link">
 				<svg class="icon"><use href="#i-message"></use></svg>
 				<span>消息线程</span>
 				<em id="navPending" class="sb-count warn" hidden></em>
 			</a>
-			<a href="/admin/conversations" class="sb-link active">
-				<svg class="icon"><use href="#i-message"></use></svg>
-				<span>会话</span>
+			<a href="/admin/command" class="sb-link active">
+				<svg class="icon"><use href="#i-send"></use></svg>
+				<span>指挥台</span>
+				<em id="navInbox" class="sb-count warn" hidden></em>
 			</a>
 			<div class="sb-group">接入</div>
-			<a href="/admin/prompts" class="sb-link">
+			<a href="/#prompts" class="sb-link">
 				<svg class="icon"><use href="#i-user-plus"></use></svg>
 				<span>邀请 &amp; Prompt</span>
 			</a>
 			<div class="sb-group">安全</div>
-			<a href="/admin/audit" class="sb-link">
+			<a href="/#audit" class="sb-link">
 				<svg class="icon"><use href="#i-scroll"></use></svg>
 				<span>审计日志</span>
 			</a>
-			<a href="/admin/tokens" class="sb-link">
+			<a href="/#tokens" class="sb-link">
 				<svg class="icon"><use href="#i-key"></use></svg>
 				<span>Token 管理</span>
 			</a>
 			<div class="sb-group">系统</div>
-			<a href="/admin/system" class="sb-link">
+			<a href="/#system" class="sb-link">
 				<svg class="icon"><use href="#i-server"></use></svg>
 				<span>策略 &amp; 更新</span>
 			</a>

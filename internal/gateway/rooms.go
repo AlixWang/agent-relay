@@ -58,16 +58,13 @@ func (s *Server) handleAdminSend(w http.ResponseWriter, r *http.Request) {
 	if !s.readJSON(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.ID) == "" {
-		req.ID = auth.NewMessageID(opSendIDPrefix)
-	}
 	send := &queue.SendRequest{
 		ID: req.ID, To: req.To, From: auth.OperatorID, Kind: req.Kind,
 		InReplyTo: req.InReplyTo, Payload: req.Payload, Decision: req.Decision,
 		Status: req.Status, Op: req.Op, Target: req.Target, Detail: req.Detail,
 		ExpiresInSecs: req.ExpiresInSecs, RequiresApproval: req.RequiresApproval,
 	}
-	seq, held, rootID, err := s.queue.Send(send, time.Now().Unix())
+	seq, held, rootID, err := s.operatorSend(send)
 	if err != nil {
 		s.sendRejection(w, err)
 		return
@@ -76,10 +73,27 @@ func (s *Server) handleAdminSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 202, map[string]any{"ok": true, "held": true, "seq": seq, "id": send.ID, "thread": rootID})
 		return
 	}
-	// An operator message is the main "wake the fleet" path: without this the
-	// message sat invisible to SSE subscribers until their stream reconnected.
-	s.notifyStream()
 	writeJSON(w, 200, map[string]any{"ok": true, "seq": seq, "id": send.ID, "thread": rootID})
+}
+
+// operatorSend runs one console send: it mints an id when the caller has none,
+// forces the operator identity, and — the part v0.14.0 got wrong — wakes SSE
+// subscribers, so a message typed in the console reaches SSE members at once
+// instead of waiting for a reconnect. Shared by the JSON API and the templ
+// command-center forms.
+func (s *Server) operatorSend(send *queue.SendRequest) (int64, bool, string, error) {
+	if strings.TrimSpace(send.ID) == "" {
+		send.ID = auth.NewMessageID(opSendIDPrefix)
+	}
+	send.From = auth.OperatorID
+	seq, held, rootID, err := s.queue.Send(send, time.Now().Unix())
+	if err != nil {
+		return 0, false, "", err
+	}
+	if !held {
+		s.notifyStream()
+	}
+	return seq, held, rootID, nil
 }
 
 // ---- rooms ----
@@ -179,54 +193,73 @@ func (s *Server) handleAdminCreateRoom(w http.ResponseWriter, r *http.Request) {
 	if !s.readJSON(w, r, &req) {
 		return
 	}
-	id, err := normalizeRoomID(req.ID)
+	info, err := s.createRoom(req.ID, req.Name, req.Note, req.Members)
 	if err != nil {
-		writeErr(w, 400, err.Error())
+		writeErr(w, rejectionStatus(err), err.Error())
 		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "room": info})
+}
+
+// createRoom validates and creates a room with its initial members, then posts
+// the roster notice. Callers (JSON API + console form) share it so the rules
+// live in one place.
+func (s *Server) createRoom(rawID, name, note string, members []string) (roomInfo, error) {
+	id, err := normalizeRoomID(rawID)
+	if err != nil {
+		return roomInfo{}, err
 	}
 	if existing, _ := s.st.GetRoom(id); existing != nil {
-		writeErr(w, 409, "room "+id+" already exists")
-		return
+		return roomInfo{}, fmt.Errorf("room %s already exists", id)
 	}
-	if s.cfg.MaxRoomMembers > 0 && len(req.Members) > s.cfg.MaxRoomMembers {
-		writeErr(w, 400, fmt.Sprintf("max %d members per room", s.cfg.MaxRoomMembers))
-		return
+	members = dedupeIDs(members)
+	if s.cfg.MaxRoomMembers > 0 && len(members) > s.cfg.MaxRoomMembers {
+		return roomInfo{}, fmt.Errorf("max %d members per room", s.cfg.MaxRoomMembers)
+	}
+	for _, peerID := range members {
+		if p, _ := s.st.GetPeer(peerID); p == nil {
+			return roomInfo{}, fmt.Errorf("unknown peer %s", peerID)
+		}
 	}
 	now := time.Now().Unix()
-	name := strings.TrimSpace(req.Name)
+	name = strings.TrimSpace(name)
 	if name == "" {
 		name = id
 	}
-	room := &store.Room{ID: id, Name: name, Note: strings.TrimSpace(req.Note), CreatedAt: now}
+	room := &store.Room{ID: id, Name: name, Note: strings.TrimSpace(note), CreatedAt: now}
 	if err := s.st.CreateRoom(room); err != nil {
-		writeErr(w, 500, "create room failed")
-		return
+		return roomInfo{}, fmt.Errorf("create room failed")
 	}
-	// start_seq = the current max: members see what happens from now on. A
-	// brand-new room has no history, so this only matters for adds later.
+	// start_seq = the current max: members see what happens from now on.
 	startSeq, _ := s.st.MaxSeq()
-	for _, peerID := range dedupeIDs(req.Members) {
-		if p, _ := s.st.GetPeer(peerID); p == nil {
-			writeErr(w, 400, "unknown peer "+peerID)
-			return
-		}
+	for _, peerID := range members {
 		if err := s.st.AddRoomMember(id, peerID, startSeq, now); err != nil {
-			writeErr(w, 500, "add member failed")
-			return
+			return roomInfo{}, fmt.Errorf("add member failed")
 		}
 	}
 	_ = s.st.AppendAudit("admin", "room.created",
-		fmt.Sprintf("room=%s members=%d", id, len(req.Members)), now)
+		fmt.Sprintf("room=%s members=%d", id, len(members)), now)
 	s.roomNotice(id, fmt.Sprintf("群聊 %s 已创建（成员：%s）。群里发言用 to=%s；只回操作者用 to=%s。",
-		id, strings.Join(req.Members, "、"), id, auth.OperatorID))
-	rs, _ := s.st.ListRoomsWithStats(false)
+		id, strings.Join(members, "、"), id, auth.OperatorID))
 	info := roomInfo{ID: room.ID, Name: room.Name, Note: room.Note, CreatedAt: room.CreatedAt}
-	for _, one := range rs {
-		if one.ID == id {
-			info = s.roomInfoOf(one)
+	if rooms, err := s.st.ListRoomsWithStats(false); err == nil {
+		for _, one := range rooms {
+			if one.ID == id {
+				info = s.roomInfoOf(one)
+			}
 		}
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "room": info})
+	return info, nil
+}
+
+// rejectionStatus maps helper errors onto HTTP codes: conflicts (already
+// exists) and bad input (unknown peer, bad id, cap) are the only cases.
+func rejectionStatus(err error) int {
+	msg := err.Error()
+	if strings.Contains(msg, "already exists") {
+		return 409
+	}
+	return 400
 }
 
 // handleAdminPatchRoom handles PATCH /admin/rooms/{id} {name?, note?, archived?}.
@@ -280,59 +313,76 @@ func (s *Server) handleAdminAddRoomMember(w http.ResponseWriter, r *http.Request
 	if !s.readJSON(w, r, &req) {
 		return
 	}
-	room, err := s.st.GetRoom(id)
-	if err != nil || room == nil {
-		writeErr(w, 404, "unknown room")
+	already, err := s.addRoomMember(id, req.PeerID)
+	if err != nil {
+		writeErr(w, rejectionStatus(err), err.Error())
 		return
-	}
-	if p, _ := s.st.GetPeer(req.PeerID); p == nil {
-		writeErr(w, 400, "unknown peer "+req.PeerID)
-		return
-	}
-	members, _ := s.st.ListRoomMembers(id)
-	if s.cfg.MaxRoomMembers > 0 && len(members) >= s.cfg.MaxRoomMembers {
-		writeErr(w, 400, fmt.Sprintf("room is at its %d member cap", s.cfg.MaxRoomMembers))
-		return
-	}
-	already, _ := s.st.IsRoomMember(id, req.PeerID)
-	now := time.Now().Unix()
-	startSeq, _ := s.st.MaxSeq()
-	if err := s.st.AddRoomMember(id, req.PeerID, startSeq, now); err != nil {
-		writeErr(w, 500, "add member failed")
-		return
-	}
-	if !already {
-		_ = s.st.AppendAudit("admin", "room.member_added",
-			fmt.Sprintf("room=%s peer=%s", id, req.PeerID), now)
-		s.roomNotice(id, fmt.Sprintf("%s 加入群聊（只看加入之后的消息）。", req.PeerID))
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "already": already})
 }
 
-// handleAdminRemoveRoomMember handles DELETE /admin/rooms/{id}/members/{peer}.
-func (s *Server) handleAdminRemoveRoomMember(w http.ResponseWriter, r *http.Request) {
-	id, peerID := r.PathValue("id"), r.PathValue("peer")
-	room, err := s.st.GetRoom(id)
+// addRoomMember adds one peer to a room (idempotent) and posts the roster
+// notice on a real change. Shared by the JSON API and the console form.
+func (s *Server) addRoomMember(roomID, peerID string) (bool, error) {
+	room, err := s.st.GetRoom(roomID)
 	if err != nil {
-		writeErr(w, 500, "room lookup failed")
-		return
+		return false, fmt.Errorf("room lookup failed")
 	}
 	if room == nil {
-		writeErr(w, 404, "unknown room")
+		return false, fmt.Errorf("unknown room %s", roomID)
+	}
+	if room.ArchivedAt != 0 {
+		return false, fmt.Errorf("room %s is archived", roomID)
+	}
+	if p, _ := s.st.GetPeer(peerID); p == nil {
+		return false, fmt.Errorf("unknown peer %s", peerID)
+	}
+	members, _ := s.st.ListRoomMembers(roomID)
+	if s.cfg.MaxRoomMembers > 0 && len(members) >= s.cfg.MaxRoomMembers {
+		return false, fmt.Errorf("room is at its %d member cap", s.cfg.MaxRoomMembers)
+	}
+	already, _ := s.st.IsRoomMember(roomID, peerID)
+	now := time.Now().Unix()
+	startSeq, _ := s.st.MaxSeq()
+	if err := s.st.AddRoomMember(roomID, peerID, startSeq, now); err != nil {
+		return false, fmt.Errorf("add member failed")
+	}
+	if !already {
+		_ = s.st.AppendAudit("admin", "room.member_added",
+			fmt.Sprintf("room=%s peer=%s", roomID, peerID), now)
+		s.roomNotice(roomID, fmt.Sprintf("%s 加入群聊（只看加入之后的消息）。", peerID))
+	}
+	return already, nil
+}
+
+// handleAdminRemoveRoomMember handles DELETE /admin/rooms/{id}/members/{peer}.
+func (s *Server) handleAdminRemoveRoomMember(w http.ResponseWriter, r *http.Request) {
+	if err := s.removeRoomMember(r.PathValue("id"), r.PathValue("peer")); err != nil {
+		writeErr(w, rejectionStatus(err), err.Error())
 		return
 	}
-	member, _ := s.st.IsRoomMember(id, peerID)
-	if err := s.st.RemoveRoomMember(id, peerID); err != nil {
-		writeErr(w, 500, "remove member failed")
-		return
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) removeRoomMember(roomID, peerID string) error {
+	room, err := s.st.GetRoom(roomID)
+	if err != nil {
+		return fmt.Errorf("room lookup failed")
+	}
+	if room == nil {
+		return fmt.Errorf("unknown room %s", roomID)
+	}
+	member, _ := s.st.IsRoomMember(roomID, peerID)
+	if err := s.st.RemoveRoomMember(roomID, peerID); err != nil {
+		return fmt.Errorf("remove member failed")
 	}
 	if member {
 		now := time.Now().Unix()
 		_ = s.st.AppendAudit("admin", "room.member_removed",
-			fmt.Sprintf("room=%s peer=%s", id, peerID), now)
-		s.roomNotice(id, fmt.Sprintf("%s 已移出群聊，之后的消息不再发给它。", peerID))
+			fmt.Sprintf("room=%s peer=%s", roomID, peerID), now)
+		s.roomNotice(roomID, fmt.Sprintf("%s 已移出群聊，之后的消息不再发给它。", peerID))
 	}
-	writeJSON(w, 200, map[string]any{"ok": true})
+	return nil
 }
 
 // roomNotice posts a system message into a room (roster changes). It rides the

@@ -18,6 +18,8 @@ function updateThemeIcon(theme) {
 
 document.addEventListener('DOMContentLoaded', () => {
   initTheme();
+  refreshSidebar();
+  setInterval(refreshSidebar, 30000);
 
   const themeToggle = document.getElementById('themeToggle');
   if (themeToggle) {
@@ -70,13 +72,57 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+/* ---------- Sidebar telemetry (stats + inbox badge) ---------- */
+async function refreshSidebar() {
+  try {
+    const r = await fetch('/admin/stats', { headers: { 'Content-Type': 'application/json' } });
+    if (!r.ok) return;
+    const s = await r.json();
+    const set = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = v;
+    };
+    set('sbVer', `v${s.protocol ?? '?'} · ${s.client_version || 'dev'}`);
+    set('sbSeq', s.max_seq ?? '-');
+    set('sbDb', `${Math.round((s.db_bytes || 0) / 1024)}K`);
+    set('navOnline', s.peers_online ?? '');
+    const inbox = document.getElementById('navInbox');
+    if (inbox) {
+      const n = s.inbox_unread || 0;
+      inbox.textContent = n > 0 ? String(n) : '';
+      inbox.hidden = n === 0;
+    }
+  } catch (e) {
+    /* console telemetry is best-effort */
+  }
+}
+
+/* ---------- Mention helper: click a chip to insert @id ---------- */
+document.addEventListener('click', (evt) => {
+  const chip = evt.target.closest('[data-mention]');
+  if (!chip) return;
+  const form = chip.closest('form');
+  const box = form && form.querySelector('textarea[name="payload"]');
+  if (!box) return;
+  const mention = `@${chip.dataset.mention} `;
+  const pos = box.selectionStart ?? box.value.length;
+  box.value = box.value.slice(0, pos) + mention + box.value.slice(pos);
+  box.focus();
+  box.selectionStart = box.selectionEnd = pos + mention.length;
+});
+
 /* ---------- HTMX Configuration ---------- */
 document.body.addEventListener('htmx:afterRequest', (evt) => {
   const xhr = evt.detail.xhr;
   if (xhr) {
-    // Show success toast for mutations
+    // Success toasts for mutations: the command center renders its own
+    // contextual toast inside the swapped fragment, so only a plain "saved"
+    // remains for everywhere else.
     if (evt.detail.successful && ['POST', 'PATCH', 'DELETE'].includes(evt.detail.verb)) {
-      toast('操作成功', 'ok');
+      const elt = evt.detail.elt;
+      if (!(elt && elt.closest && elt.closest('#page-command'))) {
+        toast('操作成功', 'ok');
+      }
     }
     // Show error toast
     if (!evt.detail.successful) {

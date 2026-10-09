@@ -147,6 +147,17 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /admin/inbox", s.requireAdmin(s.handleAdminInbox))
 	mux.HandleFunc("POST /admin/inbox/read", s.requireAdmin(s.handleAdminInboxRead))
 
+	// Console command center page (§9.5): templ + htmx over the endpoints
+	// above. Fragments are plain HTML swaps; the page is server-rendered.
+	mux.HandleFunc("GET /admin/command", s.requireAdmin(s.handleCommandPage))
+	mux.HandleFunc("GET /admin/command/rooms", s.requireAdmin(s.handleCommandRoomsFragment))
+	mux.HandleFunc("GET /admin/command/room/{id}", s.requireAdmin(s.handleCommandRoomFragment))
+	mux.HandleFunc("GET /admin/command/inbox", s.requireAdmin(s.handleCommandInboxFragment))
+	mux.HandleFunc("POST /admin/command/send", s.requireAdmin(s.handleCommandSendForm))
+	mux.HandleFunc("POST /admin/command/rooms", s.requireAdmin(s.handleCommandCreateRoomForm))
+	mux.HandleFunc("POST /admin/command/rooms/{id}/members", s.requireAdmin(s.handleCommandRoomMemberForm))
+	mux.HandleFunc("POST /admin/command/inbox/read", s.requireAdmin(s.handleCommandInboxReadForm))
+
 	// Web self-update (DESIGN §10.4): releases-only, verified, systemd-only.
 	mux.HandleFunc("GET /admin/update/status", s.requireAdmin(s.handleAdminUpdateStatus))
 	mux.HandleFunc("POST /admin/update/check", s.requireAdmin(s.handleAdminUpdateCheck))
