@@ -107,7 +107,7 @@
       <div class="sb-group">运行</div>
       <a href="#members" data-route="members" class="sb-link"><svg class="icon"><use href="#i-users"/></svg><span>成员</span><em id="navOnline" class="sb-count"></em></a>
       <a href="#threads" data-route="threads" class="sb-link"><svg class="icon"><use href="#i-message"/></svg><span>消息线程</span><em id="navPending" class="sb-count warn" hidden></em></a>
-      <a href="/admin/command" class="sb-link"><svg class="icon"><use href="#i-send"/></svg><span>指挥台</span><em id="navInbox" class="sb-count warn" hidden></em></a>
+      <a href="#command" data-route="command" class="sb-link"><svg class="icon"><use href="#i-send"/></svg><span>指挥台</span><em id="navInbox" class="sb-count warn" hidden></em></a>
       <div class="sb-group">接入</div>
       <a href="#prompts" data-route="prompts" class="sb-link"><svg class="icon"><use href="#i-user-plus"/></svg><span>邀请 &amp; Prompt</span></a>
       <div class="sb-group">安全</div>
@@ -207,6 +207,217 @@
           <div class="pager" id="threadPager"></div>
         </div>
         <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg>熔断线程可一键 reset：保留历史，从当前 max seq 重新计数。</p>
+      </section>
+
+      <!-- ---------- 指挥台 (Command & Chat) ---------- -->
+      <section id="page-command" class="page cmd-page" x-data="commandApp" hidden>
+        <div class="cmd-layout">
+          <!-- Left Column: Sessions Directory -->
+          <aside class="cmd-sessions">
+            <div class="cmd-sessions-header">
+              <div class="search-wrap">
+                <svg class="icon xs"><use href="#i-search"/></svg>
+                <input type="search" placeholder="过滤群聊或助手..." x-model="searchQuery" aria-label="搜索会话">
+              </div>
+              <button type="button" class="btn btn-primary btn-sm" @click="openCreateRoom()" title="新建群聊">
+                <svg class="icon xs"><use href="#i-plus"/></svg>建群
+              </button>
+            </div>
+
+            <div class="cmd-sessions-scroll">
+              <!-- Section 1: System & Broadcast -->
+              <div class="cmd-group-label">系统与通知</div>
+              <div class="cmd-session-item" :class="{ 'active': activeTarget.type === 'inbox' }" @click="selectInbox()">
+                <div class="cmd-session-avatar icon-box info">
+                  <svg class="icon"><use href="#i-inbox"/></svg>
+                </div>
+                <div class="cmd-session-meta">
+                  <div class="cmd-session-name">
+                    <span>系统收件箱</span>
+                    <span class="badge warn xs" x-show="inboxUnread > 0" x-text="inboxUnread"></span>
+                  </div>
+                  <div class="cmd-session-preview">助手汇报与回复汇总</div>
+                </div>
+              </div>
+
+              <div class="cmd-session-item" :class="{ 'active': activeTarget.type === 'broadcast' }" @click="selectBroadcast()">
+                <div class="cmd-session-avatar icon-box brand">
+                  <svg class="icon"><use href="#i-radio"/></svg>
+                </div>
+                <div class="cmd-session-meta">
+                  <div class="cmd-session-name">
+                    <span>全体广播 (*)</span>
+                  </div>
+                  <div class="cmd-session-preview">广播指令给全体在线助手</div>
+                </div>
+              </div>
+
+              <!-- Section 2: Group Rooms -->
+              <div class="cmd-group-label">
+                <span>群聊频道</span>
+                <span class="muted xs mono" x-text="'(' + filteredRooms().length + ')'"></span>
+              </div>
+              <template x-for="r in filteredRooms()" :key="r.id">
+                <div class="cmd-session-item" :class="{ 'active': activeTarget.type === 'room' && activeTarget.id === r.id }" @click="selectRoom(r)">
+                  <div class="cmd-session-avatar" x-html="renderAvatar(r.id)"></div>
+                  <div class="cmd-session-meta">
+                    <div class="cmd-session-name">
+                      <span x-text="r.name || r.id"></span>
+                      <span class="muted xs mono" x-text="formatAgo(r.last_at)"></span>
+                    </div>
+                    <div class="cmd-session-preview" x-text="r.last_preview || ((r.members ? r.members.length : 0) + ' 名成员')"></div>
+                  </div>
+                </div>
+              </template>
+              <div class="cmd-empty-hint" x-show="filteredRooms().length === 0">
+                暂无匹配群聊
+              </div>
+
+              <!-- Section 3: Direct Peers -->
+              <div class="cmd-group-label">
+                <span>助手私聊</span>
+                <span class="muted xs mono" x-text="'(' + filteredPeers().length + ')'"></span>
+              </div>
+              <template x-for="p in filteredPeers()" :key="p.id">
+                <div class="cmd-session-item" :class="{ 'active': activeTarget.type === 'peer' && activeTarget.id === p.id }" @click="selectPeer(p)">
+                  <div class="cmd-session-avatar" x-html="renderAvatar(p.id)"></div>
+                  <div class="cmd-session-meta">
+                    <div class="cmd-session-name">
+                      <span x-text="p.id"></span>
+                      <span class="dot" :class="p.online ? 'on' : 'off'"></span>
+                    </div>
+                    <div class="cmd-session-preview" x-text="p.display_name || p.agent_type || '在线助手'"></div>
+                  </div>
+                </div>
+              </template>
+              <div class="cmd-empty-hint" x-show="filteredPeers().length === 0">
+                暂无匹配助手
+              </div>
+            </div>
+          </aside>
+
+          <!-- Right Column: Conversation Main Area -->
+          <div class="cmd-chat">
+            <!-- Header -->
+            <div class="cmd-chat-header">
+              <div class="cmd-chat-title">
+                <h2 x-text="activeTarget.name"></h2>
+                <p class="muted xs" x-text="activeTarget.subtitle"></p>
+              </div>
+              <div class="cmd-chat-actions">
+                <button type="button" class="btn btn-outline btn-sm" x-show="activeTarget.type === 'inbox' && inboxUnread > 0" @click="markAllInboxRead()">
+                  <svg class="icon xs"><use href="#i-check"/></svg> 全部已读
+                </button>
+                <button type="button" class="btn btn-outline btn-sm" x-show="activeTarget.type === 'room'" @click="openRoomMembersModal()">
+                  <svg class="icon xs"><use href="#i-users"/></svg> 群成员管理
+                </button>
+                <button type="button" class="btn-icon" @click="loadActiveMessages(false)" title="刷新消息">
+                  <svg class="icon xs"><use href="#i-refresh"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <!-- Message Stream -->
+            <div class="cmd-stream" id="cmdStreamContainer">
+              <div class="cmd-loading" x-show="loadingMessages">
+                <span class="muted xs">加载消息中...</span>
+              </div>
+
+              <div class="cmd-empty" x-show="!loadingMessages && messages.length === 0">
+                <div class="empty">
+                  <svg class="icon"><use href="#i-message"/></svg>
+                  <p>当前会话暂无消息，在下方发送第一条指令吧</p>
+                </div>
+              </div>
+
+              <template x-for="m in messages" :key="m.seq || m.id || Math.random()">
+                <div class="cmd-msg" :class="{
+                  'msg-self': m.from === 'operator',
+                  'msg-peer': m.from !== 'operator' && m.from !== 'system',
+                  'msg-sys': m.from === 'system'
+                }">
+                  <!-- System notice -->
+                  <template x-if="m.from === 'system'">
+                    <div class="cmd-sys-notice">
+                      <span x-text="m.payload"></span>
+                      <span class="muted xs" x-text="formatTime(m.time)"></span>
+                    </div>
+                  </template>
+
+                  <!-- Chat Bubble -->
+                  <template x-if="m.from !== 'system'">
+                    <div class="cmd-msg-bubble">
+                      <div class="cmd-msg-header">
+                        <div class="cmd-msg-author">
+                          <div class="cmd-avatar-inline" x-html="renderAvatar(m.from, 'xs')"></div>
+                          <b x-text="m.from"></b>
+                          <span class="badge xs" :class="m.kind === 'task' ? 'brand' : 'info'" x-text="m.kind"></span>
+                        </div>
+                        <div class="cmd-msg-info">
+                          <span class="mono xs" x-show="m.seq" x-text="'#' + m.seq"></span>
+                          <span class="muted xs" x-text="formatTime(m.time)"></span>
+                        </div>
+                      </div>
+                      <div class="cmd-msg-body" x-text="m.payload"></div>
+                      <div class="cmd-msg-footer" x-show="m.acked_by && m.acked_by.length > 0">
+                        <span class="badge ok xs" :title="'已读成员: ' + m.acked_by.join(', ')">
+                          已读 <span x-text="m.acked_by.length"></span> 人
+                        </span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+
+            <!-- Composer Dock -->
+            <div class="cmd-dock">
+              <!-- Quick mentions -->
+              <div class="cmd-chips-bar" x-show="peers.length > 0">
+                <span class="muted xs">快捷点名:</span>
+                <div class="cmd-chips-scroll">
+                  <template x-for="p in peers" :key="p.id">
+                    <button type="button" class="pill xs" @click="insertMention(p.id)" x-text="'@' + p.id"></button>
+                  </template>
+                </div>
+              </div>
+
+              <!-- Input Area -->
+              <form class="cmd-composer-box" @submit.prevent="sendMessage()">
+                <div class="cmd-composer-toolbar">
+                  <div class="cmd-kind-toggle">
+                    <label class="kind-opt" :class="{ 'active': kind === 'task' }">
+                      <input type="radio" value="task" x-model="kind">
+                      <svg class="icon xs"><use href="#i-zap"/></svg>
+                      <span>指令 (task: 须回报)</span>
+                    </label>
+                    <label class="kind-opt" :class="{ 'active': kind === 'chat' }">
+                      <input type="radio" value="chat" x-model="kind">
+                      <svg class="icon xs"><use href="#i-message"/></svg>
+                      <span>知会/闲聊 (chat)</span>
+                    </label>
+                  </div>
+                  <div class="cmd-hint muted xs">
+                    Enter 发送 · Shift+Enter 换行
+                  </div>
+                </div>
+
+                <div class="cmd-input-row">
+                  <textarea id="cmdComposerTextarea"
+                    x-model="payload"
+                    @keydown="handleComposerKeydown($event)"
+                    rows="3"
+                    :placeholder="'以 operator 身份发送至 ' + activeTarget.name + '... 点名使用 @身份'"
+                    required></textarea>
+                  <button type="submit" class="btn btn-primary cmd-send-btn" :disabled="sending || !payload.trim()">
+                    <span x-show="!sending"><svg class="icon xs"><use href="#i-send"/></svg> 发送</span>
+                    <span x-show="sending">发送中...</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- ---------- 邀请 & Prompt ---------- -->
@@ -459,8 +670,86 @@
   </form>
 </dialog>
 
+<!-- ============ Create Room Dialog ============ -->
+<dialog id="dlgCreateRoom" class="modal" aria-labelledby="crTitle" x-data="commandApp">
+  <form method="dialog" @submit.prevent="submitCreateRoom()">
+    <div class="modal-head">
+      <div class="card-ic brand"><svg class="icon"><use href="#i-users"/></svg></div>
+      <div>
+        <h2 id="crTitle">新建群聊</h2>
+        <p class="muted xs">群是成员名单 + 路由别名，群消息仅送达群成员</p>
+      </div>
+    </div>
+    <label class="field">
+      短名（英文别名，如 ops）
+      <input type="text" x-model="newRoom.id" placeholder="ops" required pattern="[A-Za-z0-9_\-]+" autocomplete="off">
+    </label>
+    <label class="field">
+      显示名（可选，如 运维小分队）
+      <input type="text" x-model="newRoom.name" placeholder="显示名称（可中文）" autocomplete="off">
+    </label>
+    <div class="field">
+      <span>初始群成员</span>
+      <div class="chips max-h-scroll">
+        <template x-for="p in peers" :key="p.id">
+          <label class="pill clickable">
+            <input type="checkbox" :value="p.id" x-model="newRoom.members">
+            <span x-text="p.id"></span>
+          </label>
+        </template>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <button type="submit" class="btn btn-primary"><svg class="icon xs"><use href="#i-plus"/></svg> 创建群聊</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Room Members Management Dialog ============ -->
+<dialog id="dlgRoomMembers" class="modal" aria-labelledby="rmTitle" x-data="commandApp">
+  <div class="modal-head">
+    <div class="card-ic info"><svg class="icon"><use href="#i-users"/></svg></div>
+    <div>
+      <h2 id="rmTitle">群聊成员管理</h2>
+      <p class="muted xs" x-text="activeTarget.name"></p>
+    </div>
+  </div>
+  
+  <div class="modal-section">
+    <h4>当前成员 (<span x-text="getMemberPeers().length"></span>)</h4>
+    <div class="chips">
+      <template x-for="m in getMemberPeers()" :key="m.id">
+        <span class="pill">
+          <span class="dot" :class="m.online ? 'on' : 'off'"></span>
+          <span x-text="m.id"></span>
+          <button type="button" class="btn-icon xs" @click="removeRoomMember(m.id)" title="移出群聊">×</button>
+        </span>
+      </template>
+      <span class="muted xs" x-show="getMemberPeers().length === 0">群内暂无成员</span>
+    </div>
+  </div>
+
+  <div class="modal-section" x-show="getNonMemberPeers().length > 0">
+    <h4>拉入新成员</h4>
+    <div class="form-row">
+      <select x-model="newMemberId" aria-label="选择新成员">
+        <option value="">选择未入群的助手...</option>
+        <template x-for="p in getNonMemberPeers()" :key="p.id">
+          <option :value="p.id" x-text="p.id + (p.online ? ' (在线)' : ' (离线)')"></option>
+        </template>
+      </select>
+      <button type="button" class="btn btn-primary btn-sm" :disabled="!newMemberId" @click="addRoomMember()">拉进群</button>
+    </div>
+  </div>
+
+  <div class="modal-foot">
+    <button type="button" class="btn btn-ghost" data-close>关闭</button>
+  </div>
+</dialog>
+
 <div id="toasts" class="toasts" aria-live="polite"></div>
 
-<script src="/app.js?v={{ASSET_V}}"></script>
+<script type="module" src="/app.js?v={{ASSET_V}}"></script>
 </body>
 </html>

@@ -1,18 +1,6 @@
-.PHONY: generate generate-check build build-prod test test-ui-js test-coverage clean watch install-templ setup fmt lint run help
+.PHONY: build build-prod test test-ui-js test-coverage clean setup fmt lint run help
 
-# Regenerate internal/web/views/*_templ.go AFTER editing a .templ file.
-# The generated code is committed on purpose: a clean checkout must build with
-# plain `go build` (no CLI, no network). Commit .templ + generated code together.
-generate:
-	@which templ > /dev/null || (echo "Error: templ not installed. Run: make install-templ" && exit 1)
-	templ generate
-
-# CI parity: the committed generated code must match the .templ sources.
-generate-check: generate
-	@git diff --exit-code -- internal/web/views > /dev/null || (echo "Error: internal/web/views is stale — commit the regenerated code" && exit 1)
-	@echo "generated templ code is up to date"
-
-# Build the project (needs no templ CLI: generated code is committed)
+# Build the project
 build:
 	@echo "Building agent-relay..."
 	go build -o bin/agent-relay ./cmd/agent-relay
@@ -22,7 +10,7 @@ test: test-ui-js
 	go test ./...
 
 # Console behaviour that only exists in the browser JS (the update panel that
-# follows an update across the restart it performs). Slices the real app.js.
+# follows an update across the restart it performs).
 test-ui-js:
 	@command -v node >/dev/null || (echo "Error: node not installed (needed for test-ui-js)" && exit 1)
 	node internal/web/ui/_update-panel.test.mjs
@@ -31,31 +19,18 @@ test-ui-js:
 test-coverage:
 	go test -cover ./...
 
-# Clean generated files
+# Clean build artifacts
 clean:
-	@echo "Cleaning generated files..."
-	find internal/web/views -name "*_templ.go" -delete
+	@echo "Cleaning build artifacts..."
 	rm -rf bin/
 
-# Development: watch for changes and regenerate (dev only, needs templ)
-watch:
-	@which templ > /dev/null || (echo "Error: templ not installed. Run: go install github.com/a-h/templ/cmd/templ@v0.3.1001" && exit 1)
-	templ generate --watch
-
-# Install templ
-install-templ:
-	@echo "Installing templ..."
-	go install github.com/a-h/templ/cmd/templ@v0.3.1001
-	@echo "Templ installed successfully"
-
 # Quick dev setup
-setup: install-templ generate
+setup:
 	@echo "Setup complete!"
 
 # Format code
 fmt:
 	go fmt ./...
-	templ fmt internal/web/views
 
 # Lint
 lint:
@@ -71,15 +46,12 @@ build-prod:
 
 help:
 	@echo "Available targets:"
-	@echo "  setup          - Install templ and generate files (first time setup)"
-	@echo "  generate       - Regenerate templ files (after editing .templ)"
-	@echo "  generate-check - Verify committed generated code matches .templ"
+	@echo "  setup          - Quick dev setup"
 	@echo "  build          - Build the project"
 	@echo "  build-prod     - Build optimized binary for production"
 	@echo "  test           - Run tests"
+	@echo "  test-ui-js     - Run console UI update panel logic tests"
 	@echo "  test-coverage  - Run tests with coverage"
-	@echo "  clean          - Clean generated files"
-	@echo "  watch          - Watch for changes and regenerate"
+	@echo "  clean          - Clean build artifacts"
 	@echo "  fmt            - Format code"
 	@echo "  run            - Run the server"
-	@echo "  install-templ  - Install templ CLI"

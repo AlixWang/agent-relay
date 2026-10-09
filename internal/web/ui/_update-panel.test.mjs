@@ -17,12 +17,16 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const appJs = fs.readFileSync(path.join(here, 'app.js'), 'utf8');
+const srcPath = fs.existsSync(path.join(here, 'js', 'system.js'))
+  ? path.join(here, 'js', 'system.js')
+  : path.join(here, 'app.js');
+const appJs = fs.readFileSync(srcPath, 'utf8');
 const from = appJs.indexOf('/* Update job progress.');
-const to = appJs.indexOf("\n$('updJobToggle').onclick");
+let to = appJs.indexOf("\nexport async function refreshSystem");
+if (to < 0) to = appJs.indexOf("\n$('updJobToggle').onclick");
 const panel = from >= 0 && to > from ? appJs.slice(from, to) : '';
 if (!panel.includes('updPoll') || !panel.includes('location.reload()')) {
-  console.error('FAIL: cannot locate the update panel section in app.js (renamed?)');
+  console.error('FAIL: cannot locate the update panel section in system.js (renamed?)');
   process.exit(1);
 }
 

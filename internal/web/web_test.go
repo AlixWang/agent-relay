@@ -96,7 +96,7 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 	for _, key := range []string{
 		"loginPage", "loginForm", "loginbtn", "username", "pw", "loginErr", "app",
 		"sidebar", "menuBtn", "themeBtn", "logoutbtn", "pageTitle", "pageDesc",
-		"page-members", "page-threads", "page-prompts", "page-audit", "page-tokens", "page-system",
+		"page-members", "page-threads", "page-command", "page-prompts", "page-audit", "page-tokens", "page-system",
 		"threadDrawer", "rotateDlg", "confirmDlg", "toasts",
 	} {
 		if !ids[key] {
@@ -104,7 +104,30 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 		}
 	}
 
-	// Dynamically find every $('id') in app.js and assert it is present in index.html
+	// Dynamically find every $('id') in console JS and assert it is present in index.html
+	var allJS strings.Builder
+	for _, p := range []string{
+		"/app.js",
+		"/js/api.js",
+		"/js/utils.js",
+		"/js/router.js",
+		"/js/auth.js",
+		"/js/members.js",
+		"/js/threads.js",
+		"/js/prompts.js",
+		"/js/audit.js",
+		"/js/tokens.js",
+		"/js/system.js",
+		"/js/command.js",
+	} {
+		req := httptest.NewRequest("GET", p, nil)
+		rec := httptest.NewRecorder()
+		Handler().ServeHTTP(rec, req)
+		if rec.Code == 200 {
+			allJS.WriteString(rec.Body.String() + "\n")
+		}
+	}
+	js = allJS.String()
 	lines := strings.Split(js, "\n")
 	matched := 0
 	for _, line := range lines {

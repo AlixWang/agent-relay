@@ -26,7 +26,6 @@ import (
 	"github.com/AlixWang/agent-relay/internal/stream"
 	"github.com/AlixWang/agent-relay/internal/verify"
 	"github.com/AlixWang/agent-relay/internal/web"
-	"github.com/AlixWang/agent-relay/internal/web/views"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -61,10 +60,6 @@ type Server struct {
 
 func New(cfg *config.Config, st store.Store, au *auth.Service, q *queue.Service,
 	p *presence.Service, v *verify.Service, serverAddr string) *Server {
-	// Cache-bust templ page assets with the same baked release tag as the
-	// single-page console (§9): ?v= on CSS/JS so a release never mixes stale
-	// cached assets with fresh HTML.
-	views.SetAssetVersion(web.AssetVersion())
 	return &Server{
 		cfg: cfg, st: st, auth: au, queue: q,
 		presence: p, verify: v,
@@ -148,16 +143,8 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /admin/inbox", s.requireAdmin(s.handleAdminInbox))
 	mux.HandleFunc("POST /admin/inbox/read", s.requireAdmin(s.handleAdminInboxRead))
 
-	// Console command center page (§9.5): templ + htmx over the endpoints
-	// above. Fragments are plain HTML swaps; the page is server-rendered.
+	// Console command center redirect (§9.5): points into the SPA console route /#command.
 	mux.HandleFunc("GET /admin/command", s.requireAdmin(s.handleCommandPage))
-	mux.HandleFunc("GET /admin/command/rooms", s.requireAdmin(s.handleCommandRoomsFragment))
-	mux.HandleFunc("GET /admin/command/room/{id}", s.requireAdmin(s.handleCommandRoomFragment))
-	mux.HandleFunc("GET /admin/command/inbox", s.requireAdmin(s.handleCommandInboxFragment))
-	mux.HandleFunc("POST /admin/command/send", s.requireAdmin(s.handleCommandSendForm))
-	mux.HandleFunc("POST /admin/command/rooms", s.requireAdmin(s.handleCommandCreateRoomForm))
-	mux.HandleFunc("POST /admin/command/rooms/{id}/members", s.requireAdmin(s.handleCommandRoomMemberForm))
-	mux.HandleFunc("POST /admin/command/inbox/read", s.requireAdmin(s.handleCommandInboxReadForm))
 
 	// Web self-update (DESIGN §10.4): releases-only, verified, systemd-only.
 	mux.HandleFunc("GET /admin/update/status", s.requireAdmin(s.handleAdminUpdateStatus))
