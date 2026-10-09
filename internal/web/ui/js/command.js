@@ -5,23 +5,36 @@ import { currentRoute, onRoute } from './router.js';
 import { refreshStats } from './auth.js';
 
 let commandPollTimer = null;
-let activeCommandApp = null;
+let sharedCommandApp = null;
+
+// The command console is ONE component shared by three Alpine roots: the page
+// section plus the create-room and member dialogs. Two reasons, both learned
+// the hard way (群聊频道/助手私聊 showed 0 while /admin/rooms answered fine):
+//  1. Alpine.data() is a factory, so every x-data="commandApp" used to build its
+//     own state. Only the instance that init()s LAST became "the app", which was
+//     the members dialog — so refreshCommand() (fired when the route is entered)
+//     filled the dialog's state and the rendered page section stayed empty.
+//  2. The dialogs genuinely need the page's state: the create-room form lists
+//     members from the same peers array.
+// Sharing one object fixes both; init() is idempotent because Alpine calls it
+// once per root.
+export function commandApp() {
+  if (!sharedCommandApp) sharedCommandApp = createCommandState();
+  return sharedCommandApp;
+}
 
 export function refreshCommand() {
-  if (activeCommandApp) {
-    activeCommandApp.handleHashParams();
-    activeCommandApp.loadSessions();
-    activeCommandApp.startPolling();
-  }
+  const app = commandApp();
+  app.handleHashParams();
+  app.loadSessions();
+  app.startPolling();
 }
 
 export function stopCommand() {
-  if (activeCommandApp) {
-    activeCommandApp.stopPolling();
-  }
+  commandApp().stopPolling();
 }
 
-export function commandApp() {
+function createCommandState() {
   return {
     // Session state
     searchQuery: '',
@@ -59,20 +72,20 @@ export function commandApp() {
     newMemberId: '',
 
     init() {
-      activeCommandApp = this;
+      // Alpine runs init() once per x-data root (page + 2 dialogs) over this
+      // shared object: wire the DOM exactly once.
+      if (this._wired) return;
+      this._wired = true;
 
       // Setup modals
       setupDialog($('dlgCreateRoom'));
       setupDialog($('dlgRoomMembers'));
 
-      // Check if URL specifies a target (e.g. #command?room=grp_ops)
+      // Target from the URL (e.g. #command?room=grp_ops) — no data load here:
+      // entering the route goes through refreshCommand(), and booting straight
+      // onto #command goes through setRoute() → the same path. Loading here as
+      // well only created a race that left the page empty.
       this.handleHashParams();
-
-      // If already on command route or URL hash starts with #command, load immediately
-      if (currentRoute === 'command' || location.hash.startsWith('#command')) {
-        this.loadSessions();
-        this.startPolling();
-      }
 
       // Window visibility change handling (pause polling when hidden)
       document.addEventListener('visibilitychange', () => {

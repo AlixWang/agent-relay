@@ -13,7 +13,7 @@ test: test-ui-js
 # follows an update across the restart it performs).
 test-ui-js:
 	@command -v node >/dev/null || (echo "Error: node not installed (needed for test-ui-js)" && exit 1)
-	node internal/web/ui/_update-panel.test.mjs
+	@for f in internal/web/ui/_*.test.mjs; do echo "node $$f"; node "$$f" || exit 1; done
 
 # Run tests with coverage
 test-coverage:
