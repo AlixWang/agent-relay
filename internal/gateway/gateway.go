@@ -137,6 +137,7 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /admin/rooms", s.requireAdmin(s.handleAdminListRooms))
 	mux.HandleFunc("POST /admin/rooms", s.requireAdmin(s.handleAdminCreateRoom))
 	mux.HandleFunc("PATCH /admin/rooms/{id}", s.requireAdmin(s.handleAdminPatchRoom))
+	mux.HandleFunc("POST /admin/rooms/{id}/dissolve", s.requireAdmin(s.handleAdminDissolveRoom))
 	mux.HandleFunc("POST /admin/rooms/{id}/members", s.requireAdmin(s.handleAdminAddRoomMember))
 	mux.HandleFunc("DELETE /admin/rooms/{id}/members/{peer}", s.requireAdmin(s.handleAdminRemoveRoomMember))
 	mux.HandleFunc("GET /admin/inbox", s.requireAdmin(s.handleAdminInbox))
@@ -1174,12 +1175,16 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 	// picked a message up ("已读 2/3") without N queries.
 	var acksBySeq map[int64][]string
 	roomMembers := []string{}
+	roomName, roomArchived := "", false
 	if strings.HasPrefix(thread, "grp_") {
 		seqs := make([]int64, 0, len(msgs))
 		for _, m := range msgs {
 			seqs = append(seqs, m.Seq)
 		}
 		acksBySeq, _ = s.st.AcksForSeqs(seqs)
+		if room, err := s.st.GetRoom(thread); err == nil && room != nil {
+			roomName, roomArchived = room.Name, room.ArchivedAt != 0
+		}
 		if rows, err := s.st.ListRoomMembers(thread); err == nil {
 			for _, rm := range rows {
 				roomMembers = append(roomMembers, rm.PeerID)
@@ -1207,7 +1212,10 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	body := map[string]any{"ok": true, "items": items}
 	if roomMembers != nil {
-		body["room"] = map[string]any{"id": thread, "members": roomMembers}
+		body["room"] = map[string]any{
+			"id": thread, "members": roomMembers,
+			"name": roomName, "archived": roomArchived,
+		}
 	}
 	writeJSON(w, 200, body)
 }

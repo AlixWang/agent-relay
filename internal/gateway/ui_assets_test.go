@@ -89,7 +89,18 @@ func TestConsolePagesRenderWithResolvableAssets(t *testing.T) {
 func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
 	f := newFixture(t)
 	f.mux = f.srv.Handler(web.Handler())
+	f.registerPeer(t, "probe", "muse")
 	cookie := f.adminLogin(t)
+	// Parameterised calls (`/admin/rooms/${id}/dissolve`) are probed as
+	// /admin/rooms/x/… — and x is deliberately unknown, so the handler answers
+	// 404 (a correct answer for a missing resource, not a missing route). A
+	// second probe with a room that exists tells the two apart: a typo'd path
+	// 404s for both.
+	if code, out := f.doCookie(t, "POST", "/admin/rooms", map[string]any{
+		"id": "probe", "name": "探针群", "members": []string{"probe"},
+	}, cookie); code != 200 {
+		t.Fatalf("seed probe room: %d %+v", code, out)
+	}
 
 	substRe := regexp.MustCompile(`\$\{[^}]*\}`)
 	candRe := regexp.MustCompile(`/admin/[A-Za-z0-9/_.\-]*`)
@@ -123,11 +134,19 @@ func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
 				continue
 			}
 			seen[cand] = true
+			variants := []string{cand}
+			if strings.Contains(cand, "/x") {
+				variants = append(variants, strings.ReplaceAll(cand, "/x", "/grp_probe"))
+			}
 			ok := false
-			for _, method := range []string{"GET", "POST", "PATCH", "DELETE"} {
-				status := probeRoute(t, f, method, cand, cookie)
-				if status != 404 {
-					ok = true
+			for _, probe := range variants {
+				for _, method := range []string{"GET", "POST", "PATCH", "DELETE"} {
+					if probeRoute(t, f, method, probe, cookie) != 404 {
+						ok = true
+						break
+					}
+				}
+				if ok {
 					break
 				}
 			}

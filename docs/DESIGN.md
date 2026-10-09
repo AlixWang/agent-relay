@@ -835,6 +835,24 @@ The UI is intentionally boring: server-rendered or a tiny embedded SPA, no build
   read-only so sudo itself cannot start). A root systemd timer (`agent-relay-update.timer`,
   every 30s) scans pending/ and runs the root-owned helper in a clean mount namespace.
 
+### 群聊的解散与已读明细（§6.8 的补充）
+
+**解散 = 软删除**（`POST /admin/rooms/{id}/dissolve`）：先往群里发一条 `kind=system` 通知（此时
+别名仍可投递，成员因此知道群为什么安静了），再置 `archived`。之后成员收不到任何消息、`to=grp_x`
+一律 400、禁止加人；历史保留，控制台把它收进「已解散」分组（默认折叠）仍可查阅。幂等（重复
+调用返回 `already`），审计 `room.dissolved`。不做硬删除的理由：群消息按 `recipient=grp_x` 存单行，
+删房间会让历史消息失去该别名对应的语义，而"解散"真正要表达的只是"别再往这里发了"。
+
+**已读明细**：控制台右下角从"已读 n 人"升级为可点开的明细——徽标本身就是结论（`全部已读` /
+`已读 n/m` / `无人已读`，配色随之变化），点开后分两组列出成员：已读（绿点）与未读（空心点）。
+两个容易做错的细节：
+
+- **后来入群的成员不参与**：成员只有 `start_seq` 之后的消息才看得见，把他们算作"未读"是错的。
+  控制台按 `start_seq <= seq` 过滤，并单独提示"n 名成员在该消息之后入群，未计入"。
+- **发送者不计**：自己的消息天然已读，否则每条自己发的消息都会凭空多出一个未读者。
+
+数据全部来自既有接口（线程的 `acked_by`、房间成员的 `start_seq`），没有新增字段。
+
 ### 10.4 Web self-update
 
 The console's 更新 tab offers one-click updates for systemd installs (releases only, never downgrades):

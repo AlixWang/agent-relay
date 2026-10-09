@@ -305,6 +305,7 @@ input[type="checkbox"] { height: auto; accent-color: var(--brand); }
 .badge.mono { font-family: var(--mono); font-weight: 500; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .pill { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); font-size: 0.78rem; color: var(--fg-2); }
+.pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 32%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted-2); flex: none; }
 .dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
 .ver-stack { display: flex; flex-wrap: wrap; gap: 4px; max-width: 200px; }
@@ -1129,3 +1130,35 @@ main.full-bleed {
   color: var(--fg-2);
 }
 
+
+/* ---------- command console: dissolved rooms & read receipts ---------- */
+.rot-90 { transform: rotate(90deg); }
+.icon.rot-90, .rot-90 .icon { transition: transform .15s; }
+.cmd-group-toggle { cursor: pointer; user-select: none; }
+.cmd-group-toggle > span:first-child { display: inline-flex; align-items: center; gap: 4px; }
+.cmd-group-toggle:hover { color: var(--fg-2); }
+.cmd-session-item.archived { opacity: .55; }
+.cmd-session-item.archived:hover, .cmd-session-item.archived.active { opacity: .9; }
+
+/* The read-receipt badge sits at the end of a message; the detail hangs above
+   it so a long list cannot push the stream around. */
+.ack-wrap { position: relative; display: inline-flex; }
+button.ack-badge { cursor: pointer; border: 1px solid var(--border); background: var(--card-2); color: var(--muted); font: inherit; }
+button.ack-badge:hover { color: var(--fg-2); }
+button.ack-badge:is(.ok, .warn) { color: var(--tone); background: color-mix(in srgb, var(--tone) 10%, transparent); border-color: color-mix(in srgb, var(--tone) 28%, transparent); }
+.ack-chev { opacity: .6; }
+.ack-pop {
+  position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 40;
+  width: min(340px, 72vw); max-height: 280px; overflow: auto;
+  display: flex; flex-direction: column; gap: 10px; padding: 12px 14px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow);
+}
+.ack-pop-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.ack-row { display: flex; gap: 8px; align-items: flex-start; }
+.ack-tag { flex: none; display: inline-flex; align-items: center; gap: 4px; margin-top: 4px; font-size: .72rem; font-weight: 550; }
+.ack-tag.ok { color: var(--ok); }
+.ack-tag.muted { color: var(--muted-2); }
+.ack-people { display: flex; flex-wrap: wrap; gap: 4px; }
+.ack-note { line-height: 1.5; padding-top: 2px; border-top: 1px solid var(--border-soft); }
+.cmd-dissolved { padding: 12px 16px 16px; }
+.cmd-dissolved .alert { margin: 0; }

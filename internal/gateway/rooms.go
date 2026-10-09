@@ -262,6 +262,41 @@ func rejectionStatus(err error) int {
 	return 400
 }
 
+// handleAdminDissolveRoom handles POST /admin/rooms/{id}/dissolve: 解散群聊.
+//
+// Dissolving is a soft delete (archive): members stop receiving anything, the
+// alias refuses new sends (guard: archived room), and the console moves the room
+// to its 已解散 section where the history stays readable. The room is told first
+// — while the alias still accepts messages — so its members learn why the room
+// went quiet instead of talking into a void. Idempotent: dissolving twice is not
+// an error, the console may be looking at stale state.
+func (s *Server) handleAdminDissolveRoom(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	room, err := s.st.GetRoom(id)
+	if err != nil {
+		writeErr(w, 500, "room lookup failed")
+		return
+	}
+	if room == nil {
+		writeErr(w, 404, "unknown room")
+		return
+	}
+	if room.ArchivedAt != 0 {
+		writeJSON(w, 200, map[string]any{"ok": true, "id": id, "already": true})
+		return
+	}
+	s.roomNotice(id, "本群已由操作者解散：本群不再投递任何消息。如需继续协作，请让操作者新建群聊。")
+	now := time.Now().Unix()
+	if err := s.st.SetRoomArchived(id, now); err != nil {
+		writeErr(w, 500, "archive failed")
+		return
+	}
+	members, _ := s.st.ListRoomMembers(id)
+	_ = s.st.AppendAudit("admin", "room.dissolved",
+		fmt.Sprintf("room=%s name=%q members=%d", id, room.Name, len(members)), now)
+	writeJSON(w, 200, map[string]any{"ok": true, "id": id, "members": len(members)})
+}
+
 // handleAdminPatchRoom handles PATCH /admin/rooms/{id} {name?, note?, archived?}.
 func (s *Server) handleAdminPatchRoom(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

@@ -113,6 +113,8 @@ POST /admin/messages/approve { seq, approve }
 POST /admin/fuse/reset { root_id }
 GET  /admin/audit?actor=&action=&since=&limit=
 POST /admin/prompts { agent_type, peer_id?, invite_code?|create_invite } → { code, prompt }
+GET  /admin/rooms?archived=1 → 含已解散（软删除）的房间
+POST /admin/rooms/{id}/dissolve → 解散群聊（软删除）：先发系统通知，再归档；幂等
 GET  /admin/stats → db 体积/max_seq/在线数/协议版本/receiver_rev/inbox_unread
 GET  /admin/messages?thread=grp_<slug> → 群线程明细，每条带 acked_by 与 room.members
 GET  /admin/update/status → { current{version,tag,protocol,min_client,prompt_version}, mode, job }
@@ -141,3 +143,20 @@ POST /admin/update/apply  { version, acknowledge_protocol_change } → { job_id 
   控制台因此可以跨重启持续轮询，`status=ok` 时自动刷新页面。
 - `confirmed=true` 表示当前进程运行的就是目标版本（即升级已生效）。
 - `hint` 是“卡住了”的可操作提示（排队超 90 秒 / 日志 5 分钟没有增长）。
+
+### 群聊已读明细与解散（DESIGN §9.5）
+
+`GET /admin/messages?thread=grp_<slug>` 的每条消息带 `acked_by: [peer_id…]`，响应的
+`room.members` 给出成员 id，`GET /admin/rooms` 的成员对象再带 `start_seq`（入群时已看到的最大
+seq）。三者合起来就是控制台的已读面板：
+
+- **只在入群早于该消息的成员之间统计**：`start_seq <= seq`。后来入群的成员既不算已读也不算未读
+  （他们看不到那条消息），控制台单独提示"该消息之后入群"的人数。
+- **发送者不计**：自己的消息天然已读。所以 `已读 n/m` 的 `m` 是该消息的合格成员数，不是群规模。
+
+`POST /admin/rooms/{id}/dissolve` 解散群聊（软删除）：
+
+- 解散前先往群里发一条 `kind=system` 通知（趁别名还能投递），成员因此知道群为什么安静了；
+- 之后成员收不到任何消息、`to=grp_<slug>` 一律 400、禁止加人；
+- 历史消息保留：控制台在「已解散」分组（默认折叠）里仍可查看；
+- 幂等：已解散的群再调一次返回 `{ok:true, already:true}`；未知群 404；审计 `room.dissolved`。

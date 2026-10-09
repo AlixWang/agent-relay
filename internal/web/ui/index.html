@@ -269,9 +269,34 @@
                   </div>
                 </div>
               </template>
-              <div class="cmd-empty-hint" x-show="filteredRooms().length === 0">
+              <div class="cmd-empty-hint" x-show="filteredRooms().length === 0 && filteredArchivedRooms().length === 0">
                 暂无匹配群聊
               </div>
+
+              <!-- Dissolved rooms stay reachable: history is worth keeping. -->
+              <template x-if="filteredArchivedRooms().length > 0">
+                <div>
+                  <div class="cmd-group-label cmd-group-toggle" @click="showArchived = !showArchived">
+                    <span>
+                      <svg class="icon xs" :class="showArchived ? 'rot-90' : ''"><use href="#i-chev-r"/></svg>
+                      已解散
+                    </span>
+                    <span class="muted xs mono" x-text="'(' + filteredArchivedRooms().length + ')'"></span>
+                  </div>
+                  <template x-for="r in (showArchived ? filteredArchivedRooms() : [])" :key="r.id">
+                    <div class="cmd-session-item archived" :class="{ 'active': activeTarget.type === 'room' && activeTarget.id === r.id }" @click="selectRoom(r)">
+                      <div class="cmd-session-avatar" x-html="renderAvatar(r.id)"></div>
+                      <div class="cmd-session-meta">
+                        <div class="cmd-session-name">
+                          <span x-text="r.name || r.id"></span>
+                          <span class="badge xs">已解散</span>
+                        </div>
+                        <div class="cmd-session-preview" x-text="'历史可查 · ' + ((r.members ? r.members.length : 0)) + ' 名成员'"></div>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </template>
 
               <!-- Section 3: Direct Peers -->
               <div class="cmd-group-label">
@@ -310,6 +335,9 @@
                 </button>
                 <button type="button" class="btn btn-outline btn-sm" x-show="activeTarget.type === 'room'" @click="openRoomMembersModal()">
                   <svg class="icon xs"><use href="#i-users"/></svg> 群成员管理
+                </button>
+                <button type="button" class="btn btn-outline btn-sm btn-danger" x-show="activeTarget.type === 'room' && !roomDissolved()" @click="dissolveRoom()">
+                  <svg class="icon xs"><use href="#i-trash"/></svg> 解散群聊
                 </button>
                 <button type="button" class="btn-icon" @click="loadActiveMessages(false)" title="刷新消息">
                   <svg class="icon xs"><use href="#i-refresh"/></svg>
@@ -359,10 +387,44 @@
                         </div>
                       </div>
                       <div class="cmd-msg-body" x-text="m.payload"></div>
-                      <div class="cmd-msg-footer" x-show="m.acked_by && m.acked_by.length > 0">
-                        <span class="badge ok xs" :title="'已读成员: ' + m.acked_by.join(', ')">
-                          已读 <span x-text="m.acked_by.length"></span> 人
-                        </span>
+                      <!-- Read receipts: the badge summarises, a click opens the names.
+                           Who counts: members who were already in the room when the
+                           message was sent (start_seq), minus the sender. -->
+                      <div class="cmd-msg-footer" x-show="activeTarget.type === 'room' && ackEligible(m).length > 0">
+                        <div class="ack-wrap" @click.outside="ackOpen = null">
+                          <button type="button" class="badge xs ack-badge" :class="ackTone(m)" @click="ackOpen = (ackOpen === m.seq ? null : m.seq)">
+                            <svg class="icon xs" x-show="ackTone(m) === 'ok'"><use href="#i-check"/></svg>
+                            <span x-text="ackLabel(m)"></span>
+                            <svg class="icon xs ack-chev" :class="ackOpen === m.seq ? 'rot-90' : ''"><use href="#i-chev-r"/></svg>
+                          </button>
+                          <div class="ack-pop" x-show="ackOpen === m.seq" x-transition.opacity>
+                            <div class="ack-pop-head">
+                              <b x-text="'已读明细 · #' + m.seq"></b>
+                              <span class="muted xs" x-text="ackLabel(m)"></span>
+                            </div>
+                            <div class="ack-row" x-show="ackReaders(m).length > 0">
+                              <span class="ack-tag ok"><svg class="icon xs"><use href="#i-check"/></svg>已读</span>
+                              <div class="ack-people">
+                                <template x-for="p in ackReaders(m)" :key="p">
+                                  <span class="pill ok"><span class="dot on"></span><span x-text="p"></span></span>
+                                </template>
+                              </div>
+                            </div>
+                            <div class="ack-row" x-show="ackPending(m).length > 0">
+                              <span class="ack-tag muted"><svg class="icon xs"><use href="#i-clock"/></svg>未读</span>
+                              <div class="ack-people">
+                                <template x-for="p in ackPending(m)" :key="p">
+                                  <span class="pill"><span class="dot"></span><span x-text="p"></span></span>
+                                </template>
+                              </div>
+                            </div>
+                            <div class="ack-note muted xs" x-show="ackLateSent(m).length > 0"
+                                 x-text="ackLateSent(m).length + ' 名成员在该消息之后入群，未计入已读/未读'"></div>
+                            <div class="ack-note muted xs" x-show="ackReaders(m).length === 0 && ackPending(m).length > 0">
+                              还没有人确认收到这条消息。
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </template>
@@ -370,8 +432,15 @@
               </template>
             </div>
 
-            <!-- Composer Dock -->
-            <div class="cmd-dock">
+            <!-- Dissolved room: history only, no composer. -->
+            <div class="cmd-dissolved" x-show="activeTarget.type === 'room' && roomDissolved()">
+              <div class="alert alert-warn">
+                <svg class="icon"><use href="#i-ban"/></svg>
+                <span>该群已解散：历史消息仍可查看，但不再投递任何消息。需要继续协作请新建群聊。</span>
+              </div>
+            </div>
+
+            <div class="cmd-dock" x-show="!(activeTarget.type === 'room' && roomDissolved())">
               <!-- Quick mentions -->
               <div class="cmd-chips-bar" x-show="peers.length > 0">
                 <span class="muted xs">快捷点名:</span>

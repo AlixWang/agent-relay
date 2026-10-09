@@ -358,6 +358,57 @@ jq_ok "inbox unread cleared" '.unread == 0' \
 jq_ok "stats exposes inbox_unread" '.inbox_unread == 0' \
   curl -s -b "$JAR" "$BASE/admin/stats"
 
+# ---- read receipts + 解散群聊 (DESIGN §9.5) ----
+# The room thread carries per-member ack detail: the console turns it into
+# "谁已读/谁未读" (members who joined after a message are not counted).
+RT="$(curl -s -b "$JAR" "$BASE/admin/messages?thread=grp_ops")"
+if echo "$RT" | jq -e '[.items[] | select(.recipient == "grp_ops") | select(((.acked_by // []) | index("t-alice")) != null)] | length >= 1' >/dev/null 2>&1; then
+  ok "room thread exposes acked_by per message"
+else
+  bad "room thread exposes acked_by per message" "$RT"
+fi
+if echo "$RT" | jq -e '.room.members | length >= 2' >/dev/null 2>&1; then
+  ok "room thread carries its member list"
+else
+  bad "room thread carries its member list" "$RT"
+fi
+
+jq_ok "room dissolved" '.ok == true and .id == "grp_ops"' \
+  curl -s -b "$JAR" -X POST "$BASE/admin/rooms/grp_ops/dissolve" \
+    -H 'Content-Type: application/json' --data '{}'
+if curl -s -b "$JAR" "$BASE/admin/rooms" | jq -e '[.rooms[] | select(.id == "grp_ops")] | length == 0' >/dev/null 2>&1; then
+  ok "dissolved room leaves the active list"
+else
+  bad "dissolved room leaves the active list"
+fi
+if curl -s -b "$JAR" "$BASE/admin/rooms?archived=1" | jq -e '[.rooms[] | select(.id == "grp_ops" and .archived == true)] | length == 1' >/dev/null 2>&1; then
+  ok "dissolved room listed under archived"
+else
+  bad "dissolved room listed under archived"
+fi
+if curl -s -b "$JAR" -X POST "$BASE/admin/messages" -H 'Content-Type: application/json' \
+    --data '{"id":"room-after-dissolve","to":"grp_ops","kind":"chat","payload":"解散后"}' \
+    -o /dev/null -w '%{http_code}' | grep -q 400; then
+  ok "send into dissolved room 400"
+else
+  bad "send into dissolved room 400"
+fi
+if curl -s -b "$JAR" -X POST "$BASE/admin/rooms/grp_ops/members" -H 'Content-Type: application/json' \
+    --data '{"peer_id":"t-alice"}' -o /dev/null -w '%{http_code}' | grep -q 400; then
+  ok "add member to dissolved room 400"
+else
+  bad "add member to dissolved room 400"
+fi
+RT2="$(curl -s -b "$JAR" "$BASE/admin/messages?thread=grp_ops")"
+if echo "$RT2" | jq -e '.room.archived == true and (.items[-1].kind == "system") and (.items[-1].payload | test("解散"))' >/dev/null 2>&1; then
+  ok "dissolve notice posted into the room"
+else
+  bad "dissolve notice posted into the room" "$RT2"
+fi
+jq_ok "dissolve is idempotent" '.ok == true and .already == true' \
+  curl -s -b "$JAR" -X POST "$BASE/admin/rooms/grp_ops/dissolve" \
+    -H 'Content-Type: application/json' --data '{}'
+
 # Room thread view carries per-member ack state and the member list.
 ROOM_THREAD="$(curl -s -b "$JAR" "$BASE/admin/messages?thread=grp_ops")"
 if echo "$ROOM_THREAD" | jq -e '.room.members | length == 2' >/dev/null 2>&1; then

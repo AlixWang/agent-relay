@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AlixWang/agent-relay/internal/store"
 	"github.com/AlixWang/agent-relay/internal/stream"
 )
 
@@ -369,4 +370,88 @@ func bodyString(v map[string]any) string {
 		}
 	}
 	return b.String()
+}
+
+// 解散群聊 is a soft delete: the room is told first (while the alias still
+// accepts messages), then archived — nothing is delivered any more, the alias
+// refuses new sends, and the history stays readable under 已解散 in the console.
+func TestRoomDissolve(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "claw")
+	cookie := f.adminLogin(t)
+
+	code, out := f.doCookie(t, "POST", "/admin/rooms", map[string]any{
+		"id": "ops", "name": "运维群", "members": []string{"alice", "bob"},
+	}, cookie)
+	if code != 200 || out["ok"] != true {
+		t.Fatalf("create room: %d %+v", code, out)
+	}
+	if code, out := f.doCookie(t, "POST", "/admin/messages", map[string]any{
+		"id": "room-keep", "to": "grp_ops", "kind": "chat", "payload": "解散前的消息",
+	}, cookie); code != 200 {
+		t.Fatalf("seed message: %d %+v", code, out)
+	}
+
+	code, out = f.doCookie(t, "POST", "/admin/rooms/grp_ops/dissolve", map[string]any{}, cookie)
+	if code != 200 || out["ok"] != true {
+		t.Fatalf("dissolve: %d %+v", code, out)
+	}
+	if n, _ := out["members"].(float64); int(n) != 2 {
+		t.Fatalf("dissolve should report the member count: %+v", out)
+	}
+
+	// It leaves the working list and shows up (flagged) only when asked for.
+	_, list := f.doCookie(t, "GET", "/admin/rooms", nil, cookie)
+	if rooms, _ := list["rooms"].([]any); len(rooms) != 0 {
+		t.Fatalf("a dissolved room must leave the active list: %+v", rooms)
+	}
+	_, list = f.doCookie(t, "GET", "/admin/rooms?archived=1", nil, cookie)
+	rooms, _ := list["rooms"].([]any)
+	if len(rooms) != 1 {
+		t.Fatalf("archived list: %+v", list)
+	}
+	room, _ := rooms[0].(map[string]any)
+	if room["archived"] != true || room["name"] != "运维群" {
+		t.Fatalf("archived room shape: %+v", room)
+	}
+
+	// The room heard about it: the notice is the last message in the thread.
+	_, thread := f.doCookie(t, "GET", "/admin/messages?thread=grp_ops", nil, cookie)
+	items, _ := thread["items"].([]any)
+	// creation notice + the seeded message + the dissolve notice
+	if len(items) != 3 {
+		t.Fatalf("thread: %+v", thread)
+	}
+	last, _ := items[len(items)-1].(map[string]any)
+	if last["kind"] != "system" || !strings.Contains(last["payload"].(string), "解散") {
+		t.Fatalf("dissolve notice missing or wrong: %+v", last)
+	}
+	roomInfo, _ := thread["room"].(map[string]any)
+	if roomInfo["archived"] != true || roomInfo["name"] != "运维群" {
+		t.Fatalf("thread room payload must carry name+archived: %+v", roomInfo)
+	}
+
+	// Nothing is accepted any more.
+	if code, _ := f.doCookie(t, "POST", "/admin/messages", map[string]any{
+		"id": "room-after", "to": "grp_ops", "kind": "chat", "payload": "解散后还想说话",
+	}, cookie); code != 400 {
+		t.Fatalf("sending into a dissolved room must 400, got %d", code)
+	}
+	if code, _ := f.doCookie(t, "POST", "/admin/rooms/grp_ops/members", map[string]any{"peer_id": "alice"}, cookie); code != 400 {
+		t.Fatalf("adding a member to a dissolved room must 400, got %d", code)
+	}
+
+	// Idempotent (the console may click twice), audited, and 404 for strangers.
+	code, out = f.doCookie(t, "POST", "/admin/rooms/grp_ops/dissolve", map[string]any{}, cookie)
+	if code != 200 || out["already"] != true {
+		t.Fatalf("second dissolve must be a no-op 200: %d %+v", code, out)
+	}
+	entries, _, err := f.srv.st.ListAuditPage(store.AuditFilter{Action: "room.dissolved"}, 10, 0)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("want exactly one room.dissolved audit entry, got %v %+v", err, entries)
+	}
+	if code, _ := f.doCookie(t, "POST", "/admin/rooms/grp_nope/dissolve", map[string]any{}, cookie); code != 404 {
+		t.Fatalf("unknown room must 404, got %d", code)
+	}
 }

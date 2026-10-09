@@ -130,4 +130,67 @@ assert(timers.size === 1, 're-entering the route must not stack poll timers, got
 stopCommand();
 assert(timers.size === 0, 'leaving the route must stop polling');
 
+// 5. Read receipts: who counts for a room message. A member only sees messages
+// sent after they joined (start_seq), and a sender obviously read their own.
+page.rooms = [
+  {
+    id: 'grp_chat', name: '聊天群', archived: false,
+    members: [
+      { id: 'alice', start_seq: 1 },
+      { id: 'bob', start_seq: 1 },
+      { id: 'fe', start_seq: 1 },
+      { id: 'late', start_seq: 200 },
+    ],
+  },
+  { id: 'grp_old', name: '旧群', archived: true, members: [{ id: 'alice', start_seq: 1 }] },
+];
+page.activeTarget = { type: 'room', id: 'grp_chat', name: '聊天群', subtitle: '' };
+
+const msg = { seq: 155, from: 'operator', acked_by: ['alice', 'bob'], kind: 'task' };
+assert(page.ackEligible(msg).join(',') === 'alice,bob,fe', 'late joiners must not be counted as unread, got ' + page.ackEligible(msg));
+assert(page.ackReaders(msg).join(',') === 'alice,bob', 'readers: ' + page.ackReaders(msg));
+assert(page.ackPending(msg).join(',') === 'fe', 'pending must be exactly the members who have not acked: ' + page.ackPending(msg));
+assert(page.ackLabel(msg) === '已读 2/3', 'partial label: ' + page.ackLabel(msg));
+assert(page.ackTone(msg) === 'warn', 'partial tone: ' + page.ackTone(msg));
+assert(page.ackLateSent(msg).join(',') === 'late', 'the late joiner must be reported separately: ' + page.ackLateSent(msg));
+
+const allRead = { seq: 155, from: 'operator', acked_by: ['alice', 'bob', 'fe'] };
+assert(page.ackLabel(allRead) === '全部已读' && page.ackTone(allRead) === 'ok', 'all-read label/tone: ' + page.ackLabel(allRead) + '/' + page.ackTone(allRead));
+assert(page.ackPending(allRead).length === 0, 'all-read must have no pending');
+
+const noneRead = { seq: 155, from: 'operator', acked_by: [] };
+assert(page.ackLabel(noneRead) === '无人已读' && page.ackPending(noneRead).length === 3, 'none-read: ' + page.ackLabel(noneRead) + '/' + page.ackPending(noneRead).length);
+
+const ownMsg = { seq: 210, from: 'alice', acked_by: ['bob'] };
+assert(page.ackEligible(ownMsg).join(',') === 'bob,fe,late', 'the sender must never show up as unread: ' + page.ackEligible(ownMsg));
+assert(page.ackLabel(ownMsg) === '已读 1/3', 'sender-excluded label: ' + page.ackLabel(ownMsg));
+
+// A room opened straight from the thread payload (members as ids, no start_seq)
+// still works: everyone counts.
+page.rooms = [];
+page.activeRoomData = { id: 'grp_chat', members: ['alice', 'bob'], archived: false };
+assert(page.ackEligible({ seq: 5, from: 'operator', acked_by: ['alice'] }).join(',') === 'alice,bob', 'thread-only fallback: ' + page.ackEligible({ seq: 5, from: 'operator', acked_by: ['alice'] }));
+
+// 6. Dissolved rooms: out of the working list, reachable under 已解散.
+page.rooms = [
+  { id: 'grp_chat', name: '聊天群', archived: false, members: [{ id: 'alice', start_seq: 1 }] },
+  { id: 'grp_old', name: '旧群', archived: true, members: [{ id: 'alice', start_seq: 1 }] },
+];
+page.searchQuery = '';
+assert(page.filteredRooms().map((r) => r.id).join(',') === 'grp_chat', 'active list: ' + page.filteredRooms().map((r) => r.id));
+assert(page.filteredArchivedRooms().map((r) => r.id).join(',') === 'grp_old', 'dissolved list: ' + page.filteredArchivedRooms().map((r) => r.id));
+page.searchQuery = 'old';
+assert(page.filteredRooms().length === 0 && page.filteredArchivedRooms().length === 1, 'search must apply to both groups');
+page.searchQuery = '';
+
+// The pane knows the room is gone: composer hidden, history readable.
+page.activeTarget = { type: 'room', id: 'grp_old', name: '旧群', subtitle: '' };
+page.activeRoomData = null;
+assert(page.roomDissolved() === true, 'a dissolved room must be recognised from the room list');
+page.activeRoomData = { id: 'grp_old', members: ['alice'], archived: true };
+assert(page.roomDissolved() === true, 'a dissolved room must be recognised from the thread payload');
+page.activeTarget = { type: 'room', id: 'grp_chat', name: '聊天群', subtitle: '' };
+page.activeRoomData = { id: 'grp_chat', members: ['alice'], archived: false };
+assert(page.roomDissolved() === false, 'a live room must not look dissolved');
+
 console.log('command state: all checks passed');

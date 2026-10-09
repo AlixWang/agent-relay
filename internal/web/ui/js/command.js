@@ -62,6 +62,11 @@ function createCommandState() {
     // Message stream
     messages: [],
     loadingMessages: false,
+
+    // Read receipts: which message's popover is open (seq), and whether the
+    // dissolved-rooms group in the session list is expanded.
+    ackOpen: null,
+    showArchived: false,
     
     // Composer state
     payload: '',
@@ -140,7 +145,7 @@ function createCommandState() {
       // 1. Silent sessions refresh
       try {
         const [roomsRes, inboxRes] = await Promise.allSettled([
-          api('/admin/rooms'),
+          api('/admin/rooms?archived=1'),
           api('/admin/inbox?page_size=10'),
         ]);
         if (roomsRes.status === 'fulfilled' && roomsRes.value?.rooms) {
@@ -159,7 +164,7 @@ function createCommandState() {
     async loadSessions() {
       try {
         const [roomsRes, inboxRes, peersRes] = await Promise.allSettled([
-          api('/admin/rooms'),
+          api('/admin/rooms?archived=1'),
           api('/admin/inbox?page_size=30'),
           api('/admin/peers?page_size=100'),
         ]);
@@ -197,6 +202,7 @@ function createCommandState() {
         subtitle: '助手给管理员发送的所有汇报与回复',
       };
       this.activeRoomData = null;
+      this.ackOpen = null;
       if (location.hash !== '#command?view=inbox') {
         history.replaceState(null, '', '#command?view=inbox');
       }
@@ -487,14 +493,107 @@ function createCommandState() {
       }
     },
 
+    // 解散群聊: soft delete on the server (system notice into the room first,
+    // then archive). History stays readable under 已解散.
+    async dissolveRoom() {
+      const room = (this.rooms || []).find((r) => r.id === this.activeTarget.id) || {};
+      const label = room.name ? room.name + ' (' + room.id + ')' : this.activeTarget.id;
+      const ok = await confirmAction({
+        title: '解散群聊「' + label + '」？',
+        body: '群内会先收到一条系统通知，之后本群不再投递任何消息。历史消息仍保留在「已解散」分组里，随时可查。',
+        danger: true,
+        okText: '解散群聊',
+      });
+      if (!ok) return;
+      try {
+        // Template literal on purpose: TestConsoleAssetsDoNotCallMissingAdminRoutes
+        // probes every /admin/... literal (${…} → x), so a typo in the path fails CI.
+        await api(`/admin/rooms/${encodeURIComponent(this.activeTarget.id)}/dissolve`, {
+          method: 'POST',
+          body: '{}',
+        });
+        toast('群聊「' + label + '」已解散', 'ok');
+        await this.loadSessions();
+        this.selectInbox();
+      } catch (err) {
+        toast('解散失败：' + err.message, 'bad');
+      }
+    },
+
     // Filter helpers
     filteredRooms() {
       const q = this.searchQuery.toLowerCase().trim();
-      const list = Array.isArray(this.rooms) ? this.rooms : [];
+      const list = (Array.isArray(this.rooms) ? this.rooms : []).filter((r) => !r.archived);
       if (!q) return list;
       return list.filter((r) =>
         (r.id && r.id.toLowerCase().includes(q)) || (r.name && r.name.toLowerCase().includes(q))
       );
+    },
+
+    // Dissolved rooms (soft-deleted: history stays readable, nothing is
+    // delivered any more). Kept in a collapsed group so the main list stays
+    // about rooms you can actually talk to.
+    filteredArchivedRooms() {
+      const q = this.searchQuery.toLowerCase().trim();
+      const list = (Array.isArray(this.rooms) ? this.rooms : []).filter((r) => r.archived);
+      if (!q) return list;
+      return list.filter((r) =>
+        (r.id && r.id.toLowerCase().includes(q)) || (r.name && r.name.toLowerCase().includes(q))
+      );
+    },
+
+    roomDissolved() {
+      if (this.activeTarget.type !== 'room') return false;
+      if (this.activeRoomData && this.activeRoomData.archived) return true;
+      const room = (this.rooms || []).find((r) => r.id === this.activeTarget.id);
+      return !!(room && room.archived);
+    },
+
+    // ---- read receipts -------------------------------------------------
+    // A room message is "read" by every member that has an ack for it. Who is
+    // asked at all depends on when they joined: a member only sees messages
+    // sent after their start_seq, so counting them as "未读" for older messages
+    // would be wrong. The sender obviously read their own message.
+    ackMembers(m) {
+      const room = (this.rooms || []).find((r) => r.id === this.activeTarget.id);
+      let members = room && Array.isArray(room.members) ? room.members : null;
+      if (!members && this.activeRoomData && Array.isArray(this.activeRoomData.members)) {
+        members = this.activeRoomData.members.map((id) => ({ id, start_seq: 0 }));
+      }
+      if (!members) return [];
+      return members.filter((mb) => (mb.start_seq || 0) <= (m.seq || 0));
+    },
+    ackEligible(m) {
+      return this.ackMembers(m).filter((mb) => mb.id !== m.from).map((mb) => mb.id);
+    },
+    ackLateSent(m) {
+      const room = (this.rooms || []).find((r) => r.id === this.activeTarget.id);
+      const members = room && Array.isArray(room.members) ? room.members : [];
+      return members.filter((mb) => (mb.start_seq || 0) > (m.seq || 0)).map((mb) => mb.id);
+    },
+    ackReaders(m) {
+      const acked = new Set(m.acked_by || []);
+      return this.ackEligible(m).filter((id) => acked.has(id));
+    },
+    ackPending(m) {
+      const acked = new Set(m.acked_by || []);
+      return this.ackEligible(m).filter((id) => !acked.has(id));
+    },
+    ackLabel(m) {
+      const total = this.ackEligible(m).length;
+      const read = this.ackReaders(m).length;
+      if (!total) return '';
+      if (read === total) return '全部已读';
+      if (read === 0) return '无人已读';
+      return '已读 ' + read + '/' + total;
+    },
+    ackTone(m) {
+      const total = this.ackEligible(m).length;
+      const read = this.ackReaders(m).length;
+      if (!total) return '';
+      if (read === total) return 'ok';
+      if (read === 0) return 'warn';
+      return 'warn';
     },
 
     filteredPeers() {
