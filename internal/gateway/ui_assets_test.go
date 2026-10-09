@@ -198,6 +198,54 @@ func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
 	}
 }
 
+// A sidebar entry must actually be reachable: either an in-page route the SPA
+// knows, or a link that leaves the SPA while the nav handler keeps its hands
+// off. v0.15.1 shipped the 指挥台 entry as /admin/command — the route existed
+// and the link existed — but app.js called preventDefault() on every .sb-link
+// and routed it to setRoute(undefined) → 成员, so the page could not be entered
+// by clicking. Route existence alone does not catch that.
+func TestConsoleSidebarEntriesAreReachable(t *testing.T) {
+	f := newFixture(t)
+	f.mux = f.srv.Handler(web.Handler())
+	cookie := f.adminLogin(t)
+	_, html := getRaw(t, f, "/", cookie)
+	_, js := getRaw(t, f, "/app.js", cookie)
+
+	anchorRe := regexp.MustCompile(`<a\s[^>]*class="[^"]*sb-link[^"]*"[^>]*>`)
+	attr := func(name string) *regexp.Regexp { return regexp.MustCompile(name + `="([^"]*)"`) }
+	hashRoutes, outRoutes := 0, 0
+	for _, tag := range anchorRe.FindAllString(html, -1) {
+		href := attr("href").FindStringSubmatch(tag)
+		if href == nil {
+			t.Fatalf("sidebar entry without href: %s", tag)
+		}
+		route := attr("data-route").FindStringSubmatch(tag)
+		if strings.HasPrefix(href[1], "#") {
+			hashRoutes++
+			want := strings.TrimPrefix(href[1], "#")
+			if route == nil || route[1] != want {
+				t.Fatalf("%s must carry data-route=%q", tag, want)
+			}
+			// routeMeta keys are aligned with padding, so match the key line.
+			routeLine := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(want) + `:\s*\{`)
+			if !routeLine.MatchString(js) {
+				t.Fatalf("sidebar route %q is not in the SPA routeMeta table", want)
+			}
+			continue
+		}
+		outRoutes++
+		if code := probeRoute(t, f, "GET", href[1], cookie); code == 404 {
+			t.Fatalf("sidebar link %s is not served", href[1])
+		}
+	}
+	if hashRoutes == 0 || outRoutes == 0 {
+		t.Fatalf("expected in-page and cross-page sidebar entries, saw %d/%d", hashRoutes, outRoutes)
+	}
+	if !strings.Contains(js, "startsWith('#')") {
+		t.Fatal("app.js no longer guards .sb-link clicks by href: cross-page sidebar entries would be swallowed")
+	}
+}
+
 func probeRoute(t *testing.T, f *fixture, method, path, cookie string) int {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader("{}"))

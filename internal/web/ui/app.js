@@ -271,10 +271,16 @@ function setRoute(r) {
 }
 
 function initNavigation() {
+  // Only in-page routes (href="#...") are handled here. The console has one
+  // sidebar entry that leaves the SPA — 指挥台 at /admin/command — and
+  // swallowing its click sent it to setRoute(undefined) → 成员 instead of
+  // navigating. Key off the href so any future cross-page link is safe too.
   document.querySelectorAll('.sb-link').forEach((l) => {
+    const href = l.getAttribute('href') || '';
+    if (!href.startsWith('#')) return;
     l.onclick = (e) => {
       e.preventDefault();
-      setRoute(l.dataset.route);
+      setRoute(l.dataset.route || href.slice(1));
     };
   });
   window.addEventListener('hashchange', () => {
