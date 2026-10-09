@@ -418,6 +418,85 @@
             </div>
           </div>
         </div>
+      <!-- Both command dialogs live inside #page-command: they inherit its
+           Alpine scope (one root — see TestConsoleCommandRootIsSingle). -->
+      <dialog id="dlgCreateRoom" class="modal" aria-labelledby="crTitle">
+        <form method="dialog" @submit.prevent="submitCreateRoom()">
+          <div class="modal-head">
+            <div class="card-ic brand"><svg class="icon"><use href="#i-users"/></svg></div>
+            <div>
+              <h2 id="crTitle">新建群聊</h2>
+              <p class="muted xs">群是成员名单 + 路由别名，群消息仅送达群成员</p>
+            </div>
+          </div>
+          <label class="field">
+            短名（英文别名，如 ops）
+            <input type="text" x-model="newRoom.id" placeholder="ops" required pattern="[A-Za-z0-9_\-]+" autocomplete="off">
+          </label>
+          <label class="field">
+            显示名（可选，如 运维小分队）
+            <input type="text" x-model="newRoom.name" placeholder="显示名称（可中文）" autocomplete="off">
+          </label>
+          <div class="field">
+            <span>初始群成员</span>
+            <div class="chips max-h-scroll">
+              <template x-for="p in peers" :key="p.id">
+                <label class="pill clickable">
+                  <input type="checkbox" :value="p.id" x-model="newRoom.members">
+                  <span x-text="p.id"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button type="button" class="btn btn-ghost" data-close>取消</button>
+            <button type="submit" class="btn btn-primary"><svg class="icon xs"><use href="#i-plus"/></svg> 创建群聊</button>
+          </div>
+        </form>
+      </dialog>
+
+            <!-- Alpine scope: inside #page-command, so it shares the page state -->
+      <dialog id="dlgRoomMembers" class="modal" aria-labelledby="rmTitle">
+        <div class="modal-head">
+          <div class="card-ic info"><svg class="icon"><use href="#i-users"/></svg></div>
+          <div>
+            <h2 id="rmTitle">群聊成员管理</h2>
+            <p class="muted xs" x-text="activeTarget.name"></p>
+          </div>
+        </div>
+    
+        <div class="modal-section">
+          <h4>当前成员 (<span x-text="getMemberPeers().length"></span>)</h4>
+          <div class="chips">
+            <template x-for="m in getMemberPeers()" :key="m.id">
+              <span class="pill">
+                <span class="dot" :class="m.online ? 'on' : 'off'"></span>
+                <span x-text="m.id"></span>
+                <button type="button" class="btn-icon xs" @click="removeRoomMember(m.id)" title="移出群聊">×</button>
+              </span>
+            </template>
+            <span class="muted xs" x-show="getMemberPeers().length === 0">群内暂无成员</span>
+          </div>
+        </div>
+  
+        <div class="modal-section" x-show="getNonMemberPeers().length > 0">
+          <h4>拉入新成员</h4>
+          <div class="form-row">
+            <select x-model="newMemberId" aria-label="选择新成员">
+              <option value="">选择未入群的助手...</option>
+              <template x-for="p in getNonMemberPeers()" :key="p.id">
+                <option :value="p.id" x-text="p.id + (p.online ? ' (在线)' : ' (离线)')"></option>
+              </template>
+            </select>
+            <button type="button" class="btn btn-primary btn-sm" :disabled="!newMemberId" @click="addRoomMember()">拉进群</button>
+          </div>
+        </div>
+  
+        <div class="modal-foot">
+          <button type="button" class="btn btn-ghost" data-close>关闭</button>
+        </div>
+      </dialog>
+
       </section>
 
       <!-- ---------- 邀请 & Prompt ---------- -->
@@ -671,82 +750,8 @@
 </dialog>
 
 <!-- ============ Create Room Dialog ============ -->
-<dialog id="dlgCreateRoom" class="modal" aria-labelledby="crTitle" x-data="commandApp">
-  <form method="dialog" @submit.prevent="submitCreateRoom()">
-    <div class="modal-head">
-      <div class="card-ic brand"><svg class="icon"><use href="#i-users"/></svg></div>
-      <div>
-        <h2 id="crTitle">新建群聊</h2>
-        <p class="muted xs">群是成员名单 + 路由别名，群消息仅送达群成员</p>
-      </div>
-    </div>
-    <label class="field">
-      短名（英文别名，如 ops）
-      <input type="text" x-model="newRoom.id" placeholder="ops" required pattern="[A-Za-z0-9_\-]+" autocomplete="off">
-    </label>
-    <label class="field">
-      显示名（可选，如 运维小分队）
-      <input type="text" x-model="newRoom.name" placeholder="显示名称（可中文）" autocomplete="off">
-    </label>
-    <div class="field">
-      <span>初始群成员</span>
-      <div class="chips max-h-scroll">
-        <template x-for="p in peers" :key="p.id">
-          <label class="pill clickable">
-            <input type="checkbox" :value="p.id" x-model="newRoom.members">
-            <span x-text="p.id"></span>
-          </label>
-        </template>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button type="button" class="btn btn-ghost" data-close>取消</button>
-      <button type="submit" class="btn btn-primary"><svg class="icon xs"><use href="#i-plus"/></svg> 创建群聊</button>
-    </div>
-  </form>
-</dialog>
 
 <!-- ============ Room Members Management Dialog ============ -->
-<dialog id="dlgRoomMembers" class="modal" aria-labelledby="rmTitle" x-data="commandApp">
-  <div class="modal-head">
-    <div class="card-ic info"><svg class="icon"><use href="#i-users"/></svg></div>
-    <div>
-      <h2 id="rmTitle">群聊成员管理</h2>
-      <p class="muted xs" x-text="activeTarget.name"></p>
-    </div>
-  </div>
-  
-  <div class="modal-section">
-    <h4>当前成员 (<span x-text="getMemberPeers().length"></span>)</h4>
-    <div class="chips">
-      <template x-for="m in getMemberPeers()" :key="m.id">
-        <span class="pill">
-          <span class="dot" :class="m.online ? 'on' : 'off'"></span>
-          <span x-text="m.id"></span>
-          <button type="button" class="btn-icon xs" @click="removeRoomMember(m.id)" title="移出群聊">×</button>
-        </span>
-      </template>
-      <span class="muted xs" x-show="getMemberPeers().length === 0">群内暂无成员</span>
-    </div>
-  </div>
-
-  <div class="modal-section" x-show="getNonMemberPeers().length > 0">
-    <h4>拉入新成员</h4>
-    <div class="form-row">
-      <select x-model="newMemberId" aria-label="选择新成员">
-        <option value="">选择未入群的助手...</option>
-        <template x-for="p in getNonMemberPeers()" :key="p.id">
-          <option :value="p.id" x-text="p.id + (p.online ? ' (在线)' : ' (离线)')"></option>
-        </template>
-      </select>
-      <button type="button" class="btn btn-primary btn-sm" :disabled="!newMemberId" @click="addRoomMember()">拉进群</button>
-    </div>
-  </div>
-
-  <div class="modal-foot">
-    <button type="button" class="btn btn-ghost" data-close>关闭</button>
-  </div>
-</dialog>
 
 <div id="toasts" class="toasts" aria-live="polite"></div>
 

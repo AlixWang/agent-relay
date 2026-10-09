@@ -281,3 +281,71 @@ func TestConsoleUpdatePanelWiring(t *testing.T) {
 		}
 	}
 }
+
+// The command console is one Alpine root, and this guards it. Two production
+// incidents came from getting that wrong:
+//   - several x-data="commandApp" roots (page + dialogs) each built their own
+//     state, so entering the route filled a dialog's state and the page showed
+//     群聊频道 (0) / 助手私聊 (0) although /admin/rooms had the data;
+//   - "fixing" it by handing all roots one shared object broke the console
+//     completely: Alpine stamps its magics with a non-configurable
+//     Object.defineProperty per root, so the second root threw
+//     "Cannot redefine property: $nextTick" and Alpine.start() died.
+//
+// Hence: exactly one root in the markup, and the dialogs inside it (they need
+// the page's peers/rooms and must inherit its scope).
+func TestConsoleCommandRootIsSingle(t *testing.T) {
+	f := newFixture(t)
+	f.mux = f.srv.Handler(web.Handler())
+	cookie := f.adminLogin(t)
+	code, page := getRaw(t, f, "/", cookie)
+	if code != 200 {
+		t.Fatalf("console page: %d", code)
+	}
+	if n := strings.Count(page, `x-data="commandApp"`); n != 1 {
+		t.Fatalf("expected exactly one x-data=\"commandApp\" root (several roots = several states = empty lists; one shared object = Alpine crash), found %d", n)
+	}
+	// The section runs from its opening tag to the matching </section>.
+	start := strings.Index(page, `id="page-command"`)
+	if start < 0 {
+		t.Fatal("command page section missing")
+	}
+	tagStart := strings.LastIndex(page[:start], "<section")
+	if tagStart < 0 {
+		t.Fatal("command page section tag not found")
+	}
+	depth, end := 0, -1
+	for i := tagStart; i < len(page); {
+		switch {
+		case strings.HasPrefix(page[i:], "<section"):
+			depth++
+			i += len("<section")
+		case strings.HasPrefix(page[i:], "</section>"):
+			depth--
+			if depth == 0 {
+				end = i
+			}
+			i += len("</section>")
+		default:
+			i++
+		}
+		if end >= 0 {
+			break
+		}
+	}
+	if end < 0 {
+		t.Fatal("command page section never closes")
+	}
+	section := page[start:end]
+	for _, dlg := range []string{`id="dlgCreateRoom"`, `id="dlgRoomMembers"`} {
+		at := strings.Index(section, dlg)
+		if at < 0 {
+			t.Fatalf("%s must live inside #page-command so it inherits the page's Alpine scope", dlg)
+		}
+		// ...and it must not declare its own root.
+		line := section[at:min(at+160, len(section))]
+		if strings.Contains(line, "x-data=") {
+			t.Fatalf("%s must not declare its own x-data root (it inherits the page scope; a second root either gets its own state or crashes Alpine)", dlg)
+		}
+	}
+}

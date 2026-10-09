@@ -5,33 +5,38 @@ import { currentRoute, onRoute } from './router.js';
 import { refreshStats } from './auth.js';
 
 let commandPollTimer = null;
-let sharedCommandApp = null;
+let activeCommandApp = null;
 
-// The command console is ONE component shared by three Alpine roots: the page
-// section plus the create-room and member dialogs. Two reasons, both learned
-// the hard way (群聊频道/助手私聊 showed 0 while /admin/rooms answered fine):
-//  1. Alpine.data() is a factory, so every x-data="commandApp" used to build its
-//     own state. Only the instance that init()s LAST became "the app", which was
-//     the members dialog — so refreshCommand() (fired when the route is entered)
-//     filled the dialog's state and the rendered page section stayed empty.
-//  2. The dialogs genuinely need the page's state: the create-room form lists
-//     members from the same peers array.
-// Sharing one object fixes both; init() is idempotent because Alpine calls it
-// once per root.
+// The command console is ONE Alpine root: the page section carries
+// x-data="commandApp", and the create-room / member dialogs live inside that
+// section so they inherit its scope (they need the same peers/rooms state).
+//
+// Both halves of that sentence were bugs (群聊频道/助手私聊 showed 0 while
+// /admin/rooms answered fine, and a later attempt to share one object across
+// roots broke the whole console):
+//  - Separate x-data="commandApp" roots each got their own state, and the
+//    module-level "active app" ended up being the LAST one initialized — a
+//    dialog. So entering the route filled the dialog's state while the rendered
+//    page section stayed empty.
+//  - Returning one shared object to several roots is worse: Alpine calls
+//    Object.defineProperty(obj, '$' + magic, …) (non-configurable) for every
+//    x-data root, so the second root throws "Cannot redefine property:
+//    $nextTick" and Alpine.start() dies, leaving a blank console.
+// Hence: one root (enforced by TestConsoleCommandRootIsSingle), and a factory
+// that always returns a fresh state object.
 export function commandApp() {
-  if (!sharedCommandApp) sharedCommandApp = createCommandState();
-  return sharedCommandApp;
+  return createCommandState();
 }
 
 export function refreshCommand() {
-  const app = commandApp();
-  app.handleHashParams();
-  app.loadSessions();
-  app.startPolling();
+  if (!activeCommandApp) return;
+  activeCommandApp.handleHashParams();
+  activeCommandApp.loadSessions();
+  activeCommandApp.startPolling();
 }
 
 export function stopCommand() {
-  commandApp().stopPolling();
+  if (activeCommandApp) activeCommandApp.stopPolling();
 }
 
 function createCommandState() {
@@ -72,10 +77,9 @@ function createCommandState() {
     newMemberId: '',
 
     init() {
-      // Alpine runs init() once per x-data root (page + 2 dialogs) over this
-      // shared object: wire the DOM exactly once.
-      if (this._wired) return;
-      this._wired = true;
+      // One x-data root, so this runs once: remember the instance that the
+      // page renders, for the route handlers to drive.
+      activeCommandApp = this;
 
       // Setup modals
       setupDialog($('dlgCreateRoom'));

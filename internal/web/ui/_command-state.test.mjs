@@ -1,22 +1,25 @@
-// Behavioural test for the command console's shared state and route wiring.
+// Behavioural test for the command console's state and Alpine roots.
 //
 //   node internal/web/ui/_command-state.test.mjs
 //
-// Reported from production: 群聊频道 (0) / 助手私聊 (0) although /admin/rooms
-// returned the room with five members. Cause: Alpine.data() is a factory, so the
-// three x-data="commandApp" roots (page + create-room dialog + member dialog)
-// each built their own state, and the module-level "active app" ended up being
-// the LAST one initialized — a dialog. refreshCommand() (fired on entering the
-// route) therefore filled the dialog's state while the rendered page section
-// stayed empty, and the page's own init() only loaded when the console was
-// booted directly onto #command.
+// This test exists because the command console broke twice in production:
 //
-// This drives the real js/command.js with a stubbed DOM/API and asserts the
-// invariants: one shared state object, idempotent init, and that entering the
-// route fills THAT object.
+//  1. 群聊频道 (0) / 助手私聊 (0) while /admin/rooms returned the room with its
+//     members. Alpine.data() is a factory and the page carried THREE
+//     x-data="commandApp" roots (page + 2 dialogs), so entering the route filled
+//     the state of whichever instance init()ed last — a dialog — while the
+//     rendered page section stayed empty.
+//  2. The attempted fix (one object shared by all roots) broke the console
+//     outright: Alpine stamps magics with a NON-configurable defineProperty on
+//     every x-data root's object, so the second root threw
+//     "Cannot redefine property: $nextTick" out of Alpine.start().
+//
+// Hence the invariants tested here: a factory that always returns a distinct
+// object (safe for multiple roots), exactly one root in the markup (checked by
+// TestConsoleCommandRootIsSingle in Go), and route entry filling the instance the
+// page renders.
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -29,12 +32,13 @@ const mkEl = (id) => ({
   scrollTop: 0, scrollHeight: 100, clientHeight: 100, classList: { toggle() {}, add() {}, remove() {} },
   addEventListener: (t) => listeners.element.push(`${id}:${t}`),
   getBoundingClientRect: () => ({ top: 0, left: 0, right: 100, bottom: 100, width: 100, height: 100 }),
-  showModal() { this.open = true; }, close() { this.open = false; }, focus() {}, querySelector: () => null,
-  querySelectorAll: () => [], appendChild() {}, remove() {}, setAttribute() {},
+  querySelector: () => mkEl('nested'), querySelectorAll: () => [],
+  showModal() { this.open = true; }, close() { this.open = false; }, focus() {},
+  appendChild() {}, remove() {}, setAttribute() {},
 });
 const document = {
   getElementById: (id) => (els[id] ||= mkEl(id)),
-  querySelector: () => mkEl('nested'),
+  querySelector: () => null,
   querySelectorAll: () => [],
   createElement: (t) => mkEl(t),
   addEventListener: (t) => listeners.document.push(t),
@@ -70,7 +74,7 @@ globalThis.fetch = async (url) => {
   return { ok: true, status: 200, statusText: 'OK', json: async () => body };
 };
 
-// ---- import the real module (it must be syntax-valid ESM too) ------------
+// ---- import the real module (also proves it is valid ESM) ----------------
 const mod = await import(pathToFileURL(path.join(here, 'js', 'command.js')).href);
 const { commandApp, refreshCommand, stopCommand } = mod;
 
@@ -81,35 +85,45 @@ const assert = (cond, msg) => {
   }
 };
 
-// 1. One state object for every Alpine root (page + 2 dialogs).
+// Alpine's injectMagics, verbatim in effect: a NON-configurable property per
+// x-data root. If the factory ever hands out the same object twice, the second
+// call throws exactly like production did.
+const alpineInjectMagics = (obj) => {
+  for (const name of ['nextTick', 'el', 'refs', 'store', 'watch', 'dispatch', 'root', 'data', 'id']) {
+    Object.defineProperty(obj, '$' + name, { get() { return () => {}; }, enumerable: false });
+  }
+};
+
+// 1. Distinct state per root: safe for several roots, and the crash guard.
+// Alpine injects $nextTick & friends into every x-data scope; the test drives the
+// code outside Alpine, so provide it on the instance under test before Alpine's
+// (non-configurable) stamping would make it read-only.
 const page = commandApp();
-const dialogA = commandApp();
-// Alpine injects this magic into every x-data scope; the test calls the code
-// outside Alpine, so provide it here.
 page.$nextTick = (fn) => fn && fn();
-assert(page === dialogA, 'x-data="commandApp" roots must share ONE state object, got two');
-assert(typeof page.loadSessions === 'function', 'shared state must expose loadSessions');
+const secondRoot = commandApp();
+assert(page !== secondRoot, 'commandApp() must return a fresh object per Alpine root: a shared object throws "Cannot redefine property: $nextTick" out of Alpine.start()');
+alpineInjectMagics(page);
+alpineInjectMagics(secondRoot);
 
-// 2. init() is wiring, not a per-root side effect: Alpine calls it once per root.
-const before = listeners.document.length + listeners.element.length;
+// 2. init() records the instance the page renders. Alpine calls it once per
+// x-data root, and the markup is guarded to have exactly one (see
+// TestConsoleCommandRootIsSingle), which is what keeps the route handlers and
+// the rendered state the same object.
 page.init();
-page.init();
-page.init();
-const after = listeners.document.length + listeners.element.length;
-assert(after - before === 3, `init() must wire the DOM once (dialog + dialog + visibility), wired ${after - before} listeners`);
-assert(listeners.element.filter((l) => l.startsWith('dlg')).length === 2, 'each dialog must be set up exactly once');
+assert(listeners.element.filter((l) => l.startsWith('dlg')).length === 2, 'both dialogs must be wired by init()');
+assert(listeners.document.includes('visibilitychange'), 'polling must pause when the tab is hidden');
 
-// 3. Entering the route fills the object the page renders — the actual bug.
+// 3. Entering the route fills THAT instance — the original bug.
 location.hash = '#command?room=grp_chat';
 await refreshCommand();
 await new Promise((r) => setTimeout(r, 10));
-assert(page.rooms.length === 1 && page.rooms[0].id === 'grp_chat', 'rooms from /admin/rooms must land on the shared state, got ' + page.rooms.length);
+assert(page.rooms.length === 1 && page.rooms[0].id === 'grp_chat', 'rooms from /admin/rooms must land on the rendered instance, got ' + page.rooms.length);
 assert(page.rooms[0].members.length === 2, 'room members must survive the round trip');
-assert(page.peers.length === 5, 'peers must land on the shared state, got ' + page.peers.length);
+assert(page.peers.length === 5, 'peers must land on the rendered instance, got ' + page.peers.length);
 assert(page.activeTarget.type === 'room' && page.activeTarget.id === 'grp_chat', 'deep link #command?room=… must select the room');
 assert(calls.some((u) => u.startsWith('/admin/rooms')), 'the SPA must actually call /admin/rooms on route entry');
 
-// 4. Polling: one timer, no leaks, and it stops when the route is left.
+// 4. Polling: one timer, no leaks, stops when the route is left.
 assert(timers.size === 1, 'expected exactly one poll timer after entering the route, got ' + timers.size);
 await refreshCommand();
 assert(timers.size === 1, 're-entering the route must not stack poll timers, got ' + timers.size);
