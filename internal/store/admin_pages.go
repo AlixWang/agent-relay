@@ -137,7 +137,7 @@ func (s *sqliteStore) SearchMessagesPage(query string, limit, offset int) ([]*Me
 		return nil, 0, err
 	}
 	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
-		status,op,target,detail,decision,expires_at
+		status,op,target,detail,decision,expires_at,conv_id,mentions
 		FROM messages WHERE payload LIKE ? ESCAPE '\' ORDER BY seq DESC LIMIT ? OFFSET ?`, pat, limit, offset)
 	if err != nil {
 		return nil, 0, err

@@ -55,9 +55,9 @@ type Limits struct {
 
 // Rejection is a machine-readable send refusal.
 type Rejection struct {
-	Code   string // duplicate_id | loop_fuse_tripped | loop_guard | rate_limited | not_member | stale | agent_turn_budget
-	Reason string
-	Retry  int   // Retry-After seconds for rate_limited
+	Code      string // duplicate_id | loop_fuse_tripped | loop_guard | rate_limited | not_member | stale | agent_turn_budget
+	Reason    string
+	Retry     int   // Retry-After seconds for rate_limited
 	LatestSeq int64 // latest message seq for stale rejection
 }
 
@@ -129,16 +129,9 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 			}
 		}
 
-		// Freshness check: unsolicited replies must include seen_seq.
-		// Exception: @mentioned messages are solicited, no freshness check needed.
-		isMentioned := false
-		for _, mentioned := range env.Mentions {
-			if mentioned == env.From {
-				isMentioned = true
-				break
-			}
-		}
-		if !isMentioned && env.From != "user" && env.SeenSeq > 0 {
+		// Freshness check: unsolicited replies must not lag the latest seq.
+		// Exception: a sender @mentioned in recent history is solicited.
+		if env.From != "user" && !g.mentionedInRecent(env.ConvID, env.From) {
 			// Query latest message seq in this conversation.
 			latestSeq, err := g.st.ConversationMaxSeq(env.ConvID)
 			if err != nil {
@@ -146,7 +139,7 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 			}
 			if env.SeenSeq < latestSeq {
 				return nil, &Rejection{Code: "stale",
-					Reason: fmt.Sprintf("seen_seq=%d but latest is %d; re-read conversation history", env.SeenSeq, latestSeq),
+					Reason:    fmt.Sprintf("seen_seq=%d but latest is %d; re-read conversation history", env.SeenSeq, latestSeq),
 					LatestSeq: latestSeq}
 			}
 		}
@@ -513,6 +506,23 @@ func (g *Guard) ResetFuse(rootID string, now int64) error {
 		return err
 	}
 	return g.st.AppendAudit("admin", "fuse.reset", "thread="+rootID, now)
+}
+
+// mentionedInRecent reports whether sender appears in the @mentions of the
+// most recent conversation messages (§v12.4 freshness exception). Matching is
+// on the quoted id so "bob" never matches "bobby" inside the JSON array.
+func (g *Guard) mentionedInRecent(convID, sender string) bool {
+	mentions, err := g.st.RecentConversationMentions(convID, 5)
+	if err != nil {
+		return false
+	}
+	needle := `"` + sender + `"`
+	for _, m := range mentions {
+		if strings.Contains(m, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateConversationStreak updates the agent reply streak for a conversation (§v12).

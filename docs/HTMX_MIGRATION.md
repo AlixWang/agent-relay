@@ -269,7 +269,7 @@ htmx.js (CDN):        ~14 KB (已压缩)
 ```bash
 make install-templ
 # 或
-go install github.com/a-h/templ/cmd/templ@latest
+go install github.com/a-h/templ/cmd/templ@v0.3.1001
 ```
 
 ### Step 2: 生成 Templ 文件

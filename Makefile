@@ -5,7 +5,7 @@
 # CI/CD will run `templ generate` automatically
 generate:
 	@echo "Generating templ files..."
-	@which templ > /dev/null || (echo "Error: templ not installed. Run: go install github.com/a-h/templ/cmd/templ@latest" && exit 1)
+	@which templ > /dev/null || (echo "Error: templ not installed. Run: go install github.com/a-h/templ/cmd/templ@v0.3.1001" && exit 1)
 	templ generate
 
 # Build the project
@@ -29,13 +29,13 @@ clean:
 
 # Development: watch for changes and regenerate
 watch:
-	@which templ > /dev/null || (echo "Error: templ not installed. Run: go install github.com/a-h/templ/cmd/templ@latest" && exit 1)
+	@which templ > /dev/null || (echo "Error: templ not installed. Run: go install github.com/a-h/templ/cmd/templ@v0.3.1001" && exit 1)
 	templ generate --watch
 
 # Install templ
 install-templ:
 	@echo "Installing templ..."
-	go install github.com/a-h/templ/cmd/templ@latest
+	go install github.com/a-h/templ/cmd/templ@v0.3.1001
 	@echo "Templ installed successfully"
 
 # Quick dev setup

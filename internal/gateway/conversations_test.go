@@ -3,18 +3,16 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/AlixWang/agent-relay/internal/auth"
 	"github.com/AlixWang/agent-relay/internal/config"
 	"github.com/AlixWang/agent-relay/internal/guard"
 	"github.com/AlixWang/agent-relay/internal/presence"
-	"github.com/AlixWang/agent-relay/internal/prompts"
 	"github.com/AlixWang/agent-relay/internal/queue"
 	"github.com/AlixWang/agent-relay/internal/store"
-	"github.com/AlixWang/agent-relay/internal/stream"
 	"github.com/AlixWang/agent-relay/internal/verify"
 )
 
@@ -29,47 +27,30 @@ func setupTestServer(t *testing.T) (*Server, store.Store) {
 	t.Cleanup(func() { st.Close() })
 
 	cfg := &config.Config{
-		MaxBodyBytes:          1 << 20,
-		ConvMaxMembers:        20,
-		ConvAgentTurnBudget:   6,
-		ConvFuseMaxMessages:   100,
-		ConvCreatePerHour:     10,
-		PermissionTTLSecs:     600,
-		PermissionMaxTTLSecs:  3600,
-		FuseMaxMessages:       100,
-		FuseMaxAgeSecs:        3600,
-		RatePerMinute:         60,
-		AdminPasswordBcrypt:   "$2a$10$placeholder", // bcrypt hash of "password"
+		MaxBodyBytes:        1 << 20,
+		ConvMaxMembers:      20,
+		ConvAgentTurnBudget: 6,
+		ConvFuseMaxMessages: 100,
+		PermissionTTLSecs:   600,
+		FuseMaxMessages:     100,
+		FuseMaxAgeSecs:      3600,
+		RatePerMinute:       60,
 	}
 
-	authSvc := auth.New(st, "test-secret")
+	au := auth.New(st, 3600)
 	grd := guard.New(st, guard.Limits{
-		FuseMaxMessages:       cfg.FuseMaxMessages,
-		FuseMaxAgeSecs:        cfg.FuseMaxAgeSecs,
-		RatePerMinute:         cfg.RatePerMinute,
-		ConvAgentTurnBudget:   cfg.ConvAgentTurnBudget,
-		ConvFuseMaxMessages:   cfg.ConvFuseMaxMessages,
-		ConvMaxMembers:        cfg.ConvMaxMembers,
-		ConvCreatePerHour:     cfg.ConvCreatePerHour,
+		FuseMaxMessages:     cfg.FuseMaxMessages,
+		FuseMaxAgeSecs:      int64(cfg.FuseMaxAgeSecs),
+		RatePerMinute:       cfg.RatePerMinute,
+		ConvAgentTurnBudget: cfg.ConvAgentTurnBudget,
+		ConvFuseMaxMessages: cfg.ConvFuseMaxMessages,
 	})
 	qSvc := queue.New(st, grd)
-	pres := presence.New(st)
-	strm := stream.New()
-	ver := verify.New(st)
-	promptSvc := prompts.New(st, 11) // v11
+	pres := presence.New(st, 300, "")
+	ver := verify.New(st, 600)
 
-	srv := &Server{
-		cfg:      cfg,
-		st:       st,
-		auth:     authSvc,
-		guard:    grd,
-		queue:    qSvc,
-		presence: pres,
-		stream:   strm,
-		verify:   ver,
-		prompts:  promptSvc,
-		sessions: make(map[string]int64),
-	}
+	srv := New(cfg, st, au, qSvc, pres, ver, "http://127.0.0.1:18789")
+	srv.SetGuard(grd)
 
 	return srv, st
 }
@@ -84,7 +65,7 @@ func createPeer(t *testing.T, st store.Store, id string) string {
 
 func getPeerToken(t *testing.T, srv *Server, peerID string) string {
 	t.Helper()
-	token, err := srv.auth.IssueToken(peerID)
+	token, err := srv.auth.Rotate(peerID, "test", time.Now().Unix())
 	if err != nil {
 		t.Fatalf("issue token for %s: %v", peerID, err)
 	}
@@ -107,7 +88,7 @@ func doRequest(t *testing.T, srv *Server, method, path string, body any, token s
 	}
 
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler(nil).ServeHTTP(w, req)
 	return w
 }
 
@@ -296,12 +277,12 @@ func TestSendMessageToConversation(t *testing.T) {
 
 	// Send message
 	req := map[string]any{
-		"id":      "msg-1",
-		"to":      "conv:conv-1",
-		"from":    alice,
-		"kind":    "chat",
-		"payload": "hello @bob",
-		"conv_id": "conv-1",
+		"id":       "msg-1",
+		"to":       "conv:conv-1",
+		"from":     alice,
+		"kind":     "chat",
+		"payload":  "hello @bob",
+		"conv_id":  "conv-1",
 		"mentions": []string{"bob"},
 	}
 	w := doRequest(t, srv, "POST", "/messages", req, token)
@@ -387,12 +368,12 @@ func TestConversationFreshnessCheckRejects(t *testing.T) {
 
 	// Bob replies without seen_seq - should be rejected
 	req = map[string]any{
-		"id":      "msg-2",
-		"to":      "conv:conv-1",
-		"from":    bob,
-		"kind":    "chat",
-		"payload": "hi",
-		"conv_id": "conv-1",
+		"id":       "msg-2",
+		"to":       "conv:conv-1",
+		"from":     bob,
+		"kind":     "chat",
+		"payload":  "hi",
+		"conv_id":  "conv-1",
 		"seen_seq": 0,
 	}
 	w := doRequest(t, srv, "POST", "/messages", req, bobToken)

@@ -68,10 +68,10 @@ type Config struct {
 	ProfileRefreshDays int `toml:"profile_refresh_days"`
 
 	// Conversation limits (§v12): group chat safety guards.
-	ConvCreatePerHour   int `toml:"conv_create_per_hour"`    // max conversations per assistant per hour
-	ConvMaxMembers      int `toml:"conv_max_members"`        // max members per conversation
-	ConvAgentTurnBudget int `toml:"conv_agent_turn_budget"`  // max consecutive agent replies after user message
-	ConvFuseMaxMessages int `toml:"conv_fuse_max_messages"`  // circuit breaker per conversation
+	ConvCreatePerHour   int `toml:"conv_create_per_hour"`   // max conversations per assistant per hour
+	ConvMaxMembers      int `toml:"conv_max_members"`       // max members per conversation
+	ConvAgentTurnBudget int `toml:"conv_agent_turn_budget"` // max consecutive agent replies after user message
+	ConvFuseMaxMessages int `toml:"conv_fuse_max_messages"` // circuit breaker per conversation
 }
 
 // Default returns the documented defaults (DESIGN §6.1, §10.2, §v12).

@@ -457,13 +457,13 @@ func TestConversationCRUD(t *testing.T) {
 		t.Fatalf("got wrong conversation: %+v", got)
 	}
 
-	// Update conversation
-	if err := st.UpdateConversation("conv-1", "Updated Title", 2000); err != nil {
-		t.Fatalf("UpdateConversation: %v", err)
+	// Archive conversation
+	if err := st.ArchiveConversation("conv-1", 2000); err != nil {
+		t.Fatalf("ArchiveConversation: %v", err)
 	}
 	got, _ = st.GetConversation("conv-1")
-	if got.Title != "Updated Title" || got.ArchivedAt != 2000 {
-		t.Fatalf("update failed: %+v", got)
+	if got.ArchivedAt != 2000 {
+		t.Fatalf("archive failed: %+v", got)
 	}
 
 	// List conversations
@@ -675,4 +675,3 @@ func TestConversationMessagesWithMentions(t *testing.T) {
 		t.Fatalf("mentions not stored correctly: %s", vis[0].Mentions)
 	}
 }
-

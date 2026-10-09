@@ -651,4 +651,3 @@ func TestUpdateConversationStreak(t *testing.T) {
 		t.Fatalf("user should reset streak to 0, got %d", conv.AgentStreak)
 	}
 }
-

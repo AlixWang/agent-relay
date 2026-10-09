@@ -30,7 +30,7 @@ jobs:
         run: pwd; ls -la; ls cmd/agent-relay || true
 
       - name: install templ
-        run: go install github.com/a-h/templ/cmd/templ@latest
+        run: go install github.com/a-h/templ/cmd/templ@v0.3.1001
 
       - name: generate templ files
         run: templ generate

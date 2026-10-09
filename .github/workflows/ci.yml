@@ -19,8 +19,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Pinned to the version required in go.mod (see tools.go); a newer CLI
+      # can emit code the pinned runtime cannot compile.
       - name: install templ
-        run: go install github.com/a-h/templ/cmd/templ@latest
+        run: go install github.com/a-h/templ/cmd/templ@v0.3.1001
 
       - name: generate templ files
         run: templ generate

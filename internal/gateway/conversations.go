@@ -106,7 +106,7 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	_ = s.st.AppendAudit(peer.ID, "conversation.created",
 		fmt.Sprintf("conv_id=%s type=%s members=%d", convID, req.Type, totalMembers), now)
 
-	writeJSON(w, map[string]any{
+	writeJSON(w, 200, map[string]any{
 		"ok":      true,
 		"conv_id": convID,
 	})
@@ -155,7 +155,7 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		})
 	}
 
-	writeJSON(w, map[string]any{
+	writeJSON(w, 200, map[string]any{
 		"ok":            true,
 		"conversations": resp,
 	})
@@ -212,7 +212,7 @@ func (s *Server) handleGetConversationMessages(w http.ResponseWriter, r *http.Re
 	// Get latest seq
 	latestSeq, _ := s.st.ConversationMaxSeq(convID)
 
-	writeJSON(w, map[string]any{
+	writeJSON(w, 200, map[string]any{
 		"ok":         true,
 		"messages":   messages,
 		"latest_seq": latestSeq,
@@ -250,7 +250,7 @@ func (s *Server) handleLeaveConversation(w http.ResponseWriter, r *http.Request)
 	// Audit log
 	_ = s.st.AppendAudit(peer.ID, "conversation.left", "conv_id="+convID, now)
 
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // ---- Admin APIs (authenticated via admin session) ----
@@ -302,7 +302,7 @@ func (s *Server) handleAdminListConversations(w http.ResponseWriter, r *http.Req
 		})
 	}
 
-	writeJSON(w, map[string]any{
+	writeJSON(w, 200, map[string]any{
 		"ok":            true,
 		"conversations": resp,
 		"page":          page,
@@ -387,7 +387,7 @@ func (s *Server) handleAdminCreateConversation(w http.ResponseWriter, r *http.Re
 	_ = s.st.AppendAudit("admin", "conversation.created",
 		fmt.Sprintf("conv_id=%s type=%s members=%d", convID, req.Type, len(req.MemberIDs)), now)
 
-	writeJSON(w, map[string]any{
+	writeJSON(w, 200, map[string]any{
 		"ok":      true,
 		"conv_id": convID,
 	})
@@ -449,7 +449,7 @@ func (s *Server) handleAdminManageMembers(w http.ResponseWriter, r *http.Request
 		_ = s.st.AppendAudit("admin", "conversation.members_changed", detail, now)
 	}
 
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // handleAdminSendMessage handles POST /admin/conversations/{id}/messages.
@@ -514,7 +514,7 @@ func (s *Server) handleAdminSendMessage(w http.ResponseWriter, r *http.Request) 
 	_ = s.st.AppendAudit("admin", "message.sent_as_user",
 		fmt.Sprintf("conv_id=%s seq=%d", convID, seq), now)
 
-	writeJSON(w, map[string]any{
+	writeJSON(w, 200, map[string]any{
 		"ok":  true,
 		"seq": seq,
 	})
@@ -568,7 +568,7 @@ func (s *Server) handleAdminGetConversationMessages(w http.ResponseWriter, r *ht
 	// Get latest seq
 	latestSeq, _ := s.st.ConversationMaxSeq(convID)
 
-	writeJSON(w, map[string]any{
+	writeJSON(w, 200, map[string]any{
 		"ok":         true,
 		"messages":   messages,
 		"latest_seq": latestSeq,

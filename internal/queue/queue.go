@@ -30,9 +30,9 @@ type SendRequest struct {
 	Decision      string `json:"decision"`        // kind=permission_decision: allow|deny
 	ExpiresInSecs int64  `json:"expires_in_secs"` // kind=permission_request
 	// Conversation fields (§v12):
-	ConvID   string   `json:"conv_id"`   // conversation ID for group chat
-	SeenSeq  int64    `json:"seen_seq"`  // freshness check for unsolicited replies
-	Mentions []string `json:"mentions"`  // @-mentioned peer IDs
+	ConvID   string   `json:"conv_id"`  // conversation ID for group chat
+	SeenSeq  int64    `json:"seen_seq"` // freshness check for unsolicited replies
+	Mentions []string `json:"mentions"` // @-mentioned peer IDs
 }
 
 // Service ties guard + store together.

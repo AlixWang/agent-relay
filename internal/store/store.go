@@ -238,6 +238,9 @@ type Store interface {
 	CountConversationMembers(convID string) (int, error)
 	// ConversationMaxSeq returns the latest message seq in a conversation.
 	ConversationMaxSeq(convID string) (int64, error)
+	// RecentConversationMentions returns the mentions JSON of the most recent
+	// messages in a conversation, newest first (§v12.4 freshness exception).
+	RecentConversationMentions(convID string, limit int) ([]string, error)
 	// verify (§8.4)
 	SetSmoke(peerID, smokeID string, ts int64) error
 	GetSmoke(peerID string) (smokeID string, ts int64, err error)
@@ -688,12 +691,10 @@ func (s *sqliteStore) GetBySeq(seq int64) (*Message, error) {
 	m.RequiresApproval = req != 0
 	return &m, nil
 }
-	return &m, nil
-}
 
 func (s *sqliteStore) GetByIDAnySender(id string) ([]*Message, error) {
 	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
-		status,op,target,detail,decision,expires_at
+		status,op,target,detail,decision,expires_at,conv_id,mentions
 		FROM messages WHERE id=? ORDER BY seq`, id)
 	if err != nil {
 		return nil, err
@@ -711,8 +712,8 @@ func (s *sqliteStore) GetByIDAnySender(id string) ([]*Message, error) {
 }
 
 // VisibleTo implements the per-identity delivery view (DESIGN §4.4 + §v12):
-// Mode 1: direct (recipient=peer AND conv_id='')
-// Mode 2: broadcast (recipient='*' AND sender!=peer AND conv_id='')
+// Mode 1: direct (recipient=peer, no conv_id)
+// Mode 2: broadcast (recipient=*, sender!=peer, no conv_id)
 // Mode 3: conversation (recipient LIKE 'conv:%' AND member check + mentions filter)
 // All modes: seq > since, not yet acked by peer, not held in pending approval.
 func (s *sqliteStore) VisibleTo(peerID string, since int64, limit int) ([]*Message, error) {
@@ -740,8 +741,7 @@ func (s *sqliteStore) VisibleTo(peerID string, since int64, limit int) ([]*Messa
 		         AND cm.joined_seq <= m.seq
 		         AND (cm.left_at = 0 OR cm.left_at IS NULL)
 		     )
-		     AND m.sender != ?
-		     AND (m.mentions = '' OR m.mentions LIKE '%' || ? || '%')
+		     AND (m.sender = ? OR m.mentions = '' OR m.mentions LIKE '%' || ? || '%')
 		    )
 		  )
 		ORDER BY m.seq ASC LIMIT ?`, since, peerID, peerID, peerID, peerID, peerID, peerID, limit)
@@ -753,12 +753,6 @@ func (s *sqliteStore) VisibleTo(peerID string, since int64, limit int) ([]*Messa
 	for rows.Next() {
 		m, err := scanMessage(rows)
 		if err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
 			return nil, err
 		}
 		out = append(out, m)
@@ -791,21 +785,6 @@ func (s *sqliteStore) ThreadMessages(rootID string, limit int) ([]*Message, erro
 func (s *sqliteStore) LastNInThread(rootID string, n int) ([]*Message, error) {
 	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
 		status,op,target,detail,decision,expires_at,conv_id,mentions
-		FROM messages WHERE root_id=? ORDER BY seq DESC LIMIT ?`, rootID, n)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*Message
-	for rows.Next() {
-		m, err := scanMessage(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
 		FROM messages WHERE root_id=? ORDER BY seq DESC LIMIT ?`, rootID, n)
 	if err != nil {
 		return nil, err
@@ -1312,6 +1291,27 @@ func (s *sqliteStore) ConversationMaxSeq(convID string) (int64, error) {
 	var seq int64
 	err := s.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conv_id=?`, convID).Scan(&seq)
 	return seq, err
+}
+
+func (s *sqliteStore) RecentConversationMentions(convID string, limit int) ([]string, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 5
+	}
+	rows, err := s.db.Query(`SELECT mentions FROM messages
+		WHERE conv_id=? AND mentions != '' ORDER BY seq DESC LIMIT ?`, convID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var mentions string
+		if err := rows.Scan(&mentions); err != nil {
+			return nil, err
+		}
+		out = append(out, mentions)
+	}
+	return out, rows.Err()
 }
 
 func (s *sqliteStore) Close() error { return s.db.Close() }

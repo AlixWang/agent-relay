@@ -2,11 +2,14 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/AlixWang/agent-relay/internal/store"
 	"github.com/AlixWang/agent-relay/internal/web/views"
+	"github.com/google/uuid"
 )
 
 // handleConversationsPage renders the conversations page with Templ
@@ -96,8 +99,8 @@ func (s *Server) handleCreateConversationHTMX(w http.ResponseWriter, r *http.Req
 	}
 
 	// Create conversation
-	convID := "conv-" + generateID()
-	now := nowUnix()
+	convID := "conv-" + uuid.New().String()
+	now := time.Now().Unix()
 	conv := &store.Conversation{
 		ID:          convID,
 		Type:        convType,
@@ -126,12 +129,8 @@ func (s *Server) handleCreateConversationHTMX(w http.ResponseWriter, r *http.Req
 	}
 
 	// Audit log
-	s.audit("conversation.created", map[string]any{
-		"conv_id": convID,
-		"type":    convType,
-		"title":   title,
-		"members": memberIDs,
-	})
+	_ = s.st.AppendAudit("admin", "conversation.created",
+		fmt.Sprintf("conv_id=%s type=%s members=%d", convID, convType, len(memberIDs)), now)
 
 	// Return the new conversation card
 	memberCount := len(memberIDs)
@@ -271,8 +270,8 @@ func (s *Server) handleSendMessageHTMX(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Insert message
-	now := nowUnix()
-	msgID := "msg-" + generateID()
+	now := time.Now().Unix()
+	msgID := "msg-" + uuid.New().String()
 	msg := &store.Message{
 		ID:            msgID,
 		Sender:        "user",
@@ -295,11 +294,8 @@ func (s *Server) handleSendMessageHTMX(w http.ResponseWriter, r *http.Request) {
 	s.guard.UpdateConversationStreak(convID, "user")
 
 	// Audit log
-	s.audit("message.sent_as_user", map[string]any{
-		"conv_id":  convID,
-		"msg_id":   msgID,
-		"mentions": mentions,
-	})
+	_ = s.st.AppendAudit("admin", "message.sent_as_user",
+		fmt.Sprintf("conv_id=%s msg_id=%s", convID, msgID), now)
 
 	// Return the new message item
 	viewMsg := views.Message{

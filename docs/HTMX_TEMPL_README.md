@@ -240,7 +240,7 @@ A: **不需要**。`*_templ.go` 文件在 `.gitignore` 中，原因：
 CI workflow 会在构建前自动运行：
 ```yaml
 - name: install templ
-  run: go install github.com/a-h/templ/cmd/templ@latest
+  run: go install github.com/a-h/templ/cmd/templ@v0.3.1001
 - name: generate templ files
   run: templ generate
 ```
