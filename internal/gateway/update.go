@@ -522,56 +522,71 @@ func (s *Server) recordJobOutcome(recPath string, rec jobRecord, status, detail 
 	if status != "ok" {
 		action = "update." + status
 	}
-	_ = s.st.AppendAudit("admin", action,
-		fmt.Sprintf("version=%s job=%s detail=%s", rec.Version, rec.ID, detail), time.Now().Unix())
+	if err := s.st.AppendAudit("admin", action,
+		fmt.Sprintf("version=%s job=%s detail=%s", rec.Version, rec.ID, detail), time.Now().Unix()); err != nil {
+		log.Printf("update job %s: audit entry failed: %v", rec.ID, err)
+	}
 	log.Printf("update job %s %s: %s", rec.ID, status, detail)
 }
 
-// ReconcileUpdateJobs finishes the bookkeeping for a job whose requesting
-// process died in the restart that the update itself performs. Called once at
-// boot: without it a successful web update would leave no audit entry and no
-// way for the console to see the job it started.
-func (s *Server) ReconcileUpdateJobs() {
-	rec, recPath, ok := s.latestJobRecord()
+// reconcileUpdateJobOnce books the outcome of the newest job if it can tell
+// what happened, and reports whether it is done (nothing pending, or booked).
+// It must be called repeatedly, not only at boot: the helper writes its result
+// line a few seconds *after* restarting this process, i.e. after the boot
+// reconcile has already looked.
+func (s *Server) reconcileUpdateJobOnce() bool {
+	rec, recPath, haveRec := s.latestJobRecord()
+	if haveRec && rec.Audited {
+		return true
+	}
+	src, _, ok := s.latestJobSource()
 	if !ok {
-		// No record: an update from a release that kept jobs in memory (or a
-		// log left by one). Book it once, then remember with a stub record so
-		// later boots skip it.
-		fromLog, _, have := s.latestJobSource()
-		if !have {
-			return
-		}
-		hl, ok := parseHelperLog(s.jobLogPath(fromLog.Version))
-		if !ok || hl.Result == "" {
-			return
-		}
-		fromLog.ID, fromLog.Audited = "upd-log-"+fromLog.Version, true
-		if err := writeJobRecord(s.jobRecordPath(fromLog.Version), fromLog); err != nil {
-			log.Printf("update job %s: record fallback outcome: %v", fromLog.ID, err)
-			return
-		}
-		action := "update.ok"
-		if hl.Result != "ok" {
-			action = "update." + hl.Result
-		}
-		_ = s.st.AppendAudit("admin", action,
-			fmt.Sprintf("version=%s job=%s detail=%s", fromLog.Version, fromLog.ID, hl.Detail), time.Now().Unix())
-		log.Printf("update job %s %s (recovered from %s.log)", fromLog.ID, hl.Result, fromLog.Version)
-		return
+		return true
 	}
-	if rec.Audited {
-		return
+	if !haveRec {
+		// No record at all: an update applied by a release that kept job
+		// state in memory. Reconstruct one so the outcome can be booked once.
+		rec = jobRecord{ID: "upd-log-" + src.Version, Version: src.Version}
+		recPath = s.jobRecordPath(src.Version)
 	}
-	hl, haveLog := parseHelperLog(s.jobLogPath(rec.Version))
-	if haveLog && hl.Result != "" {
+	ver := rec.Version
+	if hl, haveLog := parseHelperLog(s.jobLogPath(ver)); haveLog && hl.Result != "" {
 		s.recordJobOutcome(recPath, rec, hl.Result, hl.Detail)
+		return true
+	}
+	if running := web.BinaryVersion(); running != "" && running != "dev" && running == ver {
+		// The result line is missing but this process IS the target version:
+		// the update landed.
+		s.recordJobOutcome(recPath, rec, "ok", "confirmed by the running version "+ver)
+		return true
+	}
+	return false
+}
+
+// ReconcileUpdateJobs books the outcome of an update whose requesting process
+// died in the restart the update itself performs. Boot is not enough on its own
+// (the helper may write its result seconds later, e.g. while it waits for the
+// health check), so this keeps retrying for a while and then stops. Without it
+// a successful web update could leave no audit entry at all — which is what the
+// first live run of this feature showed.
+func (s *Server) ReconcileUpdateJobs() {
+	if s.reconcileUpdateJobOnce() {
 		return
 	}
-	if running := web.BinaryVersion(); running != "" && running != "dev" && running == rec.Version {
-		s.recordJobOutcome(recPath, rec, "ok", "resumed after restart: running version is "+rec.Version)
-		return
-	}
-	log.Printf("update job %s for %s: no result yet, keeping it visible in the console", rec.ID, rec.Version)
+	log.Printf("update: result not in yet, watching the job log")
+	go func() {
+		const (
+			interval = 10 * time.Second
+			window   = 20 * time.Minute
+		)
+		for waited := time.Duration(0); waited < window; waited += interval {
+			time.Sleep(interval)
+			if s.reconcileUpdateJobOnce() {
+				return
+			}
+		}
+		log.Printf("update: stopped watching after %s (no helper result found)", window)
+	}()
 }
 
 // ---- GET /admin/update/status ----

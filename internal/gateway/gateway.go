@@ -4,8 +4,9 @@
 package gateway
 
 import (
-	"crypto/rand"
-	"encoding/base64"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -51,7 +52,6 @@ type Server struct {
 
 	adminHash []byte
 	mu        sync.Mutex
-	sessions  map[string]int64 // session token -> expiry unix
 	// Update jobs live on disk (update-jobs/), not here: the helper
 	// restarts this process mid-job. See internal/gateway/update.go.
 
@@ -63,7 +63,6 @@ func New(cfg *config.Config, st store.Store, au *auth.Service, q *queue.Service,
 	return &Server{
 		cfg: cfg, st: st, auth: au, queue: q,
 		presence: p, verify: v,
-		sessions:   map[string]int64{},
 		serverAddr: serverAddr,
 	}
 }
@@ -792,12 +791,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 401, "bad password")
 		return
 	}
-	var b [32]byte
-	_, _ = rand.Read(b[:])
-	tok := base64.RawURLEncoding.EncodeToString(b[:])
-	s.mu.Lock()
-	s.sessions[tok] = time.Now().Unix() + 12*3600
-	s.mu.Unlock()
+	tok := s.newAdminToken(time.Now().Add(12 * time.Hour))
 	http.SetCookie(w, &http.Cookie{
 		Name: "agent_relay_admin", Value: tok, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 3600,
@@ -807,28 +801,49 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie("agent_relay_admin"); err == nil {
-		s.mu.Lock()
-		delete(s.sessions, c.Value)
-		s.mu.Unlock()
-	}
 	http.SetCookie(w, &http.Cookie{Name: "agent_relay_admin", Value: "", Path: "/", MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
+// Admin sessions are stateless on purpose. The cookie carries its own expiry
+// plus an HMAC keyed by the configured password hash, so a session survives the
+// restart that every self-update performs. Before this, sessions lived in a map
+// in memory: the console reloaded a successful update straight into the login
+// screen, and the same thing happened on any service restart. A password change
+// still invalidates every outstanding cookie, because the key is derived from
+// the hash.
+func (s *Server) adminSessionKey() []byte {
+	sum := sha256.Sum256(append([]byte("agent-relay-admin-session\x00"), s.adminHash...))
+	return sum[:]
+}
+
+func (s *Server) newAdminToken(exp time.Time) string {
+	pay := strconv.FormatInt(exp.Unix(), 10)
+	mac := hmac.New(sha256.New, s.adminSessionKey())
+	mac.Write([]byte(pay))
+	return pay + "." + hex.EncodeToString(mac.Sum(nil))
+}
+
 func (s *Server) isAdmin(r *http.Request) bool {
 	c, err := r.Cookie("agent_relay_admin")
+	if err != nil || len(s.adminHash) == 0 {
+		return false
+	}
+	pay, sigHex, ok := strings.Cut(c.Value, ".")
+	if !ok {
+		return false
+	}
+	exp, err := strconv.ParseInt(pay, 10, 64)
+	if err != nil || time.Now().Unix() > exp {
+		return false
+	}
+	want, err := hex.DecodeString(sigHex)
 	if err != nil {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	exp, ok := s.sessions[c.Value]
-	if !ok || time.Now().Unix() > exp {
-		delete(s.sessions, c.Value)
-		return false
-	}
-	return true
+	mac := hmac.New(sha256.New, s.adminSessionKey())
+	mac.Write([]byte(pay))
+	return hmac.Equal(want, mac.Sum(nil))
 }
 
 func (s *Server) requirePeer(next http.HandlerFunc) http.HandlerFunc {

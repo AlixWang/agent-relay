@@ -874,7 +874,15 @@ the three files above plus the running binary version:
   (polls fail; the panel reads 服务重启中 and keeps retrying) and **reloads the page itself** once the
   job succeeds — only for a job that page view watched in flight, so re-opening the panel cannot loop.
 - Audit (`update.check|apply|ok|rolled_back|failed`) is booked exactly once per job: by the watcher
-  that started it, or at the next boot (`ReconcileUpdateJobs`) when the restart swallowed the watcher.
+  that started it, or by `ReconcileUpdateJobs` when the restart swallowed the watcher. Boot alone is
+  not enough — the helper writes `UPDATE_RESULT` a few seconds *after* restarting the gateway (it
+  waits for the health check), so reconciliation keeps retrying on a bounded window (10s × 20min)
+  until the outcome is decidable, and then stops. The first live run of this feature proved the point:
+  a successful update with no audit entry.
+- The admin session is a stateless HMAC cookie keyed by the configured password hash, so it survives
+  the restart every self-update performs (sessions used to live in memory: a successful update
+  reloaded the console straight onto the login screen). Changing the password invalidates every
+  outstanding cookie.
 
 **Privilege model.** The service user never self-elevates: the gateway only writes files into its own
 `data_dir` (its unit makes `/run` read-only, so escalation cannot even start), and a root systemd

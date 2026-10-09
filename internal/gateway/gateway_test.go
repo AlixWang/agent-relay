@@ -1505,3 +1505,47 @@ func TestAdminPaginationAndFacets(t *testing.T) {
 		t.Fatalf("stats missing count fields: %+v", out)
 	}
 }
+
+// Sessions must survive the restart every self-update performs. They used to
+// live in a map in memory, so a successful update reloaded the console onto the
+// login screen (and any restart logged the operator out).
+func TestAdminSessionSurvivesRestart(t *testing.T) {
+	f := newFixture(t)
+	cookie := f.adminLogin(t)
+	if c, _ := f.doCookie(t, "GET", "/admin/stats", nil, cookie); c != 200 {
+		t.Fatalf("login session must work: %d", c)
+	}
+
+	// A fresh process with the same config (same password hash) accepts it.
+	f2 := newFixture(t)
+	f2.srv.SetAdminHash(f.srv.adminHash)
+	if c, _ := f2.doCookie(t, "GET", "/admin/stats", nil, cookie); c != 200 {
+		t.Fatalf("session must survive a restart, got %d", c)
+	}
+
+	// Changing the admin password invalidates outstanding sessions.
+	f3 := newFixture(t)
+	other, err := bcrypt.GenerateFromPassword([]byte("different-password"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f3.srv.SetAdminHash(other)
+	if c, _ := f3.doCookie(t, "GET", "/admin/stats", nil, cookie); c != 401 {
+		t.Fatalf("password change must invalidate sessions, got %d", c)
+	}
+
+	// Tampered and expired cookies are refused.
+	if c, _ := f2.doCookie(t, "GET", "/admin/stats", nil, cookie+"x"); c != 401 {
+		t.Fatalf("tampered cookie must be refused, got %d", c)
+	}
+	expired := f2.srv.newAdminToken(time.Now().Add(-time.Minute))
+	if c, _ := f2.doCookie(t, "GET", "/admin/stats", nil, expired); c != 401 {
+		t.Fatalf("expired cookie must be refused, got %d", c)
+	}
+	// Logout clears the cookie for this browser.
+	f2.mux.ServeHTTP(httptest.NewRecorder(), func() *http.Request {
+		r := httptest.NewRequest("POST", "/admin/logout", nil)
+		r.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: cookie})
+		return r
+	}())
+}

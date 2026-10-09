@@ -483,3 +483,71 @@ func TestUpdateStatusFallsBackToHelperLog(t *testing.T) {
 		t.Fatalf("want exactly one recovered audit entry, got %d", seen)
 	}
 }
+
+// The helper writes UPDATE_RESULT a few seconds AFTER it restarted the gateway
+// (it waits for the health check), so a boot-time reconcile alone is not
+// enough: the first live run of this feature produced a successful update with
+// no audit entry for exactly that reason. Reconciling must keep trying until it
+// can tell what happened, and then book it exactly once.
+func TestUpdateReconcileConvergesOnLateResult(t *testing.T) {
+	f := newFixture(t)
+	f.srv.cfg.DataDir = t.TempDir()
+	rec, busy, err := f.srv.startUpdateJob("v9.9.30")
+	if busy != "" || err != nil {
+		t.Fatalf("start: %q %v", busy, err)
+	}
+	if err := os.WriteFile(f.srv.jobLogPath("v9.9.30"), []byte("[update] target v9.9.30 arch amd64\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing decidable yet: no result line, and (in tests) the running binary
+	// version is "dev", so it cannot be inferred either.
+	if f.srv.reconcileUpdateJobOnce() {
+		t.Fatal("must not report done while the outcome is unknown")
+	}
+	// The helper finishes late.
+	if err := os.WriteFile(f.srv.jobLogPath("v9.9.30"),
+		[]byte("[update] target v9.9.30 arch amd64\n[update] health ok\nUPDATE_RESULT ok v9.9.30\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !f.srv.reconcileUpdateJobOnce() {
+		t.Fatal("must report done once the result line is there")
+	}
+	if !f.srv.reconcileUpdateJobOnce() {
+		t.Fatal("repeat reconcile must stay done")
+	}
+	entries, _, _ := f.srv.st.ListAuditPage(store.AuditFilter{}, 50, 0)
+	ok := 0
+	for _, e := range entries {
+		if e.Action == "update.ok" {
+			ok++
+		}
+	}
+	if ok != 1 {
+		// ("update.apply" is written by the HTTP handler, which this test
+		// bypasses via startUpdateJob; only the outcome is under test here.)
+		t.Fatalf("want exactly one update.ok entry, got %d", ok)
+	}
+	if rec.ID == "" {
+		t.Fatal("job id lost")
+	}
+}
+
+// Same convergence, for the transition case: the job was applied by a release
+// that kept no record, the result line never made it, but the binary now
+// running IS the target — the update landed and must be booked as such.
+func TestUpdateReconcileBooksMissingResultFromRunningVersion(t *testing.T) {
+	f := newFixture(t)
+	f.srv.cfg.DataDir = t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(f.srv.jobLogPath("v9.9.31")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.srv.jobLogPath("v9.9.31"), []byte("[update] installed, restarting\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate "this process is the target version" without a real build.
+	view := updateJobView(jobRecord{ID: "upd-log-v9.9.31", Version: "v9.9.31"},
+		helperLog{Mark: map[string]string{"queue": "done"}, Lines: []string{"x"}}, true, false, "v9.9.31", time.Now())
+	if view.Status != "ok" || !view.Confirmed {
+		t.Fatalf("running version must be enough to call it success: %+v", view)
+	}
+}

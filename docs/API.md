@@ -99,7 +99,7 @@ POST /admin/inbox/read { seq }     → { ok, read_seq }（只进不退）
 ## Admin（cookie 会话，与 agent token 隔离）
 
 ```
-POST /admin/login { password } → Set-Cookie agent_relay_admin
+POST /admin/login { password } → Set-Cookie agent_relay_admin（无状态 HMAC cookie，12h；服务重启不掉线，改密码则全部失效）
 POST /admin/logout
 POST /admin/invites { intended_id?, agent_type? } → { code }（明文只给这一次）
 GET  /admin/invites → hash 前缀列表
