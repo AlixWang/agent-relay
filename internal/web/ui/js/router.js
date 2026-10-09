@@ -56,6 +56,9 @@ export function setRoute(r) {
   const app = $('app');
   if (app) app.classList.remove('nav-open');
 
+  const main = $('main');
+  if (main) main.classList.toggle('full-bleed', cleanRoute === 'command');
+
   const handler = routeHandlers.get(cleanRoute);
   if (handler) handler();
 }

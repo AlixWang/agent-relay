@@ -5,6 +5,21 @@ import { currentRoute, onRoute } from './router.js';
 import { refreshStats } from './auth.js';
 
 let commandPollTimer = null;
+let activeCommandApp = null;
+
+export function refreshCommand() {
+  if (activeCommandApp) {
+    activeCommandApp.handleHashParams();
+    activeCommandApp.loadSessions();
+    activeCommandApp.startPolling();
+  }
+}
+
+export function stopCommand() {
+  if (activeCommandApp) {
+    activeCommandApp.stopPolling();
+  }
+}
 
 export function commandApp() {
   return {
@@ -44,6 +59,8 @@ export function commandApp() {
     newMemberId: '',
 
     init() {
+      activeCommandApp = this;
+
       // Setup modals
       setupDialog($('dlgCreateRoom'));
       setupDialog($('dlgRoomMembers'));
@@ -51,14 +68,11 @@ export function commandApp() {
       // Check if URL specifies a target (e.g. #command?room=grp_ops)
       this.handleHashParams();
 
-      // Listen to route enter & leave
-      onRoute('command', () => {
-        this.handleHashParams();
+      // If already on command route or URL hash starts with #command, load immediately
+      if (currentRoute === 'command' || location.hash.startsWith('#command')) {
         this.loadSessions();
         this.startPolling();
-      }, () => {
-        this.stopPolling();
-      });
+      }
 
       // Window visibility change handling (pause polling when hidden)
       document.addEventListener('visibilitychange', () => {
@@ -108,14 +122,16 @@ export function commandApp() {
     async pollUpdate() {
       // 1. Silent sessions refresh
       try {
-        const [roomsRes, inboxRes] = await Promise.all([
+        const [roomsRes, inboxRes] = await Promise.allSettled([
           api('/admin/rooms'),
           api('/admin/inbox?page_size=10'),
         ]);
-        if (roomsRes.rooms) this.rooms = roomsRes.rooms;
-        if (inboxRes) {
-          this.inboxUnread = inboxRes.unread || 0;
-          this.inboxItems = inboxRes.items || [];
+        if (roomsRes.status === 'fulfilled' && roomsRes.value?.rooms) {
+          this.rooms = roomsRes.value.rooms;
+        }
+        if (inboxRes.status === 'fulfilled' && inboxRes.value) {
+          this.inboxUnread = inboxRes.value.unread || 0;
+          this.inboxItems = inboxRes.value.items || [];
         }
       } catch (_) {}
 
@@ -125,22 +141,28 @@ export function commandApp() {
 
     async loadSessions() {
       try {
-        const [roomsRes, inboxRes, peersRes] = await Promise.all([
+        const [roomsRes, inboxRes, peersRes] = await Promise.allSettled([
           api('/admin/rooms'),
           api('/admin/inbox?page_size=30'),
           api('/admin/peers?page_size=100'),
         ]);
-        this.rooms = roomsRes.rooms || [];
-        this.inboxUnread = inboxRes.unread || 0;
-        this.inboxItems = inboxRes.items || [];
-        this.peers = peersRes.peers || [];
+        if (roomsRes.status === 'fulfilled' && roomsRes.value) {
+          this.rooms = roomsRes.value.rooms || [];
+        }
+        if (inboxRes.status === 'fulfilled' && inboxRes.value) {
+          this.inboxUnread = inboxRes.value.unread || 0;
+          this.inboxItems = inboxRes.value.items || [];
+        }
+        if (peersRes.status === 'fulfilled' && peersRes.value) {
+          this.peers = peersRes.value.peers || [];
+        }
 
         // If target is a room, match room name from list
         if (this.activeTarget.type === 'room') {
           const found = this.rooms.find((r) => r.id === this.activeTarget.id);
           if (found) {
             this.activeTarget.name = found.name ? `${found.name} (${found.id})` : found.id;
-            this.activeTarget.subtitle = `${(found.members || []).length} 名成员`;
+            this.activeTarget.subtitle = `${(found.members || []).length} 名成员 · 群聊频道`;
           }
         }
         await this.loadActiveMessages(false);
@@ -158,6 +180,9 @@ export function commandApp() {
         subtitle: '助手给管理员发送的所有汇报与回复',
       };
       this.activeRoomData = null;
+      if (location.hash !== '#command?view=inbox') {
+        history.replaceState(null, '', '#command?view=inbox');
+      }
       this.loadActiveMessages(false);
     },
 
@@ -169,6 +194,9 @@ export function commandApp() {
         subtitle: '向所有在线助手广播一条指令或通知',
       };
       this.activeRoomData = null;
+      if (location.hash !== '#command') {
+        history.replaceState(null, '', '#command');
+      }
       this.loadActiveMessages(false);
     },
 
@@ -179,6 +207,9 @@ export function commandApp() {
         name: room.name ? `${room.name} (${room.id})` : room.id,
         subtitle: `${(room.members || []).length} 名成员 · 群聊频道`,
       };
+      if (location.hash !== '#command?room=' + encodeURIComponent(room.id)) {
+        history.replaceState(null, '', '#command?room=' + encodeURIComponent(room.id));
+      }
       this.loadActiveMessages(false);
     },
 
@@ -190,6 +221,9 @@ export function commandApp() {
         subtitle: `${peer.display_name || peer.agent_type || '助手'} · 直发私聊`,
       };
       this.activeRoomData = null;
+      if (location.hash !== '#command?peer=' + encodeURIComponent(peer.id)) {
+        history.replaceState(null, '', '#command?peer=' + encodeURIComponent(peer.id));
+      }
       this.loadActiveMessages(false);
     },
 
@@ -439,30 +473,32 @@ export function commandApp() {
     // Filter helpers
     filteredRooms() {
       const q = this.searchQuery.toLowerCase().trim();
-      if (!q) return this.rooms;
-      return this.rooms.filter((r) =>
-        r.id.toLowerCase().includes(q) || (r.name && r.name.toLowerCase().includes(q))
+      const list = Array.isArray(this.rooms) ? this.rooms : [];
+      if (!q) return list;
+      return list.filter((r) =>
+        (r.id && r.id.toLowerCase().includes(q)) || (r.name && r.name.toLowerCase().includes(q))
       );
     },
 
     filteredPeers() {
       const q = this.searchQuery.toLowerCase().trim();
-      if (!q) return this.peers;
-      return this.peers.filter((p) =>
-        p.id.toLowerCase().includes(q) || (p.display_name && p.display_name.toLowerCase().includes(q))
+      const list = Array.isArray(this.peers) ? this.peers : [];
+      if (!q) return list;
+      return list.filter((p) =>
+        (p.id && p.id.toLowerCase().includes(q)) || (p.display_name && p.display_name.toLowerCase().includes(q))
       );
     },
 
     getMemberPeers() {
       if (!this.activeRoomData || !this.activeRoomData.members) return [];
-      const memberIds = new Set(this.activeRoomData.members);
-      return this.peers.filter((p) => memberIds.has(p.id));
+      const memberIds = new Set(this.activeRoomData.members.map((m) => typeof m === 'object' ? m.id : m));
+      return (this.peers || []).filter((p) => memberIds.has(p.id));
     },
 
     getNonMemberPeers() {
-      if (!this.activeRoomData || !this.activeRoomData.members) return this.peers;
-      const memberIds = new Set(this.activeRoomData.members);
-      return this.peers.filter((p) => !memberIds.has(p.id));
+      if (!this.activeRoomData || !this.activeRoomData.members) return this.peers || [];
+      const memberIds = new Set(this.activeRoomData.members.map((m) => typeof m === 'object' ? m.id : m));
+      return (this.peers || []).filter((p) => !memberIds.has(p.id));
     },
 
     formatTime(ts) {

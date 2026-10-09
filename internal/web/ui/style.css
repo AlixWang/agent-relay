@@ -650,11 +650,20 @@ dialog::backdrop { background: rgb(0 0 0 / .55); backdrop-filter: blur(2px); }
    Command & ChatOps Console Redesign (.cmd-*)
    ========================================================================= */
 .cmd-page {
-  height: calc(100dvh - 60px) !important;
-  padding: 0 !important;
-  overflow: hidden !important;
-  display: flex !important;
-  flex-direction: column !important;
+  height: calc(100dvh - 60px);
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.cmd-page[hidden] {
+  display: none !important;
+}
+
+main.full-bleed {
+  padding: 0;
+  max-width: none;
+  height: calc(100dvh - 60px);
 }
 
 .cmd-layout {

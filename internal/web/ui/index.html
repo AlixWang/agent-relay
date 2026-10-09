@@ -265,7 +265,7 @@
                       <span x-text="r.name || r.id"></span>
                       <span class="muted xs mono" x-text="formatAgo(r.last_at)"></span>
                     </div>
-                    <div class="cmd-session-preview" x-text="r.last_preview || ((r.members ? r.members.length : 0) + ' 名成员')"></div>
+                    <div class="cmd-session-preview" x-text="r.preview || r.last_preview || ((r.members ? r.members.length : 0) + ' 名成员')"></div>
                   </div>
                 </div>
               </template>

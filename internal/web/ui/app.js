@@ -10,7 +10,7 @@ import { initPrompts } from './js/prompts.js';
 import { initAudit, refreshAudit } from './js/audit.js';
 import { initTokens, refreshTokens } from './js/tokens.js';
 import { initSystem, refreshSystem } from './js/system.js';
-import { commandApp } from './js/command.js';
+import { commandApp, refreshCommand, stopCommand } from './js/command.js';
 
 // Register Alpine.js components
 Alpine.data('commandApp', commandApp);
@@ -18,6 +18,7 @@ Alpine.data('commandApp', commandApp);
 // Wire route handlers
 onRoute('members', refreshPeers);
 onRoute('threads', refreshThreads);
+onRoute('command', refreshCommand, stopCommand);
 onRoute('audit', refreshAudit);
 onRoute('tokens', refreshTokens);
 onRoute('system', refreshSystem);
