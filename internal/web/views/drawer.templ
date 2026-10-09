@@ -1,0 +1,105 @@
+package views
+
+// Message represents a conversation message
+type Message struct {
+	ID        string
+	Sender    string
+	Payload   string
+	CreatedAt int64
+}
+
+// ConversationDetail represents detailed conversation info
+type ConversationDetail struct {
+	ID          string
+	Type        string
+	Title       string
+	MemberCount int
+	LatestSeq   int64
+	Messages    []Message
+}
+
+// ConversationDrawer renders the conversation detail drawer
+templ ConversationDrawer(conv ConversationDetail) {
+	<dialog id="convDrawer" class="drawer" open>
+		<div class="drawer-head">
+			<div class="drawer-title">
+				<span class="muted xs">会话</span>
+				<div class="drawer-title-row">
+					<h2>{ conv.Title }</h2>
+				</div>
+				<p class="muted xs">
+					if conv.Type == "dm" {
+						私聊
+					} else {
+						群组
+					}
+					·
+					{ fmt.Sprintf("%d", conv.MemberCount) } 成员
+				</p>
+			</div>
+			<div class="row-btns tight drawer-actions">
+				<button class="btn btn-ghost btn-sm"
+					hx-get={ fmt.Sprintf("/admin/conversations/%s/messages", conv.ID) }
+					hx-target="#convMessagesContainer"
+					hx-swap="innerHTML">
+					<svg class="icon"><use href="#i-refresh"></use></svg>
+					刷新
+				</button>
+				<button class="btn-icon"
+					onclick="this.closest('dialog').remove()"
+					aria-label="关闭">
+					<svg class="icon"><use href="#i-x"></use></svg>
+				</button>
+			</div>
+		</div>
+		<div class="drawer-body">
+			<div id="convMessagesContainer" class="msg-list">
+				@MessageList(conv.Messages)
+			</div>
+			<div class="conv-input-area">
+				<form hx-post={ fmt.Sprintf("/admin/conversations/%s/messages", conv.ID) }
+					hx-target="#convMessagesContainer"
+					hx-swap="beforeend"
+					hx-on::after-request="if(event.detail.successful) this.reset()">
+					<textarea name="payload"
+						placeholder="输入消息... 使用 @peer-id 提及成员"
+						rows="3"
+						required></textarea>
+					<div class="conv-input-actions">
+						<button type="submit" class="btn btn-primary btn-sm">
+							<svg class="icon"><use href="#i-send"></use></svg>
+							发送
+						</button>
+					</div>
+				</form>
+			</div>
+		</div>
+	</dialog>
+}
+
+// MessageList renders a list of messages
+templ MessageList(messages []Message) {
+	if len(messages) == 0 {
+		<div class="empty">
+			<p class="muted">暂无消息</p>
+		</div>
+	} else {
+		for _, msg := range messages {
+			@MessageItem(msg)
+		}
+	}
+}
+
+// MessageItem renders a single message
+templ MessageItem(msg Message) {
+	<div class="msg-item" id={ fmt.Sprintf("msg-%s", msg.ID) }>
+		<div class="msg-head">
+			@Avatar(msg.Sender, "sm")
+			<strong style={ fmt.Sprintf("color: hsl(%d, 60%%, 50%%)", hashHue(msg.Sender)) }>
+				{ msg.Sender }
+			</strong>
+			<span class="muted xs">{ formatTime(msg.CreatedAt) }</span>
+		</div>
+		<div class="msg-body">{ msg.Payload }</div>
+	</div>
+}

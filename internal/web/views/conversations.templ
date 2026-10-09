@@ -1,0 +1,114 @@
+package views
+
+import (
+	"fmt"
+	"time"
+)
+
+// Conversation represents a conversation view model
+type Conversation struct {
+	ID          string
+	Type        string
+	Title       string
+	CreatedBy   string
+	CreatedAt   int64
+	MemberCount int
+	LatestSeq   int64
+	AgentStreak int
+}
+
+// ConversationsPage is the main conversations listing page
+templ ConversationsPage(conversations []Conversation) {
+	@Layout("会话", ConversationsContent(conversations))
+}
+
+// ConversationsContent is the main content for conversations page
+templ ConversationsContent(conversations []Conversation) {
+	<section id="page-conversations" class="page">
+		<div class="panel">
+			<div class="panel-bar">
+				<div class="bar-right">
+					<button class="btn btn-primary btn-sm"
+						hx-get="/admin/conversations/new"
+						hx-target="#modal-container"
+						hx-swap="innerHTML">
+						<svg class="icon"><use href="#i-plus"></use></svg>
+						创建会话
+					</button>
+					<button class="btn btn-outline btn-sm"
+						hx-get="/admin/conversations"
+						hx-target="#convList"
+						hx-swap="innerHTML">
+						<svg class="icon"><use href="#i-refresh"></use></svg>
+						刷新
+					</button>
+				</div>
+			</div>
+			<div id="convList" class="card-grid">
+				if len(conversations) == 0 {
+					@EmptyState()
+				} else {
+					for _, conv := range conversations {
+						@ConversationCard(conv)
+					}
+				}
+			</div>
+		</div>
+	</section>
+	<div id="modal-container"></div>
+	<div id="drawer-container"></div>
+}
+
+// ConversationCard renders a single conversation card
+templ ConversationCard(conv Conversation) {
+	<div class="card clickable"
+		hx-get={ fmt.Sprintf("/admin/conversations/%s/drawer", conv.ID) }
+		hx-target="#drawer-container"
+		hx-swap="innerHTML">
+		<div class="card-head">
+			<div class="card-ic info">
+				<svg class="icon"><use href="#i-message"></use></svg>
+			</div>
+			<div>
+				<h3>{ conv.Title }</h3>
+				<p class="muted xs">
+					if conv.Type == "dm" {
+						私聊
+					} else {
+						群组
+					}
+					·
+					{ fmt.Sprintf("%d", conv.MemberCount) } 成员
+					·
+					创建于 { formatTime(conv.CreatedAt) }
+				</p>
+			</div>
+		</div>
+		<div class="card-body">
+			<div class="stat-row">
+				<span><strong>{ fmt.Sprintf("%d", conv.LatestSeq) }</strong> 条消息</span>
+				<span>连续助手回复: <strong>{ fmt.Sprintf("%d", conv.AgentStreak) }</strong></span>
+			</div>
+		</div>
+	</div>
+}
+
+// EmptyState for when there are no conversations
+templ EmptyState() {
+	<div class="empty">
+		<svg class="icon lg"><use href="#i-message"></use></svg>
+		<p>暂无会话</p>
+		<button class="btn btn-primary"
+			hx-get="/admin/conversations/new"
+			hx-target="#modal-container"
+			hx-swap="innerHTML">
+			创建第一个会话
+		</button>
+	</div>
+}
+
+// Helper function to format timestamp
+func formatTime(ts int64) string {
+	t := time.Unix(ts, 0)
+	return t.Format("2006/01/02 15:04:05")
+}

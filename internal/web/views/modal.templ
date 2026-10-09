@@ -1,0 +1,98 @@
+package views
+
+// Peer represents a peer for member selection
+type Peer struct {
+	ID     string
+	Status string
+}
+
+// CreateConversationModal renders the create conversation modal
+templ CreateConversationModal(peers []Peer) {
+	<dialog id="createConvDlg" class="modal" open>
+		<form hx-post="/admin/conversations"
+			hx-target="#convList"
+			hx-swap="afterbegin"
+			hx-on::after-request="if(event.detail.successful) this.closest('dialog').remove()">
+			<div class="modal-head">
+				<h2>创建会话</h2>
+				<button type="button" class="btn-icon"
+					onclick="this.closest('dialog').remove()"
+					aria-label="关闭">
+					<svg class="icon"><use href="#i-x"></use></svg>
+				</button>
+			</div>
+			<div class="modal-body">
+				<div class="form-row">
+					<label class="field">
+						会话类型
+						<select name="type" required>
+							<option value="group">群组</option>
+							<option value="dm">私聊</option>
+						</select>
+					</label>
+				</div>
+				<div class="form-row">
+					<label class="field">
+						会话标题
+						<input name="title" type="text" placeholder="输入会话标题" required/>
+					</label>
+				</div>
+				<div class="form-row">
+					<label class="field">
+						添加成员（选择活跃的助手）
+						<div class="member-select">
+							for _, peer := range peers {
+								if peer.Status == "active" {
+									@PeerCheckbox(peer)
+								}
+							}
+						</div>
+					</label>
+				</div>
+			</div>
+			<div class="modal-foot">
+				<button type="button" class="btn btn-ghost"
+					onclick="this.closest('dialog').remove()">
+					取消
+				</button>
+				<button type="submit" class="btn btn-primary">创建</button>
+			</div>
+		</form>
+	</dialog>
+}
+
+// PeerCheckbox renders a single peer checkbox
+templ PeerCheckbox(peer Peer) {
+	<label class="checkbox-label">
+		<input type="checkbox" name="member_ids" value={ peer.ID }/>
+		@Avatar(peer.ID, "xs")
+		<span>{ peer.ID }</span>
+	</label>
+}
+
+// Avatar generates a colored avatar with initials
+templ Avatar(id string, size string) {
+	<div class={ "avatar", size } style={ fmt.Sprintf("--h: %d", hashHue(id)) }>
+		{ getInitials(id) }
+	</div>
+}
+
+// Helper: hash string to hue value (0-360)
+func hashHue(s string) int {
+	h := 0
+	for _, c := range s {
+		h = ((h << 5) - h + int(c)) & 0xffffffff
+	}
+	if h < 0 {
+		h = -h
+	}
+	return h % 360
+}
+
+// Helper: get first 2 characters as initials
+func getInitials(s string) string {
+	if len(s) >= 2 {
+		return s[:2]
+	}
+	return s
+}

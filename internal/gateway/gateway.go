@@ -140,6 +140,15 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("PATCH /admin/conversations/{id}/members", s.requireAdmin(s.handleAdminManageMembers))
 	mux.HandleFunc("POST /admin/conversations/{id}/messages", s.requireAdmin(s.handleAdminSendMessage))
 	mux.HandleFunc("GET /admin/conversations/{id}/messages", s.requireAdmin(s.handleAdminGetConversationMessages))
+
+	// HTMX + Templ routes for conversations UI
+	mux.HandleFunc("GET /admin/conversations-page", s.requireAdmin(s.handleConversationsPage))
+	mux.HandleFunc("GET /admin/conversations/new", s.requireAdmin(s.handleNewConversationModal))
+	mux.HandleFunc("POST /admin/conversations-htmx", s.requireAdmin(s.handleCreateConversationHTMX))
+	mux.HandleFunc("GET /admin/conversations/{id}/drawer", s.requireAdmin(s.handleConversationDrawer))
+	mux.HandleFunc("GET /admin/conversations/{id}/messages-list", s.requireAdmin(s.handleConversationMessages))
+	mux.HandleFunc("POST /admin/conversations/{id}/send", s.requireAdmin(s.handleSendMessageHTMX))
+
 	// Web self-update (DESIGN §10.4): releases-only, verified, systemd-only.
 	mux.HandleFunc("GET /admin/update/status", s.requireAdmin(s.handleAdminUpdateStatus))
 	mux.HandleFunc("POST /admin/update/check", s.requireAdmin(s.handleAdminUpdateCheck))
