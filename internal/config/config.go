@@ -66,15 +66,9 @@ type Config struct {
 	// The server nudges online peers to refresh via heartbeat when the
 	// profile is older than this. 0 disables the nudge.
 	ProfileRefreshDays int `toml:"profile_refresh_days"`
-
-	// Conversation limits (§v12): group chat safety guards.
-	ConvCreatePerHour   int `toml:"conv_create_per_hour"`   // max conversations per assistant per hour
-	ConvMaxMembers      int `toml:"conv_max_members"`       // max members per conversation
-	ConvAgentTurnBudget int `toml:"conv_agent_turn_budget"` // max consecutive agent replies after user message
-	ConvFuseMaxMessages int `toml:"conv_fuse_max_messages"` // circuit breaker per conversation
 }
 
-// Default returns the documented defaults (DESIGN §6.1, §10.2, §v12).
+// Default returns the documented defaults (DESIGN §6.1, §10.2).
 func Default() *Config {
 	return &Config{
 		ListenAddr:           "auto",
@@ -98,10 +92,6 @@ func Default() *Config {
 		StreamKeepaliveSecs:  20,
 		StreamMaxPerPeer:     3,
 		ProfileRefreshDays:   7,
-		ConvCreatePerHour:    10,
-		ConvMaxMembers:       20,
-		ConvAgentTurnBudget:  6,
-		ConvFuseMaxMessages:  100,
 	}
 }
 
@@ -133,8 +123,6 @@ func Load(path string) (*Config, error) {
 		"offline_webhook_url": true, "max_body_bytes": true,
 		"stream_keepalive_secs": true, "stream_max_per_peer": true,
 		"profile_refresh_days": true,
-		"conv_create_per_hour": true, "conv_max_members": true,
-		"conv_agent_turn_budget": true, "conv_fuse_max_messages": true,
 	}
 	for k := range raw {
 		if !known[k] {
@@ -195,18 +183,6 @@ func (c *Config) Validate() error {
 	}
 	if c.ProfileRefreshDays < 0 {
 		return fmt.Errorf("profile_refresh_days must be >= 0")
-	}
-	if c.ConvCreatePerHour < 0 {
-		return fmt.Errorf("conv_create_per_hour must be >= 0")
-	}
-	if c.ConvMaxMembers < 2 || c.ConvMaxMembers > 100 {
-		return fmt.Errorf("conv_max_members must be 2-100")
-	}
-	if c.ConvAgentTurnBudget < 1 {
-		return fmt.Errorf("conv_agent_turn_budget must be >= 1")
-	}
-	if c.ConvFuseMaxMessages < 10 {
-		return fmt.Errorf("conv_fuse_max_messages must be >= 10")
 	}
 	return nil
 }

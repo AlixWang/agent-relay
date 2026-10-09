@@ -26,6 +26,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/stream"
 	"github.com/AlixWang/agent-relay/internal/verify"
 	"github.com/AlixWang/agent-relay/internal/web"
+	"github.com/AlixWang/agent-relay/internal/web/views"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -59,6 +60,10 @@ type Server struct {
 
 func New(cfg *config.Config, st store.Store, au *auth.Service, q *queue.Service,
 	p *presence.Service, v *verify.Service, serverAddr string) *Server {
+	// Cache-bust templ page assets with the same baked release tag as the
+	// single-page console (§9): ?v= on CSS/JS so a release never mixes stale
+	// cached assets with fresh HTML.
+	views.SetAssetVersion(web.AssetVersion())
 	return &Server{
 		cfg: cfg, st: st, auth: au, queue: q,
 		presence: p, verify: v,
@@ -109,11 +114,6 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	// Prompt distribution (§8.6): peers pull worker-instruction updates
 	// here when heartbeat signals prompt_update. Authed, per-identity.
 	mux.HandleFunc("GET /prompts/current", s.handlePromptCurrent)
-	// Conversation APIs (§v12): assistant-facing conversation management.
-	mux.HandleFunc("POST /conversations", s.handleCreateConversation)
-	mux.HandleFunc("GET /conversations", s.handleListConversations)
-	mux.HandleFunc("GET /conversations/{id}/messages", s.handleGetConversationMessages)
-	mux.HandleFunc("POST /conversations/{id}/leave", s.handleLeaveConversation)
 
 	mux.HandleFunc("POST /admin/login", s.handleAdminLogin)
 	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)
@@ -134,20 +134,6 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("POST /admin/prompts", s.requireAdmin(s.handleAdminPrompts))
 	mux.HandleFunc("GET /admin/stats", s.requireAdmin(s.handleAdminStats))
 	mux.HandleFunc("GET /admin/config", s.requireAdmin(s.handleAdminConfig))
-	// Conversation admin APIs (§v12): admin conversation management.
-	mux.HandleFunc("GET /admin/conversations", s.requireAdmin(s.handleAdminListConversations))
-	mux.HandleFunc("POST /admin/conversations", s.requireAdmin(s.handleAdminCreateConversation))
-	mux.HandleFunc("PATCH /admin/conversations/{id}/members", s.requireAdmin(s.handleAdminManageMembers))
-	mux.HandleFunc("POST /admin/conversations/{id}/messages", s.requireAdmin(s.handleAdminSendMessage))
-	mux.HandleFunc("GET /admin/conversations/{id}/messages", s.requireAdmin(s.handleAdminGetConversationMessages))
-
-	// HTMX + Templ routes for conversations UI
-	mux.HandleFunc("GET /admin/conversations-page", s.requireAdmin(s.handleConversationsPage))
-	mux.HandleFunc("GET /admin/conversations/new", s.requireAdmin(s.handleNewConversationModal))
-	mux.HandleFunc("POST /admin/conversations-htmx", s.requireAdmin(s.handleCreateConversationHTMX))
-	mux.HandleFunc("GET /admin/conversations/{id}/drawer", s.requireAdmin(s.handleConversationDrawer))
-	mux.HandleFunc("GET /admin/conversations/{id}/messages-list", s.requireAdmin(s.handleConversationMessages))
-	mux.HandleFunc("POST /admin/conversations/{id}/send", s.requireAdmin(s.handleSendMessageHTMX))
 
 	// Web self-update (DESIGN §10.4): releases-only, verified, systemd-only.
 	mux.HandleFunc("GET /admin/update/status", s.requireAdmin(s.handleAdminUpdateStatus))
@@ -470,26 +456,11 @@ func (s *Server) sendRejection(w http.ResponseWriter, err error) {
 			writeJSON(w, 403, map[string]any{"ok": false, "error": rej.Error()})
 			return
 		}
-		// Conversation membership violation: 403 Forbidden
-		if rej.Code == "not_member" {
-			writeJSON(w, 403, map[string]any{"ok": false, "error": rej.Error()})
-			return
-		}
-		// Stale conversation state: 409 Conflict with latest_seq hint
-		if rej.Code == "stale" {
-			writeJSON(w, 409, map[string]any{
-				"ok":         false,
-				"error":      rej.Error(),
-				"latest_seq": rej.LatestSeq,
-			})
-			return
-		}
 		code := 400
 		switch rej.Code {
 		case "duplicate_id", "loop_fuse_tripped", "loop_guard",
 			"permission_already_decided", "permission_expired",
-			"bad_permission_ref", "permission_rate_limited", "progress_throttled",
-			"agent_turn_budget":
+			"bad_permission_ref", "permission_rate_limited", "progress_throttled":
 			code = 409
 		}
 		writeJSON(w, code, map[string]any{"ok": false, "error": rej.Error()})

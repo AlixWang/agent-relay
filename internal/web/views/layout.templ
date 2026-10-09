@@ -8,9 +8,9 @@ templ Layout(title string, content templ.Component) {
 		<meta charset="UTF-8"/>
 		<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 		<title>{ title } - agent-relay</title>
-		<link rel="stylesheet" href="/ui/style.css"/>
-		<script src="https://unpkg.com/htmx.org@1.9.10" defer></script>
-		<script src="/ui/htmx-config.js" defer></script>
+		<link rel="stylesheet" href={ "/style.css?v=" + assetVersion }/>
+		<script src={ "/vendor/htmx.min.js?v=" + assetVersion } defer></script>
+		<script src={ "/htmx-config.js?v=" + assetVersion } defer></script>
 	</head>
 	<body>
 		<div id="app" class="app">
@@ -37,7 +37,7 @@ templ Layout(title string, content templ.Component) {
 		</div>
 		@Icons()
 		<div id="toasts" class="toast-container" aria-live="polite"></div>
-		<script src="/ui/app-minimal.js"></script>
+		<script src={ "/app-minimal.js?v=" + assetVersion }></script>
 	</body>
 	</html>
 }

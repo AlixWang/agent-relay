@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/AlixWang/agent-relay/internal/store"
@@ -19,17 +18,8 @@ var idRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 // ValidID reports whether s is a legal peer identity or message id.
 func ValidID(s string) bool { return idRe.MatchString(s) }
 
-// ValidTarget allows "*" (broadcast), "conv:<id>" (conversation, §v12) or a
-// normal identity.
-func ValidTarget(s string) bool {
-	if s == "*" {
-		return true
-	}
-	if rest, ok := strings.CutPrefix(s, "conv:"); ok {
-		return ValidID(rest)
-	}
-	return ValidID(s)
-}
+// ValidTarget allows "*" (broadcast) or a normal identity.
+func ValidTarget(s string) bool { return s == "*" || ValidID(s) }
 
 // HashToken returns the SHA-256 hex of a plaintext token.
 func HashToken(plaintext string) string {
