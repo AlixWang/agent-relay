@@ -10,14 +10,9 @@ ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-# Pin the CLI to the runtime version required by go.mod (see tools.go in the
-# repo root): a newer generator can emit code the pinned runtime cannot compile.
-RUN go list -m -f '{{.Version}}' github.com/a-h/templ > /tmp/templ.version \
-  && go install github.com/a-h/templ/cmd/templ@"$(cat /tmp/templ.version)"
 COPY . .
-# Generated *_templ.go files are gitignored, so they must be produced here:
-# without this the internal/web/views package does not compile.
-RUN templ generate
+# internal/web/views/*_templ.go is committed, so the image build needs no templ
+# CLI and no network fetch of one (CI verifies the generated code is fresh).
 # Receiver revision (DESIGN §8.9): the client_update predicate. CI passes the
 # hash of cmd/relay-tail/**/*.go; when the build can compute it itself (full
 # source present) do that, so local/docker builds still nudge correctly.

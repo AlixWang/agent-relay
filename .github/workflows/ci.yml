@@ -19,13 +19,20 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Pinned to the version required in go.mod (see tools.go); a newer CLI
-      # can emit code the pinned runtime cannot compile.
+      # Generated *_templ.go files are committed (a clean checkout must build
+      # with plain `go build`), so CI only checks that they match the .templ
+      # sources. Pinned to the version required in go.mod (see tools.go): a
+      # newer CLI can emit code the pinned runtime cannot compile.
       - name: install templ
         run: go install github.com/a-h/templ/cmd/templ@v0.3.1001
 
-      - name: generate templ files
-        run: templ generate
+      - name: templ sources match committed generated code
+        run: |
+          templ generate
+          if ! git diff --exit-code -- internal/web/views; then
+            echo "::error::internal/web/views is stale — run 'make generate' and commit the result"
+            exit 1
+          fi
 
       - name: gofmt
         run: |

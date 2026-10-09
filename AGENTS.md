@@ -19,6 +19,14 @@
 - `relay-watch.sh` exists as **two byte-identical copies**
   (`clients/muse/` + `internal/web/clients/`); edit one, `cp` the other.
   `internal/web` tests compare them.
+- `internal/web/views/*_templ.go` **is committed** (a clean checkout must build
+  with plain `go build`: no CLI, no network, no build chain). After editing a
+  `.templ` file run `make generate` and commit both; `make generate-check`,
+  CI, and the release workflow all fail on drift.
+- Console assets are served from the embedded `ui/` root, so a template may
+  only reference `/style.css`, `/app.js`, `/vendor/...` — **not** `/ui/...`
+  (that resolves to `ui/ui/...` and 404s). No external CDNs: vendor libraries
+  into `internal/web/ui/vendor/`.
 - Schema changes go in **both** `internal/store/schema.sql` and
   `migrations/001_init.sql`.
 - Prompt text changes are versioned: bump `prompts.PromptVersion`, append a
