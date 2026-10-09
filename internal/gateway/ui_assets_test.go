@@ -294,6 +294,28 @@ func TestConsoleUpdatePanelWiring(t *testing.T) {
 //
 // Hence: exactly one root in the markup, and the dialogs inside it (they need
 // the page's peers/rooms and must inherit its scope).
+// Console JS/CSS must revalidate: the ?v= query only wraps the entry points in
+// index.html, while the modules (js/*.js) are imported by stable URL — a stale
+// cached module after an update is a silent, confusing bug (the browser runs old
+// logic against new markup).
+func TestConsoleAssetsRevalidate(t *testing.T) {
+	f := newFixture(t)
+	f.mux = f.srv.Handler(web.Handler())
+	cookie := f.adminLogin(t)
+	for _, asset := range []string{"/app.js", "/style.css", "/js/command.js", "/js/system.js"} {
+		req := httptest.NewRequest("GET", asset, nil)
+		req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: cookie})
+		rec := httptest.NewRecorder()
+		f.mux.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d", asset, rec.Code)
+		}
+		if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
+			t.Fatalf("%s must revalidate (Cache-Control: no-cache), got %q", asset, cc)
+		}
+	}
+}
+
 func TestConsoleCommandRootIsSingle(t *testing.T) {
 	f := newFixture(t)
 	f.mux = f.srv.Handler(web.Handler())

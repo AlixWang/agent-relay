@@ -57,6 +57,17 @@ func Handler() http.Handler {
 			_, _ = w.Write([]byte(out))
 			return
 		}
+		// The ?v= query only versions index.html's entry points. The console
+		// modules (js/*.js) are imported by stable URL and cannot carry a
+		// version, so they must revalidate: without any cache header a browser
+		// may keep executing an old module after an update (the embedded FS has
+		// no modtime, so there is not even a Last-Modified to revalidate
+		// against). Revalidating is cheap and keeps console code and markup in
+		// step.
+		switch {
+		case strings.HasSuffix(r.URL.Path, ".js"), strings.HasSuffix(r.URL.Path, ".css"):
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		files.ServeHTTP(w, r)
 	})
 }
