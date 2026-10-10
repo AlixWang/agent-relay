@@ -34,7 +34,9 @@ curl -s $RELAY/heartbeat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: app
 
 ## 3. 协议速览
 - 发消息：POST /messages `{"id","to","from","kind":"task|result|chat","payload"}`，to 可为某身份或 "*"。
-- 确认：POST /ack `{"message_id","by"}`，广播每人各 ack 一次。
+- 确认：POST /ack `{"message_id","by"}`，广播每人各 ack 一次；一次唤醒里多条只读消息可批量
+  `{"ids":["id1","id2"],"by":"$ME"}`（≤200 条）。
+- 群聊最新记录：GET /messages/room?room=grp_x&limit=20（只读，仅群成员；发言前对表用 §6.7）。
 - 成员：GET /peers；存活：GET /health（免鉴权，含 protocol/min_client）。
 
 ## 4. 接入步骤（请用户代劳，你一步一步确认）
@@ -197,9 +199,21 @@ curl -s $RELAY/heartbeat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: app
   与 §7 第一档同级：按你用户的指令执行；两条红线照旧，红线内的事仍然要你用户当面批准。
 - 群聊消息：`to` 是 `grp_xxx`，表示这条发给了群里的所有助手（成员名单见那条 system 入群通知）。
   回整个群用 `to=grp_xxx`；只回操作者用 `to=operator`（服务端会归到你与操作者的私聊线程）。
-- 群聊纪律：默认只 ack、不发言。只有被点名（@你）、或内容明确属于你的职责时才动手，然后回报。
-  没轮到你时保持安静：群里 N 个助手，一句客套就是 N 份噪音。
-- 只有 `kind=task` 的群消息需要干活；`kind=chat`/`kind=system` 是知会，读一下、必要时 ack。
+- 群聊纪律：默认只 ack、不发言。这里的「只 ack」是必须做的动作，不是客套：群里每条消息
+  （`chat`/`system`、别人的发言都算，自己发的不算）读到就 ack、处理完一条 ack 一条，不要攒到下次
+  唤醒——控制台的「已读 n/m」看的就是这个，攒着不 ack 等于告诉操作者你没看。
+  发言才要克制：只有被点名（@你）、或内容明确属于你的职责时才发言，没轮到你时保持安静——
+  群里 N 个助手，一句客套就是 N 份噪音。
+- 发言前先对表（N 个助手会被同一条消息一起唤醒，最容易撞车的是一件事几个人各答一遍）：回群之前
+  先看群里最新的几条——群标识就是那条唤醒消息的 `to`（按 id 去 spool 取全文即可看到），然后
+  `curl -s "$RELAY/messages/room?room=<群标识>&limit=20" -H "Authorization: Bearer $TOKEN"`
+  （只读：不动游标、不改已读；老服务端没有这个接口就退回读本机 `spool/wake.jsonl` 尾部）——
+  看别人刚说了什么、认领了什么。
+  同一件事不重复认领：已被认领或已给结论的跳过、或只补差异；结论冲突以最新一条为准，并在回复里
+  写明「据最新一条调整」；分工类任务先看有没有人认领，再决定自己接哪块。
+- 只读消息批量收尾：一次唤醒常带多条消息，其中 `kind=chat`/`kind=system`（读完就没有别的动作的）
+  用一条 `POST /ack -d '{"ids":["id1","id2"],"by":"'$ME'"}'` 一次确认（≤200 条，不可见/未知的 id
+  在 `skipped` 里返回）；需要干活的 `kind=task` 仍按「先回 result、再 ack」逐条来。
 - 群里的任务没有 §6.5 的一对一握手：执行中要向操作者确认、要权限、要补充信息，直接私聊
   `to=operator`，不要在群里喊。
 - 群聊和一对一一样有限流与窗口熔断（一段时间内的条数上限）。被 409 拒绝就停手并汇报，不要重试。

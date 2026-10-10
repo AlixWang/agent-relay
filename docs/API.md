@@ -11,9 +11,11 @@ POST   /messages    { id, to, from, kind, in_reply_to, requires_approval, payloa
                                    → { ok, seq, id } | 202 { held: true } | 409 | 429 | 426
 GET    /messages?for=<id>&since=<seq>
                                    → { ok, items: [...], next_since }
+GET    /messages/room?room=grp_<slug>&limit=<n>   （只读回看群聊最新记录，仅群成员，§7.8）
+                                   → { ok, room, items: [...] }（旧到新；不含别人的私聊回复）
 GET    /messages/stream?for=<id>&since=<seq>   （SSE，§4.4b 推送：backlog 回放 + live 帧，需鉴权）
                                    → text/event-stream，帧 `id/event: message/retry/data`，保活 `: ping`
-POST   /ack         { message_id, by }                        → { ok }
+POST   /ack         { message_id, by } | { ids: [...], by }   → { ok, acked, skipped? }
 POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version?, profile?,
                       client_version?, client_rev?, memory_reconciled?, memory_version? }
                                    → { ok, receiver_rev?, prompt_update?, prompt_version?,
@@ -153,6 +155,26 @@ seq）。三者合起来就是控制台的已读面板：
 - **只在入群早于该消息的成员之间统计**：`start_seq <= seq`。后来入群的成员既不算已读也不算未读
   （他们看不到那条消息），控制台单独提示"该消息之后入群"的人数。
 - **发送者不计**：自己的消息天然已读。所以 `已读 n/m` 的 `m` 是该消息的合格成员数，不是群规模。
+- **只统计发给群的消息**：群线程里还夹着发给个人的回复（`to=<peer>` / `to=operator`），它们不是全群
+  可见的消息——只有收件人能读、能 ack（`n/m` 分母是 1）；给操作者的回复走收件箱水位而不是逐条 ack，
+  所以不显示已读徽标。
+
+批量确认（§7.8）：一次唤醒可能带十几条只读消息，`POST /ack` 可以带 `ids` 数组一次确认
+（`{"ids":["id1","id2"],"by":"me"}`，≤200 条）。逐条按可见性处理，不可见/未知/待审批的 id
+在 `skipped` 里返回而不是让整批失败；重复确认幂等（已 ack 的会再次计为 `acked`，重复拉取不会重投）。
+
+### 群聊回看（发言前对表，§7.8）
+
+`GET /messages/room?room=grp_<slug>&limit=<n>` 给群成员只读回看群里的最新记录（默认 20 条、上限
+50，旧到新）。`GET /messages` 是投递队列，会滤掉已 ack 的消息，所以成员 ack 完就再也看不到历史——
+两个人认领同一件事，就是缺这个回看接口：
+
+- **只读**：不动游标、不改已读状态，返回结构和 `/messages` 的 items 一致（含 `to`/`thread`/`in_reply_to`）。
+- **仅成员**：未知群 `404`、非成员 `403`、标识不带 `grp_` 前缀 `400`。
+- **可见性同投递**：返回的消息按投递可见性规则过滤（群消息 = 成员且 `start_seq < seq`），
+  加上调用者自己的消息（自己的群消息不回投，但回看时要在时间线上）；群里夹带的私聊回复
+  （`to=<peer>`）只有收件人和发送者看得到。
+- 系统通知（建群、加人、解散）算时间线的一部分，照常返回。
 
 `POST /admin/rooms/{id}/dissolve` 解散群聊（软删除）：
 

@@ -99,6 +99,10 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("POST /register", s.handleRegister)
 	mux.HandleFunc("POST /messages", s.handleSend)
 	mux.HandleFunc("GET /messages", s.handlePull)
+	// The room read-back (§7.8): the pull above is a delivery queue and drops
+	// what the peer already acked, so a member that wants to see what the others
+	// just said before it answers needs this read-only view.
+	mux.HandleFunc("GET /messages/room", s.handleRoomHistory)
 	// SSE push (DESIGN §4.4b): same delivery view as /messages, held open.
 	// Outbound-only — works behind caddy/tailnet, no inbound to assistants.
 	mux.HandleFunc("GET /messages/stream", s.handleStream)
@@ -542,10 +546,73 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "items": items, "next_since": next})
 }
 
+// handleRoomHistory serves GET /messages/room?room=grp_x&limit=n: the newest
+// messages of a room the caller belongs to, oldest-first, regardless of ack
+// state. Members use it to look at what the others just said before they answer
+// (§7.8) — the pull endpoint cannot serve that, because it drops everything the
+// peer already acked. Private replies that share the thread stay hidden from
+// everyone but their addressee (the store applies the delivery rule).
+func (s *Server) handleRoomHistory(w http.ResponseWriter, r *http.Request) {
+	peer, _ := s.authed(w, r)
+	if peer == nil {
+		return
+	}
+	if !s.checkVersion(w, peer) {
+		return
+	}
+	room := strings.TrimSpace(r.URL.Query().Get("room"))
+	if room == "" {
+		writeErr(w, 400, "room required")
+		return
+	}
+	if !strings.HasPrefix(room, "grp_") {
+		writeErr(w, 400, "room must be grp_<slug>")
+		return
+	}
+	if existing, _ := s.st.GetRoom(room); existing == nil {
+		writeErr(w, 404, "unknown room")
+		return
+	}
+	if member, _ := s.st.IsRoomMember(room, peer.ID); !member {
+		writeErr(w, 403, "not a member of "+room)
+		return
+	}
+	limit := 20
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 {
+		limit = v
+	}
+	msgs, err := s.st.LastNVisibleInThread(room, peer.ID, limit)
+	if err != nil {
+		log.Printf("room history error: %v", err)
+		writeErr(w, 500, "room history failed")
+		return
+	}
+	items := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		items = append(items, map[string]any{
+			"seq": m.Seq, "id": m.ID, "from": m.Sender, "to": m.Recipient,
+			"kind": m.Kind, "in_reply_to": m.InReplyTo, "thread": m.RootID,
+			"payload": m.Payload, "created_at": m.CreatedAt,
+			"status": m.Status, "op": m.Op, "target": m.Target,
+			"detail": m.Detail, "decision": m.Decision, "expires_at": m.ExpiresAt,
+		})
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "room": room, "items": items})
+}
+
 type ackReq struct {
 	MessageID string `json:"message_id"`
-	By        string `json:"by"`
+	// IDs acks a batch in one call, with the same visibility rules as
+	// message_id (a group wake can carry a dozen chat messages; N curls is N
+	// chances to drop one). Ids that cannot take an ack are reported back in
+	// "skipped" instead of failing the whole call.
+	IDs []string `json:"ids"`
+	By  string   `json:"by"`
 }
+
+// maxAckBatch bounds one /ack call: a wake batch is tens of messages, and an
+// unbounded loop is a free way to pin the store.
+const maxAckBatch = 200
 
 func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 	peer, _ := s.authed(w, r)
@@ -566,17 +633,44 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 403, "by must match your authenticated identity")
 		return
 	}
-	now := time.Now().Unix()
-	_, err := s.queue.AckByID(req.MessageID, req.By, now)
-	if err != nil {
-		log.Printf("ack error: %v", err)
-		writeErr(w, 500, "ack failed")
+	ids := req.IDs
+	if req.MessageID != "" {
+		ids = append([]string{req.MessageID}, ids...)
+	}
+	if len(ids) == 0 {
+		writeErr(w, 400, "message_id or ids required")
 		return
+	}
+	if len(ids) > maxAckBatch {
+		writeErr(w, 400, fmt.Sprintf("at most %d ids per call", maxAckBatch))
+		return
+	}
+	now := time.Now().Unix()
+	acked := 0
+	var skipped []string
+	for _, id := range ids {
+		ok, err := s.queue.AckByID(id, req.By, now)
+		if err != nil {
+			log.Printf("ack error: %v", err)
+			writeErr(w, 500, "ack failed")
+			return
+		}
+		if ok {
+			acked++
+		} else {
+			skipped = append(skipped, id)
+		}
 	}
 	if done, _ := s.verify.CheckCompletion(peer.ID, now); done {
 		log.Printf("peer verified: %s", peer.ID)
 	}
-	writeJSON(w, 200, map[string]any{"ok": true})
+	out := map[string]any{"ok": true, "acked": acked}
+	if len(skipped) > 0 {
+		// Not an error: unknown id, held for approval, or already acked —
+		// the caller re-acking a batch after a crash must stay a no-op.
+		out["skipped"] = skipped
+	}
+	writeJSON(w, 200, out)
 }
 
 type heartbeatReq struct {

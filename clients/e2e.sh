@@ -311,6 +311,41 @@ jq_ok "member acks room message" '.ok == true' \
     -H 'Content-Type: application/json' \
     --data '{"message_id":"'"$(echo "$SELF_VIEW" | jq -r '[.items[] | select(.to=="grp_ops")][0].id // "none"')"'","by":"t-alice"}'
 
+# Batch ack (§7.8): one wake can carry a dozen chat messages, so the worker acks
+# them in one call. Ids it cannot see come back under "skipped" — never a silent
+# success for the caller, never a failed call for the rest of the batch.
+jq_ok "batch seed 1" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_A[@]}" -H 'Content-Type: application/json' \
+    --data '{"id":"batch-1","to":"grp_ops","from":"t-alice","kind":"chat","payload":"批量确认用例第一条：这条消息专门用来验证一次 ack 多条的行为是否生效。"}'
+jq_ok "batch seed 2" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_A[@]}" -H 'Content-Type: application/json' \
+    --data '{"id":"batch-2","to":"grp_ops","from":"t-alice","kind":"chat","payload":"Second batch-ack fixture with deliberately different wording and length from the first one."}'
+BATCH_OUT="$(curl -s -X POST "$BASE/ack" "${AUTH_B[@]}" -H 'Content-Type: application/json' \
+  --data '{"ids":["batch-1","batch-2","no-such-batch-id"],"by":"t-bob"}')"
+if echo "$BATCH_OUT" | jq -e '.ok == true and .acked == 2 and ((.skipped // []) | index("no-such-batch-id")) != null' >/dev/null 2>&1; then
+  ok "batch ack accepts ids"
+else
+  bad "batch ack accepts ids" "$BATCH_OUT"
+fi
+if curl -s "$BASE/messages?for=t-bob&since=0" "${AUTH_B[@]}" | jq -e '(.items | map(.id) | index("batch-1")) | not' >/dev/null 2>&1; then
+  ok "batch ack stops redelivery"
+else
+  bad "batch ack stops redelivery"
+fi
+
+# The read-back is the opposite of the pull queue: after acking, a member must
+# still be able to see what the room just said (§7.8 发言前对表).
+if curl -s "$BASE/messages/room?room=grp_ops&limit=20" "${AUTH_B[@]}" | jq -e '(.items | map(.id) | index("batch-1")) != null' >/dev/null 2>&1; then
+  ok "room read-back keeps acked messages"
+else
+  bad "room read-back keeps acked messages"
+fi
+if curl -s -o /dev/null -w '%{http_code}' "$BASE/messages/room?room=grp_ops" | grep -q 401; then
+  ok "room read-back rejects anonymous"
+else
+  bad "room read-back rejects anonymous"
+fi
+
 # A non-member cannot post into the room (403, not a silent black hole).
 UNINVITED_CODE="$(mk_invite muse t-carol)"
 UNINVITED_TOK="$(do_register "$UNINVITED_CODE" t-carol muse)"
@@ -320,6 +355,12 @@ if curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/messages" \
   ok "room non-member 403"
 else
   bad "room non-member 403"
+fi
+# …and cannot read the room's history back either.
+if curl -s -o /dev/null -w '%{http_code}' "$BASE/messages/room?room=grp_ops"     -H "Authorization: Bearer $UNINVITED_TOK" | grep -q 403; then
+  ok "room read-back non-member 403"
+else
+  bad "room read-back non-member 403"
 fi
 
 # A member replies to the group; the operator's inbox collects direct reports.

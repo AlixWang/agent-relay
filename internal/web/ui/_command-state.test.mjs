@@ -171,6 +171,23 @@ page.rooms = [];
 page.activeRoomData = { id: 'grp_chat', members: ['alice', 'bob'], archived: false };
 assert(page.ackEligible({ seq: 5, from: 'operator', acked_by: ['alice'] }).join(',') === 'alice,bob', 'thread-only fallback: ' + page.ackEligible({ seq: 5, from: 'operator', acked_by: ['alice'] }));
 
+// A private reply living in the room thread (to=peer / to=operator, seen live in
+// grp_chat seq 165): only the addressee can read or ack it, so counting the
+// whole room showed "已读 1/4" forever and read like ack laziness.
+page.rooms = [{ id: 'grp_chat', name: '聊天群', archived: false, members: [{ id: 'alice', start_seq: 1 }, { id: 'bob', start_seq: 1 }, { id: 'carol', start_seq: 1 }, { id: 'dave', start_seq: 1 }] }];
+const dm = { seq: 165, from: 'alice', to: 'bob', acked_by: ['bob'], kind: 'result' };
+assert(page.roomMessage(dm) === false, 'a reply to one member is not a room message');
+assert(page.ackEligible(dm).join(',') === 'bob', 'only the addressee counts for a private reply: ' + page.ackEligible(dm));
+assert(page.ackLabel(dm) === '全部已读' && page.ackTone(dm) === 'ok', 'an acked DM is fully read: ' + page.ackLabel(dm) + '/' + page.ackTone(dm));
+assert(page.ackPending(dm).length === 0 && page.ackLateSent(dm).length === 0, 'a private reply has no room-wide pending/late rows');
+const dmUnread = { seq: 166, from: 'alice', to: 'bob', acked_by: [] };
+assert(page.ackLabel(dmUnread) === '无人已读' && page.ackPending(dmUnread).join(',') === 'bob', 'an unanswered DM is the addressee pending: ' + page.ackLabel(dmUnread) + '/' + page.ackPending(dmUnread));
+const dmOp = { seq: 167, from: 'alice', to: 'operator', acked_by: [] };
+assert(page.roomMessage(dmOp) === false && page.ackEligible(dmOp).length === 0, 'operator reads ride the inbox watermark: no per-message receipt');
+assert(page.ackLabel(dmOp) === '' && page.ackTone(dmOp) === '', 'a to-operator reply shows no receipt badge');
+const dmSelf = { seq: 168, from: 'bob', to: 'bob', acked_by: [] };
+assert(page.ackEligible(dmSelf).length === 0, 'nobody acks their own private reply');
+
 // 6. Dissolved rooms: out of the working list, reachable under 已解散.
 page.rooms = [
   { id: 'grp_chat', name: '聊天群', archived: false, members: [{ id: 'alice', start_seq: 1 }] },

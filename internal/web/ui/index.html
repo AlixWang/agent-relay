@@ -389,8 +389,11 @@
                       <div class="cmd-msg-body" x-text="m.payload"></div>
                       <!-- Read receipts: the badge summarises, a click opens the names.
                            Who counts: members who were already in the room when the
-                           message was sent (start_seq), minus the sender. -->
+                           message was sent (start_seq), minus the sender. A private
+                           reply (to=peer) is only the addressee's to read, so it says
+                           so instead of counting the whole room. -->
                       <div class="cmd-msg-footer" x-show="activeTarget.type === 'room' && ackEligible(m).length > 0">
+                        <span class="muted xs" x-show="!roomMessage(m)" x-text="'仅 @' + m.to"></span>
                         <!-- click.outside binds a document listener per rendered row; without the
                              guard, every OTHER row's listener closed the popover again in the same
                              click (open, then instantly gone). Only the open row may close itself. -->

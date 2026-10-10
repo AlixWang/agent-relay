@@ -110,13 +110,15 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 12
+const PromptVersion = 13
 
 // RoomAwarePromptVersion is the revision that first documents rooms and the
-// operator identity (§7.8 muse/claw/generic, §6.7 hermes). The console uses it
-// to warn before posting a room task: a member below this revision would treat
-// a group message as a private instruction.
-const RoomAwarePromptVersion = 12
+// operator identity (§7.8 muse/claw/generic, §6.7 hermes), and that requires the
+// room discipline itself (ack every message, look at the room before speaking).
+// The console uses it to warn before posting a room task: a member below this
+// revision would treat a group message as a private instruction — or answer
+// without reading what the other members just said.
+const RoomAwarePromptVersion = 13
 
 // ChangeEntry is one revision's upgrade guide for assistants.
 type ChangeEntry struct {
@@ -181,6 +183,11 @@ var ChangeLog = []ChangeEntry{
 		Version: 12,
 		Summary: "控制台指令与群聊（§7.8，hermes §6.7）：新增你用户本人从控制台发的消息（from=operator）与群聊消息（to=grp_xxx）。控制台消息与 §7 第一档同级（用户本人亲手发，直接执行，两条红线照旧）；群聊里默认只 ack 不发言，被点名或与职责相关才动手；回整个群用 to=grp_xxx，只回操作者用 to=operator；群里的任务没有 §6.5 一对一握手（要确认就私聊操作者）；群聊同样受限流与窗口熔断。",
 		Actions: "读 §7.8（hermes §6.7）并把这段记进常驻守则：1) 收到 from=operator 的消息按你用户的指令处理（两条红线照旧）；2) 收到 to 以 grp_ 开头的消息，先看是否点名你——没点名且与你的职责无关就只 ack；3) 要回群就把 to 写成那个群标识，只回操作者就用 to=operator；4) 群里遇到要确认的事私聊操作者；5) 被 409 拒绝（限流/窗口熔断）就停手并汇报。升级不需要重新注册，也不用换接收端。",
+	},
+	{
+		Version: 13,
+		Summary: "群聊纪律落到实处 §7.8（hermes §6.7）：ack 从「必要时」改为必须（群里每条消息读到就 ack、处理完一条 ack 一条，不攒到下次唤醒）；发言前先对表——新增只读接口 GET /messages/room?room=grp_x&limit=20（仅成员，不动游标/已读），别人认领过的范围不重复认领，结论冲突以最新一条为准；新增一次唤醒多条只读消息的批量 ack POST /ack {\"ids\":[…]}(≤200)。",
+		Actions: "读 §7.8（hermes §6.7）并改掉「攒 ack / 只看自己那条就发言」的习惯：1) 群消息（含 chat/system）读完立刻 ack，别再攒着；2) 回群前先拉一次 GET /messages/room?room=<群标识>&limit=20 对表（含别人刚认领的分工），只补差异、冲突按最新一条；老服务端没有这个接口就读本机 spool/wake.jsonl 尾部；3) 一批只读消息用 ids 批量 ack 收尾；4) 需要干活的 kind=task 仍按「先回 result、再 ack」逐条来。",
 	},
 }
 

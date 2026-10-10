@@ -168,6 +168,9 @@ type Store interface {
 	VisibleTo(peerID string, since int64, limit int) ([]*Message, error)
 	ThreadMessages(rootID string, limit int) ([]*Message, error)
 	LastNInThread(rootID string, n int) ([]*Message, error)
+	// LastNVisibleInThread is the room read-back (GET /messages/room): the
+	// newest messages of a thread the peer may read, own messages included.
+	LastNVisibleInThread(rootID, peerID string, n int) ([]*Message, error)
 	// LastHandshakeTs returns MAX(created_at) for a handshake slice of a
 	// thread (kind='status' + status value, one sender). Zero when absent.
 	// Used for the progress per-thread throttle (§6.5).
@@ -799,6 +802,7 @@ func (s *sqliteStore) ThreadMessages(rootID string, limit int) ([]*Message, erro
 	return out, rows.Err()
 }
 
+// LastNInThread returns the newest n messages of one thread, oldest-first.
 func (s *sqliteStore) LastNInThread(rootID string, n int) ([]*Message, error) {
 	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
 		status,op,target,detail,decision,expires_at
@@ -816,6 +820,41 @@ func (s *sqliteStore) LastNInThread(rootID string, n int) ([]*Message, error) {
 		rev = append(rev, m)
 	}
 	// reverse to chronological
+	out := make([]*Message, len(rev))
+	for i, m := range rev {
+		out[len(rev)-1-i] = m
+	}
+	return out, rows.Err()
+}
+
+// LastNVisibleInThread returns the newest n messages of one thread that peerID
+// may read, oldest-first: the shared visibility rule (§4.4) plus the peer's own
+// messages. This backs the room read-back (GET /messages/room): the pull API is
+// a delivery queue and drops what the peer already acked, so without it a
+// member cannot see what the others just said before it speaks. Private replies
+// that live in the same thread stay hidden from everyone but their addressee.
+func (s *sqliteStore) LastNVisibleInThread(rootID, peerID string, n int) ([]*Message, error) {
+	if n <= 0 || n > 200 {
+		n = 20
+	}
+	rows, err := s.db.Query(visibleSelect+`
+		WHERE m.root_id = ?
+		  AND m.approval_state NOT IN ('pending','rejected')
+		  AND (m.sender = ? OR `+visibilityExpr+`)
+		ORDER BY m.seq DESC LIMIT ?`,
+		rootID, peerID, peerID, peerID, peerID, peerID, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rev []*Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		rev = append(rev, m)
+	}
 	out := make([]*Message, len(rev))
 	for i, m := range rev {
 		out[len(rev)-1-i] = m

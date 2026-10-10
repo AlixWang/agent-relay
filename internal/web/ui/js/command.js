@@ -550,23 +550,41 @@ function createCommandState() {
     },
 
     // ---- read receipts -------------------------------------------------
-    // A room message is "read" by every member that has an ack for it. Who is
-    // asked at all depends on when they joined: a member only sees messages
-    // sent after their start_seq, so counting them as "未读" for older messages
-    // would be wrong. The sender obviously read their own message.
+    // Room receipts answer "which of the room's members have seen it", so they
+    // only make sense for messages addressed to the room. The room thread also
+    // carries private replies (a member answering the operator, or another
+    // member): those are unreadable by the rest of the room and used to sit
+    // there as "已读 1/4" forever, which read like ack laziness. For them the
+    // only possible reader/acker is the addressee — and a reply to the operator
+    // is acked through the inbox watermark, not per message, so it shows no
+    // badge at all.
+    roomMessage(m) {
+      const to = m.to || '';
+      return to === '' || to === this.activeTarget.id;
+    },
     ackMembers(m) {
+      if (!this.roomMessage(m)) return [];
       const room = (this.rooms || []).find((r) => r.id === this.activeTarget.id);
       let members = room && Array.isArray(room.members) ? room.members : null;
       if (!members && this.activeRoomData && Array.isArray(this.activeRoomData.members)) {
         members = this.activeRoomData.members.map((id) => ({ id, start_seq: 0 }));
       }
       if (!members) return [];
+      // Who is asked at all depends on when they joined: a member only sees
+      // messages sent after their start_seq, so counting them as "未读" for
+      // older messages would be wrong. The sender obviously read their own.
       return members.filter((mb) => (mb.start_seq || 0) <= (m.seq || 0));
     },
     ackEligible(m) {
+      if (!this.roomMessage(m)) {
+        const to = m.to || '';
+        if (!to || to === 'operator' || to === 'system') return [];
+        return [to].filter((id) => id !== m.from);
+      }
       return this.ackMembers(m).filter((mb) => mb.id !== m.from).map((mb) => mb.id);
     },
     ackLateSent(m) {
+      if (!this.roomMessage(m)) return [];
       const room = (this.rooms || []).find((r) => r.id === this.activeTarget.id);
       const members = room && Array.isArray(room.members) ? room.members : [];
       return members.filter((mb) => (mb.start_seq || 0) > (m.seq || 0)).map((mb) => mb.id);

@@ -294,6 +294,170 @@ func TestSmokeVerifyFlow(t *testing.T) {
 	}
 }
 
+// One wake can carry a dozen chat messages; the worker acks them in one call
+// (§7.8). Ids it cannot see are reported, never silently failed, and the ack
+// must really remove them from the next pull.
+func TestAckBatch(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "claw")
+	f.registerPeer(t, "carol", "muse")
+
+	ids := []string{"b1", "b2", "b3"}
+	for _, id := range ids {
+		if c, out := f.do(t, "POST", "/messages", map[string]any{
+			"id": id, "to": "bob", "from": "alice", "kind": "chat", "payload": "hi " + id,
+		}, f.tok["alice"]); c != 200 {
+			t.Fatalf("send %s: %d %+v", id, c, out)
+		}
+	}
+	// A message bob may not see (alice → carol) and an unknown id.
+	f.do(t, "POST", "/messages", map[string]any{
+		"id": "not-for-bob", "to": "carol", "from": "alice", "kind": "chat", "payload": "private",
+	}, f.tok["alice"])
+
+	c, out := f.do(t, "GET", "/messages?for=bob&since=0", nil, f.tok["bob"])
+	if c != 200 || len(out["items"].([]any)) != 3 {
+		t.Fatalf("bob should see exactly 3 messages before acking: %d %+v", c, out)
+	}
+
+	c, out = f.do(t, "POST", "/ack", map[string]any{
+		"ids": []string{"b1", "b2", "not-for-bob", "no-such-id"}, "by": "bob",
+	}, f.tok["bob"])
+	if c != 200 || out["acked"].(float64) != 2 {
+		t.Fatalf("batch ack: %d %+v", c, out)
+	}
+	skipped, _ := out["skipped"].([]any)
+	if len(skipped) != 2 {
+		t.Fatalf("invisible/unknown ids must be reported as skipped: %+v", out)
+	}
+
+	c, out = f.do(t, "GET", "/messages?for=bob&since=0", nil, f.tok["bob"])
+	items := out["items"].([]any)
+	if c != 200 || len(items) != 1 || items[0].(map[string]any)["id"] != "b3" {
+		t.Fatalf("acked ids must stop being delivered: %d %+v", c, out)
+	}
+
+	// The single-message shape keeps working, and a batch must not exceed its cap.
+	if c, _ = f.do(t, "POST", "/ack", map[string]any{"message_id": "b3", "by": "bob"}, f.tok["bob"]); c != 200 {
+		t.Fatalf("single ack: %d", c)
+	}
+	if c, _ = f.do(t, "POST", "/ack", map[string]any{"by": "bob"}, f.tok["bob"]); c != 400 {
+		t.Fatalf("empty ack must 400, got %d", c)
+	}
+	if c, _ = f.do(t, "POST", "/ack", map[string]any{"ids": []string{"b1"}, "by": "carol"}, f.tok["alice"]); c != 403 {
+		t.Fatalf("by must match the caller, got %d", c)
+	}
+}
+
+// A member must be able to read the room's tail before it speaks (§7.8: two
+// members claiming one job is the failure this prevents). The pull endpoint
+// cannot serve that — it is a delivery queue and drops what the peer acked — so
+// GET /messages/room reads the thread directly, with two rules: the caller must
+// be a member, and private replies that share the thread stay private.
+func TestRoomHistoryReadBack(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "muse")
+	f.registerPeer(t, "dave", "muse")
+	f.registerPeer(t, "carol", "muse")
+	cookie := f.adminLogin(t)
+	if code, out := f.doCookie(t, "POST", "/admin/rooms", map[string]any{
+		"id": "chat", "name": "聊天群", "members": []string{"alice", "bob", "dave"},
+	}, cookie); code != 200 {
+		t.Fatalf("room: %d %+v", code, out)
+	}
+	f.do(t, "POST", "/messages", map[string]any{
+		"id": "r1", "to": "grp_chat", "from": "alice", "kind": "chat",
+		"payload": "第一条群消息：今天的值班分工安排如下。",
+	}, f.tok["alice"])
+	f.do(t, "POST", "/messages", map[string]any{
+		"id": "r2", "to": "grp_chat", "from": "alice", "kind": "chat",
+		"payload": "Another room fixture with deliberately different wording and length.",
+	}, f.tok["alice"])
+	// alice answers bob privately inside the room thread (live grp_chat shape).
+	f.do(t, "POST", "/messages", map[string]any{
+		"id": "p1", "to": "bob", "from": "alice", "kind": "result",
+		"in_reply_to": "r1", "payload": "私聊回执，只给 bob 看。",
+	}, f.tok["alice"])
+	// bob acks the room messages: the delivery queue is now empty for him.
+	if c, out := f.do(t, "POST", "/ack", map[string]any{
+		"ids": []string{"r1", "r2"}, "by": "bob",
+	}, f.tok["bob"]); c != 200 || out["acked"].(float64) != 2 {
+		t.Fatalf("seed acks: %d %+v", c, out)
+	}
+	ids := func(out map[string]any) []string {
+		var got []string
+		for _, it := range out["items"].([]any) {
+			got = append(got, it.(map[string]any)["id"].(string))
+		}
+		return got
+	}
+	if c, out := f.do(t, "GET", "/messages?for=bob&since=0", nil, f.tok["bob"]); c != 200 {
+		t.Fatalf("pull: %d %+v", c, out)
+	} else {
+		for _, id := range ids(out) {
+			if id == "r1" || id == "r2" {
+				t.Fatalf("acked room messages must leave the delivery queue, still got %v", ids(out))
+			}
+		}
+	}
+
+	// The read-back still shows them, oldest-first, plus bob's own later message.
+	// System notices belong to the timeline too (roster changes), so they stay.
+	f.do(t, "POST", "/messages", map[string]any{
+		"id": "b1", "to": "grp_chat", "from": "bob", "kind": "chat", "payload": "bob 的认领",
+	}, f.tok["bob"])
+	chatIDs := func(out map[string]any) []string {
+		var got []string
+		for _, id := range ids(out) {
+			if !strings.HasPrefix(id, "sys-") {
+				got = append(got, id)
+			}
+		}
+		return got
+	}
+	c, out := f.do(t, "GET", "/messages/room?room=grp_chat", nil, f.tok["bob"])
+	if c != 200 || strings.Join(chatIDs(out), ",") != "r1,r2,p1,b1" {
+		t.Fatalf("bob read-back: %d %v", c, chatIDs(out))
+	}
+	if got := ids(out); len(got) == 0 || !strings.HasPrefix(got[0], "sys-") {
+		t.Fatalf("the room's system notice belongs to the timeline: %v", got)
+	}
+	if got := chatIDs(out); got[len(got)-1] != "b1" {
+		t.Fatalf("oldest-first ordering broken: %v", got)
+	}
+
+	// dave is a member but not the addressee: no private reply, the rest visible.
+	c, out = f.do(t, "GET", "/messages/room?room=grp_chat", nil, f.tok["dave"])
+	if c != 200 {
+		t.Fatalf("member read-back: %d %+v", c, out)
+	}
+	for _, id := range ids(out) {
+		if id == "p1" {
+			t.Fatalf("a private reply leaked to another member: %v", ids(out))
+		}
+	}
+	if strings.Join(chatIDs(out), ",") != "r1,r2,b1" {
+		t.Fatalf("dave read-back: %v", chatIDs(out))
+	}
+
+	// limit keeps the newest, and the guards hold.
+	c, out = f.do(t, "GET", "/messages/room?room=grp_chat&limit=1", nil, f.tok["dave"])
+	if c != 200 || strings.Join(chatIDs(out), ",") != "b1" {
+		t.Fatalf("limit must keep the newest: %d %v", c, chatIDs(out))
+	}
+	if c, _ = f.do(t, "GET", "/messages/room?room=grp_chat", nil, f.tok["carol"]); c != 403 {
+		t.Fatalf("non-member read-back must 403, got %d", c)
+	}
+	if c, _ = f.do(t, "GET", "/messages/room?room=grp_nope", nil, f.tok["alice"]); c != 404 {
+		t.Fatalf("unknown room must 404, got %d", c)
+	}
+	if c, _ = f.do(t, "GET", "/messages/room?room=chat", nil, f.tok["alice"]); c != 400 {
+		t.Fatalf("room without grp_ prefix must 400, got %d", c)
+	}
+}
+
 func TestRegisterRejectsStaleProtocol(t *testing.T) {
 	f := newFixture(t)
 	now := time.Now().Unix()
