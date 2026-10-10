@@ -37,6 +37,9 @@ export function refreshCommand() {
 
 export function stopCommand() {
   if (activeCommandApp) activeCommandApp.stopPolling();
+  // setRoute() closes the main sidebar (nav-open) on every navigation;
+  // the session drawer follows the same contract.
+  if (activeCommandApp) activeCommandApp.sessionsOpen = false;
 }
 
 function createCommandState() {
@@ -67,6 +70,10 @@ function createCommandState() {
     // dissolved-rooms group in the session list is expanded.
     ackOpen: null,
     showArchived: false,
+
+    // Mobile drawer for the session list (<=900px): toggled by the menu
+    // button in .cmd-chat-header, closed on session select.
+    sessionsOpen: false,
     
     // Composer state
     payload: '',
@@ -203,6 +210,7 @@ function createCommandState() {
       };
       this.activeRoomData = null;
       this.ackOpen = null;
+      this.sessionsOpen = false;
       if (location.hash !== '#command?view=inbox') {
         history.replaceState(null, '', '#command?view=inbox');
       }
@@ -217,6 +225,7 @@ function createCommandState() {
         subtitle: '向所有在线助手广播一条指令或通知',
       };
       this.activeRoomData = null;
+      this.sessionsOpen = false;
       if (location.hash !== '#command') {
         history.replaceState(null, '', '#command');
       }
@@ -233,6 +242,7 @@ function createCommandState() {
       if (location.hash !== '#command?room=' + encodeURIComponent(room.id)) {
         history.replaceState(null, '', '#command?room=' + encodeURIComponent(room.id));
       }
+      this.sessionsOpen = false;
       this.loadActiveMessages(false);
     },
 
@@ -247,6 +257,7 @@ function createCommandState() {
       if (location.hash !== '#command?peer=' + encodeURIComponent(peer.id)) {
         history.replaceState(null, '', '#command?peer=' + encodeURIComponent(peer.id));
       }
+      this.sessionsOpen = false;
       this.loadActiveMessages(false);
     },
 

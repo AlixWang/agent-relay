@@ -79,8 +79,8 @@ export async function refreshThreads() {
         </td>
         <td class="td-actions">
           <div class="row-btns tight">
-            <button class="btn-icon" data-view="${esc(t.root_id)}" data-tip="查看详情">${icon('eye')}</button>
-            <button class="btn-icon warn" data-fuse="${esc(t.root_id)}" data-tip="Reset 熔断">${icon('rotate')}</button>
+            <button class="btn-icon" data-view="${esc(t.root_id)}" data-tip="查看详情" aria-label="查看详情">${icon('eye')}</button>
+            <button class="btn-icon warn" data-fuse="${esc(t.root_id)}" data-tip="Reset 熔断" aria-label="Reset 熔断">${icon('rotate')}</button>
           </div>
         </td>
       </tr>`;
