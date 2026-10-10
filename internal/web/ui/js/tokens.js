@@ -66,7 +66,7 @@ export async function refreshTokens() {
         <td class="td-actions">
           ${isRevoked
             ? `<span class="muted xs">—</span>`
-            : `<button class="btn-icon danger" data-rev="${t.id}" data-peer="${esc(t.peer_id)}" data-tip="撤销此凭据">${icon('ban')}</button>`}
+            : `<button class="btn-icon danger" data-rev="${t.id}" data-peer="${esc(t.peer_id)}" data-tip="撤销此凭据" aria-label="撤销此凭据">${icon('ban')}</button>`}
         </td>
       </tr>`;
     }).join('');

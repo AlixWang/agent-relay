@@ -211,7 +211,7 @@
 
       <!-- ---------- 指挥台 (Command & Chat) ---------- -->
       <section id="page-command" class="page cmd-page" x-data="commandApp" hidden>
-        <div class="cmd-layout">
+        <div class="cmd-layout" :class="{ 'sessions-open': sessionsOpen }">
           <!-- Left Column: Sessions Directory -->
           <aside class="cmd-sessions">
             <div class="cmd-sessions-header">
@@ -321,10 +321,13 @@
             </div>
           </aside>
 
+          <div class="cmd-scrim" @click="sessionsOpen = false" aria-hidden="true"></div>
+
           <!-- Right Column: Conversation Main Area -->
           <div class="cmd-chat">
             <!-- Header -->
             <div class="cmd-chat-header">
+              <button type="button" class="btn-icon only-mobile" @click="sessionsOpen = !sessionsOpen" aria-label="打开会话列表"><svg class="icon"><use href="#i-menu"/></svg></button>
               <div class="cmd-chat-title">
                 <h2 x-text="activeTarget.name"></h2>
                 <p class="muted xs" x-text="activeTarget.subtitle"></p>
@@ -339,7 +342,7 @@
                 <button type="button" class="btn btn-outline btn-sm btn-danger" x-show="activeTarget.type === 'room' && !roomDissolved()" @click="dissolveRoom()">
                   <svg class="icon xs"><use href="#i-trash"/></svg> 解散群聊
                 </button>
-                <button type="button" class="btn-icon" @click="loadActiveMessages(false)" title="刷新消息">
+                <button type="button" class="btn-icon" @click="loadActiveMessages(false)" title="刷新消息" aria-label="刷新消息">
                   <svg class="icon xs"><use href="#i-refresh"/></svg>
                 </button>
               </div>
@@ -547,7 +550,7 @@
               <span class="pill">
                 <span class="dot" :class="m.online ? 'on' : 'off'"></span>
                 <span x-text="m.id"></span>
-                <button type="button" class="btn-icon xs" @click="removeRoomMember(m.id)" title="移出群聊">×</button>
+                <button type="button" class="btn-icon xs" @click="removeRoomMember(m.id)" title="移出群聊" aria-label="移出群聊">×</button>
               </span>
             </template>
             <span class="muted xs" x-show="getMemberPeers().length === 0">群内暂无成员</span>
@@ -597,7 +600,7 @@
             <div id="promptOut" hidden>
               <div class="invite-box">
                 <div><span class="muted xs">邀请码 · 一次有效，请即刻使用</span><code id="inviteCode" class="big-code"></code></div>
-                <button class="btn-icon" data-copy="#inviteCode" data-tip="复制邀请码"><svg class="icon"><use href="#i-copy"/></svg></button>
+                <button class="btn-icon" data-copy="#inviteCode" data-tip="复制邀请码" aria-label="复制邀请码"><svg class="icon"><use href="#i-copy"/></svg></button>
               </div>
               <div class="code-block">
                 <div class="code-head"><span><svg class="icon xs"><use href="#i-terminal"/></svg>onboarding-prompt.md</span>
@@ -801,7 +804,7 @@
     <div id="rotResult" hidden>
       <div class="alert alert-warn"><svg class="icon"><use href="#i-alert"/></svg>请立即交给对应助手，关闭后无法再次查看。</div>
       <div class="invite-box"><code id="rotToken" class="big-code wrap"></code>
-        <button type="button" class="btn-icon" data-copy="#rotToken" data-tip="复制"><svg class="icon"><use href="#i-copy"/></svg></button></div>
+        <button type="button" class="btn-icon" data-copy="#rotToken" data-tip="复制" aria-label="复制"><svg class="icon"><use href="#i-copy"/></svg></button></div>
     </div>
     <div class="modal-foot">
       <button type="button" class="btn btn-ghost" data-close>关闭</button>

@@ -283,7 +283,7 @@ input[type="checkbox"] { height: auto; accent-color: var(--brand); }
 
 /* tooltip (CSS-only, data-tip) */
 [data-tip] { position: relative; }
-[data-tip]:hover::after, [data-tip]:focus-visible::after {
+[data-tip]:hover::after, [data-tip]:focus-visible::after, [data-tip]:active::after {
   content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
   padding: 4px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 0.72rem; font-weight: 500;
   white-space: nowrap; pointer-events: none; z-index: 50;
@@ -404,8 +404,8 @@ pre.log[data-state="ok"] { border-color: color-mix(in srgb, var(--ok) 45%, trans
 pre.log[data-state="warn"] { border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
 pre.log[data-state="bad"] { border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
 .invite-box { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px dashed color-mix(in srgb, var(--brand) 45%, var(--border)); border-radius: 10px; background: var(--brand-soft); margin-bottom: 12px; }
-.invite-box > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.big-code { font-size: 0.92rem; padding: 0; border: 0; background: none; color: var(--fg); font-weight: 600; letter-spacing: .02em; }
+.invite-box > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.big-code { font-size: 0.92rem; padding: 0; border: 0; background: none; color: var(--fg); font-weight: 600; letter-spacing: .02em; overflow-wrap: anywhere; word-break: break-all; min-width: 0; }
 .big-code.wrap { word-break: break-all; font-size: 0.8rem; }
 
 /* ---------- alerts ---------- */
@@ -420,7 +420,7 @@ pre.log[data-state="bad"] { border-color: color-mix(in srgb, var(--bad) 45%, tra
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 0; margin: 0; font-size: 0.84rem; }
 .kv dt, .kv dd { padding: 9px 0; border-bottom: 1px solid var(--border-soft); margin: 0; }
 .kv dt { color: var(--muted); padding-right: 24px; display: flex; align-items: center; gap: 8px; }
-.kv dd { text-align: right; font-family: var(--mono); font-size: 0.8rem; }
+.kv dd { text-align: right; font-family: var(--mono); font-size: 0.8rem; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .kv dt:nth-last-of-type(1), .kv dd:last-of-type { border-bottom: none; }
 
 /* ---------- messages (search + drawer) ---------- */
@@ -518,6 +518,36 @@ dialog::backdrop { background: rgb(0 0 0 / .55); backdrop-filter: blur(2px); }
   .bar-right .search, .bar-left .search { flex: 1; }
   .type-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   #onlinePill { display: none; }
+  /* ---------- command console: sessions become a drawer (P0) ---------- */
+  body.cmd-active { overflow-x: hidden; overflow-y: auto; }
+  .cmd-layout { position: relative; }
+  .cmd-sessions {
+    position: absolute; left: 0; top: 0; bottom: 0; z-index: 40;
+    width: min(300px, 85vw); min-width: 0; max-width: none;
+    transform: translateX(-102%); transition: transform .2s ease;
+    box-shadow: var(--shadow);
+  }
+  .cmd-layout.sessions-open .cmd-sessions { transform: none; }
+  .cmd-layout.sessions-open .cmd-scrim {
+    display: block; position: absolute; inset: 0; z-index: 30;
+    background: rgb(0 0 0 / .5);
+  }
+  .cmd-chat { min-width: 0; }
+  .cmd-chat-header { height: auto; min-height: 54px; padding: 8px 12px; gap: 8px; flex-wrap: wrap; }
+  .cmd-chat-title { flex: 1; min-width: 0; }
+  .cmd-chat-title h2 { font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cmd-chat-title p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cmd-chat-actions { flex-wrap: wrap; gap: 6px; }
+  .cmd-stream { padding: 14px; }
+  .cmd-msg { max-width: 92%; }
+  .cmd-dock { padding: 8px 12px; }
+  .cmd-composer-toolbar { flex-wrap: wrap; gap: 8px; }
+  .cmd-kind-toggle { flex-wrap: wrap; max-width: 100%; }
+  .kind-opt { white-space: nowrap; }
+  .cmd-input-row { gap: 8px; }
+  .cmd-input-row textarea { min-width: 0; }
+  .cmd-chips-bar { min-width: 0; flex-wrap: wrap; }
+  .cmd-chips-scroll { flex: 1; min-width: 0; }
 }
 @media (max-width: 560px) {
   .stats { gap: 8px; }
@@ -530,6 +560,28 @@ dialog::backdrop { background: rgb(0 0 0 / .55); backdrop-filter: blur(2px); }
   .pager { justify-content: center; }
   .drawer-head { flex-direction: column; align-items: stretch; gap: 10px; }
   .drawer-actions { justify-content: flex-start; }
+  /* ---------- touch targets & small text (P1) ---------- */
+  .btn-icon { width: 44px; height: 44px; }
+  .btn-icon.xs { width: 44px; height: 44px; }
+  .pager-nav button { min-width: 44px; height: 44px; }
+  .seg button { min-height: 44px; padding: 8px 12px; font-size: 0.82rem; }
+  .xs { font-size: 0.78rem; }
+  .badge { font-size: 0.76rem; }
+  .table thead th { font-size: 0.78rem; }
+  .cmd-group-label { font-size: 0.76rem; }
+  .kind-opt { padding: 8px 10px; font-size: 0.78rem; }
+  /* ---------- command console tightening (P0) ---------- */
+  .cmd-stream { padding: 12px 10px; gap: 10px; }
+  .cmd-msg { max-width: 94%; }
+  .cmd-dock { padding: 8px 10px; }
+  .cmd-input-row { gap: 8px; }
+  .cmd-send-btn { min-height: 44px; padding: 8px 12px; }
+  .cmd-hint { display: none; }
+  /* ---------- long content (P2) ---------- */
+  .invite-box { flex-wrap: wrap; }
+  .kv { grid-template-columns: 1fr; }
+  .kv dt { padding-bottom: 2px; border-bottom: 0; }
+  .kv dd { text-align: left; padding-top: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -692,6 +744,7 @@ main.full-bleed {
   overflow: hidden;
   background: var(--bg);
 }
+.cmd-scrim { display: none; }
 
 /* --- Left Sessions Sidebar --- */
 .cmd-sessions {

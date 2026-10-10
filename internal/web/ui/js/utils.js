@@ -181,14 +181,14 @@ export function renderPager(targetEl, { total, page, pageSize, onPage, onPageSiz
       </select>
     </div>
     <div class="pager-nav">
-      <button class="p-prev-all" ${page <= 1 ? 'disabled' : ''} title="第一页">${icon('chevs-l')}</button>
-      <button class="p-prev" ${page <= 1 ? 'disabled' : ''} title="上一页">${icon('chev-l')}</button>
+      <button class="p-prev-all" ${page <= 1 ? 'disabled' : ''} title="第一页" aria-label="第一页">${icon('chevs-l')}</button>
+      <button class="p-prev" ${page <= 1 ? 'disabled' : ''} title="上一页" aria-label="上一页">${icon('chev-l')}</button>
       ${pages.map((p) => {
         if (p === '...') return `<span class="gap">…</span>`;
         return `<button class="p-num ${p === page ? 'on' : ''}" data-p="${p}">${p}</button>`;
       }).join('')}
-      <button class="p-next" ${page >= totalPages ? 'disabled' : ''} title="下一页">${icon('chev-r')}</button>
-      <button class="p-next-all" ${page >= totalPages ? 'disabled' : ''} title="最后页">${icon('chevs-r')}</button>
+      <button class="p-next" ${page >= totalPages ? 'disabled' : ''} title="下一页" aria-label="下一页">${icon('chev-r')}</button>
+      <button class="p-next-all" ${page >= totalPages ? 'disabled' : ''} title="最后页" aria-label="最后页">${icon('chevs-r')}</button>
     </div>
   `;
 

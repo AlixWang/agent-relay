@@ -162,9 +162,9 @@ export async function refreshPeers() {
         <td class="td-actions">
           <div class="row-btns tight">
             ${p.status === 'suspended'
-              ? `<button class="btn-icon ok" data-act="activate" data-id="${esc(p.id)}" data-tip="激活解封">${icon('play')}</button>`
-              : `<button class="btn-icon warn" data-act="suspend" data-id="${esc(p.id)}" data-tip="暂停服务">${icon('pause')}</button>`}
-            <button class="btn-icon danger" data-act="del" data-id="${esc(p.id)}" data-tip="删除身份">${icon('trash')}</button>
+              ? `<button class="btn-icon ok" data-act="activate" data-id="${esc(p.id)}" data-tip="激活解封" aria-label="激活解封">${icon('play')}</button>`
+              : `<button class="btn-icon warn" data-act="suspend" data-id="${esc(p.id)}" data-tip="暂停服务" aria-label="暂停服务">${icon('pause')}</button>`}
+            <button class="btn-icon danger" data-act="del" data-id="${esc(p.id)}" data-tip="删除身份" aria-label="删除身份">${icon('trash')}</button>
           </div>
         </td>
       </tr>`;
