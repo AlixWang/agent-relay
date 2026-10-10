@@ -391,7 +391,10 @@
                            Who counts: members who were already in the room when the
                            message was sent (start_seq), minus the sender. -->
                       <div class="cmd-msg-footer" x-show="activeTarget.type === 'room' && ackEligible(m).length > 0">
-                        <div class="ack-wrap" @click.outside="ackOpen = null">
+                        <!-- click.outside binds a document listener per rendered row; without the
+                             guard, every OTHER row's listener closed the popover again in the same
+                             click (open, then instantly gone). Only the open row may close itself. -->
+                        <div class="ack-wrap" @click.outside="if (ackOpen === m.seq) ackOpen = null">
                           <button type="button" class="badge xs ack-badge" :class="ackTone(m)" @click="ackOpen = (ackOpen === m.seq ? null : m.seq)">
                             <svg class="icon xs" x-show="ackTone(m) === 'ok'"><use href="#i-check"/></svg>
                             <span x-text="ackLabel(m)"></span>

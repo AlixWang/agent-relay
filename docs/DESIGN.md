@@ -814,12 +814,14 @@ path; no agent-facing endpoint was added.
   unread messages); `GET /admin/stats` exposes `inbox_unread` for the nav badge.
 - `GET /admin/messages?thread=grp_<slug>` gains `acked_by` per message plus the member list, so the
   console can show "已读 2/3" without N queries.
-- The templ page `/admin/command` is the 指挥台: inbox, single-recipient composer, room list, and a
-  room pane with timeline, member management and composer. Console assets are served from the
-  embedded `ui/` root and htmx is vendored into `ui/vendor/`: the console must work with no network
-  beyond the relay itself.
+- The 指挥台 is the SPA route `/#command` (`/admin/command` 302-redirects to it): an Alpine
+  component (`ui/js/command.js`) over the JSON APIs above — inbox, single-recipient composer, room
+  list, and a room pane with timeline, per-message read receipts, member management and composer.
+  Console assets are served from the embedded `ui/` root and Alpine is vendored into `ui/vendor/`:
+  the console must work with no network beyond the relay itself. The shell pins to the viewport on
+  this route, so the stream and the session list scroll — never the document.
 
-The UI is intentionally boring: server-rendered or a tiny embedded SPA, no build chain required at deploy time beyond what ships in the binary. `internal/web/views/*_templ.go` is committed for exactly that reason (see AGENTS.md).
+The UI is intentionally boring: a tiny embedded SPA (Alpine + plain ESM modules under `ui/`), no build chain required at deploy time beyond what ships in the binary.
 
 ---
 

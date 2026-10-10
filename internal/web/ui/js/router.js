@@ -59,6 +59,10 @@ export function setRoute(r) {
   const main = $('main');
   if (main) main.classList.toggle('full-bleed', cleanRoute === 'command');
 
+  // 指挥台 pins the shell to the viewport (.cmd-* scroll, not the window); every
+  // other route keeps the document as the scroll container.
+  document.body.classList.toggle('cmd-active', cleanRoute === 'command');
+
   const handler = routeHandlers.get(cleanRoute);
   if (handler) handler();
 }
