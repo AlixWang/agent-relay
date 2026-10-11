@@ -35,6 +35,11 @@ ALTER TABLE peers ADD COLUMN client_rev TEXT DEFAULT '';
 ALTER TABLE peers ADD COLUMN memory_note TEXT DEFAULT '';
 ALTER TABLE peers ADD COLUMN memory_version INTEGER DEFAULT 0;
 ALTER TABLE peers ADD COLUMN memory_reconciled_at INTEGER DEFAULT 0;
+-- Admin remark: operator-only note (e.g. login email) for the members
+-- console. Written only via PATCH /admin/peers, served only on
+-- GET /admin/peers, never exposed on the agent-facing GET /peers nor
+-- sent down to assistants in any prompt.
+ALTER TABLE peers ADD COLUMN admin_note TEXT DEFAULT '';
 -- NOTE: tokens.peer_id intentionally has NO foreign key to peers(id).
 -- Tokens outlive peers by design (DESIGN §10.2): peers are pruned after
 -- peer_prune_after_days, tokens persist until revoked so a returning

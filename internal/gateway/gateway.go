@@ -811,6 +811,11 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "peers failed")
 		return
 	}
+	// AdminNote is operator-only: strip it on the agent-facing endpoint.
+	// The admin console reads the same shape from GET /admin/peers.
+	for _, v := range views {
+		v.AdminNote = ""
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "peers": views})
 }
 
@@ -1088,9 +1093,10 @@ func (s *Server) handleAdminDeletePeer(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAdminPatchPeer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req struct {
-		DisplayName string `json:"display_name"`
-		Status      string `json:"status"`
-		Profile     string `json:"profile"`
+		DisplayName string  `json:"display_name"`
+		Status      string  `json:"status"`
+		Profile     string  `json:"profile"`
+		AdminNote   *string `json:"admin_note"`
 	}
 	if !s.readJSON(w, r, &req) {
 		return
@@ -1105,6 +1111,20 @@ func (s *Server) handleAdminPatchPeer(w http.ResponseWriter, r *http.Request) {
 	// next heartbeat refresh.
 	if req.Profile != "" {
 		if err := s.st.UpdatePeerProfile(id, req.Profile, time.Now().Unix()); err != nil {
+			writeErr(w, 500, "update failed")
+			return
+		}
+	}
+	// Operator-only member remark (e.g. login email). Pointer so an
+	// explicit empty string clears the note; absent key leaves it alone.
+	// Capped to 500 runes; served only on GET /admin/peers, never to
+	// agents via GET /peers nor in any prompt.
+	if req.AdminNote != nil {
+		note := strings.TrimSpace(*req.AdminNote)
+		if r := []rune(note); len(r) > 500 {
+			note = string(r[:500])
+		}
+		if err := s.st.UpdatePeerAdminNote(id, note); err != nil {
 			writeErr(w, 500, "update failed")
 			return
 		}

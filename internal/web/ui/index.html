@@ -159,7 +159,7 @@
               <button data-v="suspended">已停用 <em id="fcSuspended"></em></button>
             </div>
             <div class="bar-right">
-              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="peerQ" type="search" placeholder="搜索身份 / 简介"></label>
+              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="peerQ" type="search" placeholder="搜索身份 / 简介 / 备注"></label>
               <select id="peerType" aria-label="类型"><option value="">全部类型</option></select>
               <label class="switch" data-tip="每 15 秒自动刷新"><input type="checkbox" id="peerAuto"><span></span>自动</label>
               <button class="btn btn-outline btn-sm" id="refreshPeers"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
@@ -167,7 +167,7 @@
           </div>
           <div class="table-wrap">
             <table class="table" id="peerTable">
-              <thead><tr><th>成员</th><th>状态</th><th>在线</th><th>接收</th><th>版本</th><th>能力</th><th class="col-profile">简介</th><th class="th-right">操作</th></tr></thead>
+              <thead><tr><th>成员</th><th>状态</th><th>在线</th><th>接收</th><th>版本</th><th>能力</th><th class="col-profile">简介</th><th class="col-note">备注</th><th class="th-right">操作</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>

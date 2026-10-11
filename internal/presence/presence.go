@@ -45,6 +45,10 @@ type PeerView struct {
 	MemoryNote         string `json:"memory_note,omitempty"`
 	MemoryVersion      int    `json:"memory_version"`
 	MemoryReconciledAt int64  `json:"memory_reconciled_at,omitempty"`
+	// AdminNote is the operator-only member remark (e.g. login email).
+	// Served only on GET /admin/peers; the agent-facing GET /peers
+	// strips it so assistants never see it.
+	AdminNote string `json:"admin_note,omitempty"`
 	// Transport (§4.4b): how the peer currently receives messages.
 	// "sse" = holding a live /messages/stream; "poll" = short-polling
 	// (or offline/unknown). Computed from the stream hub, not stored.
@@ -160,6 +164,7 @@ func (s *Service) List(now int64, live map[string]bool) ([]*PeerView, error) {
 			ClientVersion: p.ClientVersion, ClientUpdatedAt: p.ClientUpdatedAt,
 			ClientRev:  p.ClientRev,
 			MemoryNote: p.MemoryNote, MemoryVersion: p.MemoryVersion, MemoryReconciledAt: p.MemoryReconciledAt,
+			AdminNote:  p.AdminNote,
 		}
 		var caps any
 		if err := json.Unmarshal([]byte(orEmptyJSON(p.Capabilities)), &caps); err == nil {

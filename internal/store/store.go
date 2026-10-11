@@ -39,6 +39,9 @@ type Peer struct {
 	MemoryNote         string
 	MemoryVersion      int
 	MemoryReconciledAt int64
+	// AdminNote is an operator-only remark (e.g. login email) for the
+	// members console. Never exposed to agents (GET /peers strips it).
+	AdminNote string
 }
 
 type TokenRow struct {
@@ -141,6 +144,9 @@ type Store interface {
 	// UpdatePeerMemory records the assistant's memory-reconciliation report
 	// (§8.6). Forward-only on version, same rule as UpdatePeerPrompt.
 	UpdatePeerMemory(id, note string, version int, ts int64) error
+	// UpdatePeerAdminNote records the operator-only member remark.
+	// Admin console only; empty clears the note.
+	UpdatePeerAdminNote(id, note string) error
 	TouchPeer(id string, ts int64) error
 	PrunePeers(olderThan int64) (int64, error)
 	// DeletePeer removes the peer row, revokes all its tokens and clears
@@ -366,11 +372,11 @@ func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
-		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0) FROM peers WHERE id=?`, id).
+		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,'') FROM peers WHERE id=?`, id).
 		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
-			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt)
+			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -385,7 +391,7 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
-		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0) FROM peers ORDER BY id`)
+		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,'') FROM peers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -396,12 +402,17 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 		if err := rows.Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
-			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt); err != nil {
+			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
 	}
 	return out, rows.Err()
+}
+
+func (s *sqliteStore) UpdatePeerAdminNote(id, note string) error {
+	_, err := s.db.Exec(`UPDATE peers SET admin_note=? WHERE id=?`, note, id)
+	return err
 }
 
 func (s *sqliteStore) UpdatePeerStatus(id, status string) error {

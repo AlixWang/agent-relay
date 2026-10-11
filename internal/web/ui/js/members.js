@@ -76,12 +76,70 @@ const capsBadges = (c) => {
   return `<div class="chips">${keys.map((k) => `<span class="badge xs">${esc(k)}</span>`).join('')}</div>`;
 };
 
+const noteText = (p) => {
+  const note = p.admin_note || '';
+  if (!note) return '<span class="muted xs">—</span>';
+  return `<span class="note-text" title="${esc(note)}">${esc(note)}</span>`;
+};
+
+async function saveAdminNote(id, value) {
+  const note = String(value ?? '').trim().slice(0, 500);
+  await api('/admin/peers/' + encodeURIComponent(id), {
+    method: 'PATCH',
+    body: JSON.stringify({ admin_note: note }),
+  });
+  const cached = peerState.cache.find((p) => p.id === id);
+  if (cached) cached.admin_note = note;
+}
+
+function bindNoteCells(tbody) {
+  tbody.querySelectorAll('.note-cell').forEach((cell) => {
+    const id = cell.dataset.id;
+    const btn = cell.querySelector('button[data-act="note"]');
+    if (!btn) return;
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      if (cell.classList.contains('editing')) return;
+      const peer = peerState.cache.find((p) => p.id === id);
+      const cur = peer?.admin_note || '';
+      cell.classList.add('editing');
+      cell.innerHTML = `<div class="note-edit">
+        <input type="text" maxlength="500" placeholder="如登录邮箱" value="${esc(cur)}" aria-label="成员备注">
+        <button class="btn btn-primary btn-xs" data-save>保存</button>
+        <button class="btn btn-ghost btn-xs" data-cancel>取消</button>
+      </div>`;
+      const input = cell.querySelector('input');
+      input.focus();
+      input.select();
+      const close = () => refreshPeers();
+      cell.querySelector('[data-cancel]').onclick = (ev) => { ev.stopPropagation(); close(); };
+      const commit = async (ev) => {
+        ev?.stopPropagation?.();
+        try {
+          await saveAdminNote(id, input.value);
+          toast(`已更新 ${id} 备注`, 'ok');
+        } catch (err) {
+          toast('备注保存失败：' + err.message, 'bad');
+        }
+        close();
+      };
+      cell.querySelector('[data-save]').onclick = commit;
+      input.onkeydown = (ev) => {
+        if (ev.key === 'Enter') commit(ev);
+        else if (ev.key === 'Escape') close();
+        ev.stopPropagation();
+      };
+      input.onclick = (ev) => ev.stopPropagation();
+    };
+  });
+}
+
 export async function refreshPeers() {
   const table = $('peerTable');
   if (!table) return;
   const tbody = table.querySelector('tbody');
   if (!tbody) return;
-  tbody.innerHTML = `<tr class="skel"><td colspan="8"><i></i></td></tr>`;
+  tbody.innerHTML = `<tr class="skel"><td colspan="9"><i></i></td></tr>`;
 
   try {
     const params = new URLSearchParams({
@@ -123,7 +181,7 @@ export async function refreshPeers() {
     }
 
     if (!peers.length) {
-      tbody.innerHTML = `<tr><td colspan="8" class="empty-td"><div class="empty">${icon('users')}<p>没有找到匹配的成员</p></div></td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="empty-td"><div class="empty">${icon('users')}<p>没有找到匹配的成员</p></div></td></tr>`;
       renderPager($('peerPager'), { total: 0 });
       return;
     }
@@ -159,6 +217,12 @@ export async function refreshPeers() {
         <td>
           <div class="profile" title="点击展开/收起">${esc(p.profile || '未填写自述能力')}</div>
         </td>
+        <td>
+          <div class="note-cell" data-id="${esc(p.id)}">
+            ${noteText(p)}
+            <button class="btn btn-ghost btn-xs" data-act="note" data-id="${esc(p.id)}" title="编辑备注（仅管理员可见）">编辑</button>
+          </div>
+        </td>
         <td class="td-actions">
           <div class="row-btns tight">
             ${p.status === 'suspended'
@@ -173,6 +237,7 @@ export async function refreshPeers() {
     tbody.querySelectorAll('.profile').forEach((el) => {
       el.onclick = () => el.classList.toggle('open');
     });
+    bindNoteCells(tbody);
 
     tbody.querySelectorAll('button[data-act]').forEach((btn) => {
       btn.onclick = async (e) => {
@@ -222,7 +287,7 @@ export async function refreshPeers() {
 
   } catch (err) {
     if (err.status !== 401) {
-      tbody.innerHTML = `<tr><td colspan="8" class="empty-td"><div class="empty bad">${icon('err')}<p>加载失败：${esc(err.message)}</p></div></td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="empty-td"><div class="empty bad">${icon('err')}<p>加载失败：${esc(err.message)}</p></div></td></tr>`;
     }
   }
 }

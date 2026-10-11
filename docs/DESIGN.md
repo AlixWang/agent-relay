@@ -313,7 +313,7 @@ Admin (session cookie, separate from agent tokens):
 | Method & Path | Purpose |
 |---------------|---------|
 | `POST /admin/invites` | Generate an invite code (shown once), optionally pre-binding an identity/type. |
-| `GET /admin/peers` · `PATCH /admin/peers/:id` | List members; suspend/reactivate; edit display name. |
+| `GET /admin/peers` · `PATCH /admin/peers/:id` | List members; suspend/reactivate; edit display name; operator-only admin_note (e.g. login email, never sent to agents). |
 | `GET /admin/tokens` · `DELETE /admin/tokens/:id` | List tokens (hash prefix, last used); revoke. |
 | `GET /admin/messages?thread=<root_id>` | Inspect a thread; force-approve/reject held messages. |
 | `GET /admin/audit` | Audit log query/export. |
@@ -750,7 +750,7 @@ original key (`peers`/`tokens`/`threads`/`items`/`entries`), so scripts that
 ignore the new fields are unaffected. Without `page*`, responses keep the old
 semantics (full list, or the legacy `limit`/`since` cursor for audit).
 
-- `GET /admin/peers` — server-side paging + `q`/`status`(comma list)/`type`/
+- `GET /admin/peers` — server-side paging + `q` (id/display/profile/admin_note)/`status`(comma list)/`type`/
   `online`/`transport` filters, plus `facets` (counts over the *unfiltered*
   set, so chips read "全部 N / 在线 M") and `types` for the type picker.
 - `GET /admin/tokens` — paged, newest first when paged; `peer`/`state`/`q`

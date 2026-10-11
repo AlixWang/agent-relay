@@ -106,7 +106,7 @@ POST /admin/logout
 POST /admin/invites { intended_id?, agent_type? } → { code }（明文只给这一次）
 GET  /admin/invites → hash 前缀列表
 DELETE /admin/invites/{hash_prefix}
-GET  /admin/peers · PATCH /admin/peers/{id} { display_name?, status? }
+GET  /admin/peers · PATCH /admin/peers/{id} { display_name?, status?, profile?, admin_note? }（admin_note 为管理员专用备注如登录邮箱，仅控制台可见，不下发 agent；空字符串清空）
 GET  /admin/tokens → hash 前缀/last_used/last_ip
 DELETE /admin/tokens/{id}（立即 revoke）
 POST /admin/tokens/rotate { peer_id, label? } → { token }

@@ -324,6 +324,12 @@ input[type="checkbox"] { height: auto; accent-color: var(--brand); }
 .td-actions .row-btns { justify-content: flex-end; flex-wrap: nowrap; gap: 2px; }
 .col-seq { width: 64px; }
 .col-profile { min-width: 260px; }
+.col-note { min-width: 160px; }
+.note-cell { display: flex; align-items: center; gap: 8px; max-width: 260px; }
+.note-cell .note-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); font-size: 0.8rem; }
+.note-cell.editing { max-width: 320px; }
+.note-edit { display: flex; align-items: center; gap: 6px; width: 100%; }
+.note-edit input { flex: 1; min-width: 0; }
 .num { font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
 .who { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .who-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }

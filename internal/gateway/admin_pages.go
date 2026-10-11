@@ -70,7 +70,7 @@ func withMeta(body map[string]any, p pageReq, total int) map[string]any {
 	return body
 }
 
-// filterPeers applies console filters: q (id/display/profile substring),
+// filterPeers applies console filters: q (id/display/profile/admin_note substring),
 // status, type, online=1|0, transport=sse|poll.
 func filterPeers(views []*presence.PeerView, r *http.Request) []*presence.PeerView {
 	q := r.URL.Query()
@@ -89,7 +89,7 @@ func filterPeers(views []*presence.PeerView, r *http.Request) []*presence.PeerVi
 	}
 	out := make([]*presence.PeerView, 0, len(views))
 	for _, v := range views {
-		if needle != "" && !strings.Contains(strings.ToLower(v.ID+"\n"+v.DisplayName+"\n"+v.Profile), needle) {
+		if needle != "" && !strings.Contains(strings.ToLower(v.ID+"\n"+v.DisplayName+"\n"+v.Profile+"\n"+v.AdminNote), needle) {
 			continue
 		}
 		if len(states) > 0 && !slices.Contains(states, v.Status) {
