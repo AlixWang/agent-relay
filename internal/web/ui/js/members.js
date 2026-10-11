@@ -135,6 +135,8 @@ function bindNoteCells(tbody) {
 }
 
 export async function refreshPeers() {
+  // 有备注正在编辑时不重绘，避免输入到一半被刷新吞掉。
+  if (document.querySelector('.note-cell.editing')) return;
   const table = $('peerTable');
   if (!table) return;
   const tbody = table.querySelector('tbody');
@@ -240,6 +242,8 @@ export async function refreshPeers() {
     bindNoteCells(tbody);
 
     tbody.querySelectorAll('button[data-act]').forEach((btn) => {
+      // 备注编辑按钮由 bindNoteCells 专属绑定，这里跳过，否则 onclick 会被覆盖。
+      if (btn.dataset.act === 'note') return;
       btn.onclick = async (e) => {
         e.stopPropagation();
         const id = btn.dataset.id;
