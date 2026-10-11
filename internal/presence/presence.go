@@ -164,7 +164,7 @@ func (s *Service) List(now int64, live map[string]bool) ([]*PeerView, error) {
 			ClientVersion: p.ClientVersion, ClientUpdatedAt: p.ClientUpdatedAt,
 			ClientRev:  p.ClientRev,
 			MemoryNote: p.MemoryNote, MemoryVersion: p.MemoryVersion, MemoryReconciledAt: p.MemoryReconciledAt,
-			AdminNote:  p.AdminNote,
+			AdminNote: p.AdminNote,
 		}
 		var caps any
 		if err := json.Unmarshal([]byte(orEmptyJSON(p.Capabilities)), &caps); err == nil {
