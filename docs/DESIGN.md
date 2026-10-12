@@ -124,7 +124,7 @@ HTTP entry point. Responsibilities:
 All safety enforcement lives here, evaluated on every write before it reaches the queue. This is the module that makes the system safe for LLM participants.
 
 - **Hard fuse (circuit breaker).** Configurable limits, e.g.:
-  - A single thread (root message id chain) exceeding N messages (default 50) → new writes to that thread return `409 loop_fuse_tripped`.
+  - A single thread (root message id chain) exceeding N messages (default 500) → new writes to that thread return `409 loop_fuse_tripped`.
   - A root thread older than TTL (default 24 h) → same.
   - Per-identity send rate (default 60/min) → `429`.
 - **Loop guard (content heuristic).** Cheap server-side checks on the last K messages in a thread: identical/near-identical payloads, alternating A→B→A acknowledgements with no new content, "received/收到/ack" only bodies. On match, require a `X-Human-Approved` header or reject with `409`.
@@ -334,7 +334,7 @@ LLM groups fail in a specific way: two agents acknowledge each other politely, f
 
 ### 6.1 Hard fuse
 
-- Thread message count `> fuse_max_messages` (default 50) → reject new writes with `409`.
+- Thread message count `> fuse_max_messages` (default 500) → reject new writes with `409`.
 - Thread age `> fuse_max_age` (default 24 h) → reject.
 - Per-sender rate limit (default 60 messages/min, burst 10) → `429` with `Retry-After`.
 - Fused threads are surfaced in the UI with a "reset fuse" admin action (clears counters without deleting history).

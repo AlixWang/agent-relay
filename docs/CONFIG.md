@@ -16,7 +16,7 @@
 | `protocol` / `min_client` | int | `1` / `1` | 协议版本与最低兼容；低于 `min_client` 的 peer 收 `426` |
 | `online_timeout_secs` | int | `300` | presence 在线窗口（DESIGN §4.5） |
 | `verify_timeout_secs` | int | `600` | 冒烟验证超时；超时标 `failed` 并区分 `registered_never_polled` / `polled_never_acked` |
-| `fuse_max_messages` | int | `50` | 单线程最大消息数，超限 `409 loop_fuse_tripped`（UI 可 reset，不删历史） |
+| `fuse_max_messages` | int | `500` | 单线程最大消息数，超限 `409 loop_fuse_tripped`（UI 可 reset，不删历史） |
 | `fuse_max_age_secs` | int | `86400` | 线程最大存活 24h |
 | `rate_per_minute` | int | `60` | 每身份每 60s 上限（前 10 条 burst 放行），超限 `429` + `Retry-After` |
 | `max_open_permissions` | int | `10` | 单 thread 未过期 open 权限请求上限，超限 `409 permission_rate_limited`（0=不限） |

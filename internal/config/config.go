@@ -87,7 +87,7 @@ func Default() *Config {
 		MinClient:            1,
 		OnlineTimeoutSecs:    300,
 		VerifyTimeoutSecs:    600,
-		FuseMaxMessages:      50,
+		FuseMaxMessages:      500,
 		FuseMaxAgeSecs:       24 * 3600,
 		RatePerMinute:        60,
 		MaxOpenPermissions:   10,

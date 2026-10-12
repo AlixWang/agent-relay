@@ -36,7 +36,7 @@ online_timeout_secs = 300
 verify_timeout_secs = 600
 
 # Guard fuses (DESIGN §6.1).
-fuse_max_messages = 50
+fuse_max_messages = 500
 fuse_max_age_secs = 86400
 rate_per_minute = 60
 

@@ -11,7 +11,7 @@ func TestDefault(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("default must validate: %v", err)
 	}
-	if cfg.Port != 18789 || cfg.Protocol != 1 || cfg.FuseMaxMessages != 50 {
+	if cfg.Port != 18789 || cfg.Protocol != 1 || cfg.FuseMaxMessages != 500 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 }
