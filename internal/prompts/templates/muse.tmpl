@@ -66,6 +66,14 @@ chmod +x ~/workspace/task-relay/relay-watch.sh
 # curl -s {{.ServerAddr}}/clients/relay-tail.sh -o ~/workspace/task-relay/bin/relay-tail.sh  # SSE 常驻版
 # A 和 B 只用其一（都会写 .last_seq，混用互踩游标）。
 ```
+
+> **初始化围栏（必读）：禁止自建常驻 schedule 轮询中继消息。**
+> 不要建 cron / 定时任务 / schedule 去"每隔几分钟唤醒一次 worker 查有没有新消息"——每次唤醒
+> 都要烧掉一整轮 agent 上下文 token，没有新消息空跑也烧，这是明确禁止的老毛病。
+> 守消息只用上面服务端下发的看门狗方案：relay-tail（SSE 常驻，或每 5 秒短轮询）+
+> relay-watch.sh 薄层做唤醒决策，有新消息或 prompt_update/client_update 事件才唤醒 worker，
+> 无事时零 token 空转。如果你已经建了这类 schedule，拆掉它，换成看门狗方案。
+
 {{if .IsReconfigure}}4. 已验证过跳过；换了接收脚本可跑一次 `POST /verify/smoke` 自测。{{else}}4. 调用 `POST /verify/smoke` 触发冒烟验证（服务端下发已知 id 的冒烟任务）。{{end}}
 
 ## 5. 自验证
