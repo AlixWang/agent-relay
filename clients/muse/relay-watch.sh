@@ -55,7 +55,14 @@ daemon_alive() {
   local pid
   pid="$(tr -d '[:space:]' < "$PIDFILE" 2>/dev/null || true)"
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null || return 1
+  # PID 复用盲区（2026-10-12 Lisa 实测）：沙箱/VM 重启后 pidfile 残留旧 PID，
+  # 若被其他进程复用，kill -0 照样通过，看门狗会误判 daemon 存活、SSE 静默断线。
+  # 再确认该 PID 的进程名确为 relay-tail（`comm=` 去掉 ps 表头；Linux/macOS 通用，
+  # comm 截断 15 字符，"relay-tail" 10 字符不受影响；ps 不可用时回落 kill -0）。
+  local comm
+  comm="$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]' || true)"
+  [ -z "$comm" ] || [ "$comm" = "relay-tail" ]
 }
 
 if ! daemon_alive; then
