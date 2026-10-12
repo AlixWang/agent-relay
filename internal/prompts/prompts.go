@@ -110,7 +110,7 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 15
+const PromptVersion = 16
 
 // RoomAwarePromptVersion is the revision that first documents rooms and the
 // operator identity (§7.8 muse/claw/generic, §6.7 hermes), and that requires the
@@ -118,7 +118,7 @@ const PromptVersion = 15
 // The console uses it to warn before posting a room task: a member below this
 // revision would treat a group message as a private instruction — or answer
 // without reading what the other members just said.
-const RoomAwarePromptVersion = 15
+const RoomAwarePromptVersion = 16
 
 // ChangeEntry is one revision's upgrade guide for assistants.
 type ChangeEntry struct {
@@ -198,6 +198,11 @@ var ChangeLog = []ChangeEntry{
 		Version: 15,
 		Summary: "§4 接入步骤新增初始化围栏：禁止自建常驻 schedule/cron 轮询唤醒 worker 查中继消息（每次唤醒烧一整轮 token，空跑也烧）；守消息必须用服务端下发的看门狗方案（relay-tail + relay-watch.sh，有新消息或事件才唤醒，无事零 token）。",
 		Actions: "1) 自查有没有建「定时唤醒 worker 查中继」这类 schedule，有就拆掉，换成看门狗方案（hermes：cron 只许跑 relay-watch.sh）；2) 以后初始化一律用服务端下发的看门狗方案守消息，不自建轮询唤醒。",
+	},
+	{
+		Version: 16,
+		Summary: "§4 接入步骤补充看门狗落地说明（muse）：5 秒轻量调度只跑 shell 做序号对比，是否唤醒 worker 由脚本内 wake() 决定；附 Hatch hook 参考配置（poll_interval_secs=5），禁止把\"查中继\"本身做成定时唤醒的 worker/agent 任务。",
+		Actions: "按 §4 落地说明检查自己的看门狗调度：确认 5 秒 tick 只跑脚本、不直接唤醒 worker；Hatch 上核对 hook 配置（interval 5s、source HATCH_HOOK_RUNTIME 用真 wake/silent/log 原语）。",
 	},
 }
 
