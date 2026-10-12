@@ -73,6 +73,17 @@ chmod +x ~/workspace/task-relay/relay-watch.sh
 > 守消息只用上面服务端下发的看门狗方案：relay-tail（SSE 常驻，或每 5 秒短轮询）+
 > relay-watch.sh 薄层做唤醒决策，有新消息或 prompt_update/client_update 事件才唤醒 worker，
 > 无事时零 token 空转。如果你已经建了这类 schedule，拆掉它，换成看门狗方案。
+>
+> **落地：5 秒一次的轻量调度（示例：Hatch hook）。**
+> 用你 runtime 的轻量定时机制 5 秒跑一次 relay-watch.sh。Hatch 参考配置：hook id
+> `agent-relay-poll`；script 用下载后按 CONFIG 改好的 relay-watch.sh，顶部加
+> `source "$HATCH_HOOK_RUNTIME"`，以真 `wake`/`silent`/`log` 原语替换默认 stub；
+> `poll_interval_secs=5`，`script_timeout_secs=30`。worker 指令要点：wake payload 只含
+> 元数据（id/from/kind/in_reply_to + 前 120 字预览），执行前先按 id 去 `spool/wake.jsonl`
+> 取全文；逐条执行后先回 result 再 ack；幂等——执行前查 `.done_ids`，完成后追加。
+> 其他 runtime 用等价的 cron/interval job（5 秒）。铁律：这个 tick 只跑 shell 做序号对比，
+> 是否唤醒 worker 由脚本内的 `wake()` 决定；绝不许把"查中继"本身做成定时唤醒的
+> worker/agent 任务——那就是上面围栏禁止的老毛病。
 
 {{if .IsReconfigure}}4. 已验证过跳过；换了接收脚本可跑一次 `POST /verify/smoke` 自测。{{else}}4. 调用 `POST /verify/smoke` 触发冒烟验证（服务端下发已知 id 的冒烟任务）。{{end}}
 
