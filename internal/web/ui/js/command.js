@@ -268,7 +268,9 @@ function createCommandState() {
         if (this.activeTarget.type === 'inbox') {
           const r = await api('/admin/inbox?page_size=50');
           this.inboxUnread = r.unread || 0;
-          this.messages = (r.items || []).map((m) => ({
+          // Inbox pages newest-first; the stream reads top-down and rests at
+          // the bottom, so render oldest-first like every other timeline.
+          this.messages = (r.items || []).slice().reverse().map((m) => ({
             seq: m.seq,
             id: m.id,
             from: m.from,

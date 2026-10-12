@@ -71,11 +71,16 @@ const OP_DM_THREAD = { ok: true, items: [
   { seq: 242, id: 'dm-1', sender: 'alice', recipient: 'operator', kind: 'result', payload: '证书 2027-03 到期', created_at: 1791555100, acked_by: [] },
 ] };
 const calls = [];
+// Inbox pages newest-first (backend delivery order), seq 102 before 101.
+const INBOX_ITEMS = [
+  { seq: 102, id: 'n2', from: 'alice', to: 'operator', kind: 'result', payload: '第二条', created_at: 1791555100, unread: true, thread: 'op/alice' },
+  { seq: 101, id: 'n1', from: 'alice', to: 'operator', kind: 'chat', payload: '第一条', created_at: 1791555000, unread: true, thread: 'op/alice' },
+];
 globalThis.fetch = async (url) => {
   calls.push(url);
   const body = url.startsWith('/admin/rooms') ? { ok: true, rooms: [ROOM] }
     : url.startsWith('/admin/messages?thread=op') ? OP_DM_THREAD
-    : url.startsWith('/admin/inbox') ? { ok: true, unread: 0, items: [] }
+    : url.startsWith('/admin/inbox') ? { ok: true, unread: 2, items: INBOX_ITEMS }
       : url.startsWith('/admin/peers') ? { ok: true, peers: PEERS }
         : { ok: true };
   return { ok: true, status: 200, statusText: 'OK', json: async () => body };
@@ -226,5 +231,14 @@ assert(calls.some((u) => u.includes('thread=op') && u.includes('alice')), 'peer 
 assert(page.messages.length === 2, 'DM thread must hold both directions, got ' + page.messages.length);
 assert(page.messages[0].from === 'operator' && page.messages[0].to === 'alice', 'operator send must render: ' + JSON.stringify(page.messages[0]));
 assert(page.messages[1].from === 'alice' && page.messages[1].to === 'operator', 'peer reply must render: ' + JSON.stringify(page.messages[1]));
+
+// 8. Inbox renders oldest-first. Regression: the API pages newest-first and
+// the stream rests at the bottom, so newest-on-top left every load staring
+// at the oldest message.
+page.selectInbox();
+await page.loadActiveMessages(false);
+assert(page.messages.length === 2, 'inbox must render both items, got ' + page.messages.length);
+assert(page.messages[0].seq === 101 && page.messages[1].seq === 102, 'inbox must read top-down oldest-first, got seqs ' + page.messages.map((m) => m.seq).join(','));
+assert(page.inboxUnread === 2, 'unread count still comes from the API, got ' + page.inboxUnread);
 
 console.log('command state: all checks passed');
