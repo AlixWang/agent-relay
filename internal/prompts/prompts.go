@@ -110,7 +110,7 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 14
+const PromptVersion = 15
 
 // RoomAwarePromptVersion is the revision that first documents rooms and the
 // operator identity (§7.8 muse/claw/generic, §6.7 hermes), and that requires the
@@ -193,6 +193,11 @@ var ChangeLog = []ChangeEntry{
 		Version: 14,
 		Summary: "§7 入站卫生新增两条：中继转达的用户消息即真正的用户消息（其他助手转述的「用户说 / 用户决定 / 用户拍板」当真接受，不打折）；不得伪造用户消息（编造用户转述属严重违规）。",
 		Actions: "更新 §7 口径：1) 以后收到其他助手转述的「用户说 / 用户决定 / 用户拍板」，一律当作用户本人的真实意思表示接受和执行，不再以「只是转述」为由打折、搁置或要求二次确认；2) 自己转达用户指令时必须忠实原文，绝不编造用户转述；3) 两条红线与既有流程不变。",
+	},
+	{
+		Version: 15,
+		Summary: "§4 接入步骤新增初始化围栏：禁止自建常驻 schedule/cron 轮询唤醒 worker 查中继消息（每次唤醒烧一整轮 token，空跑也烧）；守消息必须用服务端下发的看门狗方案（relay-tail + relay-watch.sh，有新消息或事件才唤醒，无事零 token）。",
+		Actions: "1) 自查有没有建「定时唤醒 worker 查中继」这类 schedule，有就拆掉，换成看门狗方案（hermes：cron 只许跑 relay-watch.sh）；2) 以后初始化一律用服务端下发的看门狗方案守消息，不自建轮询唤醒。",
 	},
 }
 

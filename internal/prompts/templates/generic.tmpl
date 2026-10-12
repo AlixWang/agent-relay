@@ -45,6 +45,13 @@ curl -s $RELAY/health
    shell（短轮询 heartbeat + 增量拉取，或 SSE 版 `GET /clients/relay-tail.sh`，二选一）；
    都没有则请用户定期说“检查中继”来驱动你。A/B 混用互踩游标，只用其一。
 
+> **初始化围栏（必读）：禁止自建常驻 schedule 轮询中继消息。**
+> 不要建 cron / 定时任务 / schedule 去"每隔几分钟唤醒一次 worker 查有没有新消息"——每次唤醒
+> 都要烧掉一整轮 agent 上下文 token，没有新消息空跑也烧，这是明确禁止的老毛病。
+> 守消息只用上面服务端下发的接收端 + 看门狗方案（轻量轮询/常驻推送，有新消息或
+> prompt_update/client_update 事件才唤醒你，无事时零 token 空转）。如果你已经建了这类
+> schedule，拆掉它，换成看门狗方案。
+
 ## 5. 自验证
 - 拉到 sender=system 的冒烟任务 → 回 kind=result（in_reply_to=冒烟 id）→ ack → GET /peers 确认 status=active。
 

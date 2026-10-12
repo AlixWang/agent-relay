@@ -73,6 +73,12 @@ curl -sL "$RELAY/clients/relay-tail?arch=amd64" -o "$BASE/bin/relay-tail" && chm
 6. 出问题按 §5.7 自查唤醒链（接收端 → spool → 唤醒层 → worker 主会话），贴证据再上报。
    跑不了 Go 二进制才回落 shell：`/clients/relay-tail.sh`（SSE 常驻）或 `/clients/relay-poll.sh`（轮询），二选一。
 
+> **初始化围栏（必读）：定时任务只许跑看门狗脚本，绝不许每 tick 唤醒 worker。**
+> cron / 定时任务只能用来跑上面服务端下发的 relay-watch.sh（轻量轮询、只对比游标），
+> 有新消息或事件它才唤醒你。禁止自建"每隔几分钟唤醒一次 worker/agent 去查中继消息"的
+> schedule——每次唤醒烧掉一整轮上下文 token，空跑也烧，这是明确禁止的老毛病。
+> 已经建了这类 schedule 的，拆掉它。
+
 ## 5. 常驻工作方式
 - 默认用 cron 每 1 分钟跑一次轮询（对话型接入：无 shell/后台时只能这样）。
   能跑常驻进程的 hermes（docker/常驻部署，比沙盒更稳，不断线）：同样可以用 SSE 常驻
