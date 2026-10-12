@@ -29,8 +29,16 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureWithConfig(t, nil)
+}
+
+func newFixtureWithConfig(t *testing.T, tweak func(*config.Config)) *fixture {
+	t.Helper()
 	cfg := config.Default()
 	cfg.MinClient = 1
+	if tweak != nil {
+		tweak(cfg)
+	}
 	st, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -743,7 +751,14 @@ func (f *fixture) doCookie(t *testing.T, method, path string, body any, cookie s
 }
 
 func TestFuseTripAndReset(t *testing.T) {
-	f := newFixture(t)
+	// Small fuse + generous rate so the trip/reset cycle runs fast without
+	// tripping the rate limiter. Limits still flow through LimitsFromConfig
+	// (see newFixture), so knob wiring stays covered; the default value
+	// itself is pinned by config.TestDefault.
+	f := newFixtureWithConfig(t, func(c *config.Config) {
+		c.FuseMaxMessages = 50
+		c.RatePerMinute = 100000
+	})
 	f.registerPeer(t, "alice", "muse")
 	f.registerPeer(t, "bob", "muse")
 	// Fuse limit is 50 in the fixture; fill the alice/seed thread with
@@ -768,7 +783,7 @@ func TestFuseTripAndReset(t *testing.T) {
 			t.Fatalf("fill %d: %d", i, c)
 		}
 	}
-	// 51st trips the fuse.
+	// One past the limit trips the fuse.
 	c, out := f.do(t, "POST", "/messages",
 		map[string]any{"id": "over", "to": "bob", "from": "alice",
 			"in_reply_to": "seed", "payload": "one past the limit with completely fresh wording and padding " + strings.Repeat("y", 40)},
