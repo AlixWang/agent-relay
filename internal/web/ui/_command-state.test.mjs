@@ -64,10 +64,17 @@ const ROOM = {
   last_seq: 155, last_sender: 'fe', last_kind: 'chat', last_at: 1791555629, last_preview: '收到 @fe，人在。',
 };
 const PEERS = ['163boy', 'Mmei', 'erdan', 'fe', 'xiaoe'].map((id) => ({ id, online: true, agent_type: 'muse', prompt_version: 12 }));
+// Operator DM thread (op/<peer>): both directions, thread item shape
+// (sender/recipient) as returned by GET /admin/messages?thread=.
+const OP_DM_THREAD = { ok: true, items: [
+  { seq: 241, id: 'op-1', sender: 'operator', recipient: 'alice', kind: 'task', payload: '去查一下证书', created_at: 1791555000, acked_by: [] },
+  { seq: 242, id: 'dm-1', sender: 'alice', recipient: 'operator', kind: 'result', payload: '证书 2027-03 到期', created_at: 1791555100, acked_by: [] },
+] };
 const calls = [];
 globalThis.fetch = async (url) => {
   calls.push(url);
   const body = url.startsWith('/admin/rooms') ? { ok: true, rooms: [ROOM] }
+    : url.startsWith('/admin/messages?thread=op') ? OP_DM_THREAD
     : url.startsWith('/admin/inbox') ? { ok: true, unread: 0, items: [] }
       : url.startsWith('/admin/peers') ? { ok: true, peers: PEERS }
         : { ok: true };
@@ -209,5 +216,15 @@ assert(page.roomDissolved() === true, 'a dissolved room must be recognised from 
 page.activeTarget = { type: 'room', id: 'grp_chat', name: '聊天群', subtitle: '' };
 page.activeRoomData = { id: 'grp_chat', members: ['alice'], archived: false };
 assert(page.roomDissolved() === false, 'a live room must not look dissolved');
+
+// 7. Peer DM shows both directions. Regression: the view used to filter
+// /admin/inbox by from==peer, so operator sends only lived until the next
+// refresh (optimistic append wiped). It must load the op/<id> thread instead.
+page.selectPeer({ id: 'alice', display_name: 'alice' });
+await page.loadActiveMessages(false);
+assert(calls.some((u) => u.includes('thread=op') && u.includes('alice')), 'peer DM must load the op/<id> thread, got ' + calls.filter((u) => u.includes('/admin/messages')).join(','));
+assert(page.messages.length === 2, 'DM thread must hold both directions, got ' + page.messages.length);
+assert(page.messages[0].from === 'operator' && page.messages[0].to === 'alice', 'operator send must render: ' + JSON.stringify(page.messages[0]));
+assert(page.messages[1].from === 'alice' && page.messages[1].to === 'operator', 'peer reply must render: ' + JSON.stringify(page.messages[1]));
 
 console.log('command state: all checks passed');

@@ -297,18 +297,20 @@ function createCommandState() {
             approval_state: m.approval_state,
           }));
         } else if (this.activeTarget.type === 'peer') {
-          // Fetch inbox messages from this peer and search sent messages
-          const r = await api('/admin/inbox?page_size=50');
-          const related = (r.items || []).filter((m) => m.from === this.activeTarget.id);
-          this.messages = related.map((m) => ({
+          // One DM thread per peer (op/<id>) holds both directions (§6.8):
+          // the inbox only carries peer→operator, so operator sends vanished
+          // on the next refresh. Same item shape as the room branch.
+          const r = await api('/admin/messages?thread=' + encodeURIComponent('op/' + this.activeTarget.id));
+          this.messages = (r.items || []).map((m) => ({
             seq: m.seq,
             id: m.id,
-            from: m.from,
-            to: m.to,
+            from: m.sender,
+            to: m.recipient,
             kind: m.kind,
             payload: m.payload,
             time: m.created_at,
-            acked_by: [],
+            acked_by: m.acked_by || [],
+            approval_state: m.approval_state,
           }));
         } else if (this.activeTarget.type === 'broadcast') {
           // For broadcast, search messages sent to *
