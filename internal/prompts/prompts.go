@@ -118,7 +118,7 @@ const PromptVersion = 15
 // The console uses it to warn before posting a room task: a member below this
 // revision would treat a group message as a private instruction — or answer
 // without reading what the other members just said.
-const RoomAwarePromptVersion = 14
+const RoomAwarePromptVersion = 15
 
 // ChangeEntry is one revision's upgrade guide for assistants.
 type ChangeEntry struct {
