@@ -187,6 +187,47 @@ if ! daemon_alive; then
   log "relay_daemon_started" '{"transport":"sse"}'
 fi
 
+# ---- 2.7 worker 存活检查：超时未 ack 发 status/failed ----
+# 背景：ack 只在 worker 完成才有，中间缺"执行中"状态，worker 意外中断也无报错。
+# 本节补齐：唤醒时记 pending，超时未完成发 failed。协议见 §6.5（kind=status）。
+WORKER_PENDING="$BASE/.worker_pending"
+WORKER_TIMEOUT=1800  # 30 分钟：worker 冷启动 32-532s，大任务执行更久，超 30 分钟视为卡死
+if [ -f "$WORKER_PENDING" ]; then
+  now_ts="$(date +%s)"
+  tmp_pending="$(mktemp)"
+  while IFS= read -r pline || [ -n "$pline" ]; do
+    [ -z "$pline" ] && continue
+    pid="$(printf '%s' "$pline" | jq -r '.id // ""' 2>/dev/null || true)"
+    pfrom="$(printf '%s' "$pline" | jq -r '.from // ""' 2>/dev/null || true)"
+    pts="$(printf '%s' "$pline" | jq -r '.wake_ts // 0' 2>/dev/null || echo 0)"
+    [ -z "$pid" ] && continue
+    # 已 ack = worker 正常完成，移出 pending
+    if grep -qxF "$pid" "$BASE/.done_ids" 2>/dev/null; then
+      continue
+    fi
+    # 超时未完成 → 发 status/failed
+    case "$pts" in ''|*[!0-9]*) pts=0 ;; esac
+    if [ "$((now_ts - pts))" -gt "$WORKER_TIMEOUT" ]; then
+      st_token="$(cat "$BASE/.token" 2>/dev/null || true)"
+      if [ -n "$st_token" ]; then
+        fail_body="$(jq -cn --arg rid "$pid" --arg rfrom "$pfrom" \
+          '{kind:"status", status:"failed", to:$rfrom, in_reply_to:$rid,
+            payload:"worker 超时未返回结果（30 分钟），可能已中断或卡死"}' 2>/dev/null || true)"
+        curl -sS --max-time 8 -X POST "$RELAY_URL/messages" \
+          -H "Authorization: Bearer $st_token" \
+          -H 'Content-Type: application/json' \
+          -H 'User-Agent: RelayClient/1.0' \
+          -d "$fail_body" >/dev/null 2>&1 || true
+        unset st_token
+        log "worker_timeout" "$(printf '{"id":%s}' "$(printf '%s' "$pid" | jq -Rs .)")"
+      fi
+      continue  # 移出 pending，不再追踪
+    fi
+    printf '%s\n' "$pline" >> "$tmp_pending"
+  done < "$WORKER_PENDING"
+  mv "$tmp_pending" "$WORKER_PENDING"
+fi
+
 # ---- 2. drain spool ----
 offset="$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)"
 case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
@@ -371,6 +412,32 @@ if [ "$msg_count" != "0" ]; then
     >> "$BASE/layer0-experiment.log" 2>/dev/null || true
 fi
 
+  # 状态机补齐：唤醒 worker 时先回 status/started，让发送方知道"已接单"
+  st_token2="$(cat "$BASE/.token" 2>/dev/null || true)"
+  if [ -n "$st_token2" ]; then
+    now_ts="$(date +%s)"
+    tmp_pending2="$(mktemp)"
+    [ -f "$WORKER_PENDING" ] && cat "$WORKER_PENDING" > "$tmp_pending2" 2>/dev/null || true
+    printf '%s' "$out" | jq -c '.tasks[]? | {id, from}' 2>/dev/null | while read -r tline; do
+      tid="$(printf '%s' "$tline" | jq -r '.id // ""' 2>/dev/null || true)"
+      tfrom="$(printf '%s' "$tline" | jq -r '.from // ""' 2>/dev/null || true)"
+      [ -z "$tid" ] && continue
+      start_body="$(jq -cn --arg rid "$tid" --arg rfrom "$tfrom" \
+        '{kind:"status", status:"started", to:$rfrom, in_reply_to:$rid,
+          payload:"已接单，worker 启动中"}' 2>/dev/null || true)"
+      curl -sS --max-time 8 -X POST "$RELAY_URL/messages" \
+        -H "Authorization: Bearer $st_token2" \
+        -H 'Content-Type: application/json' \
+        -H 'User-Agent: RelayClient/1.0' \
+        -d "$start_body" >/dev/null 2>&1 || true
+      # 记 pending，用于超时检查
+      jq -cn --arg id "$tid" --arg from "$tfrom" --argjson ts "$now_ts" \
+        '{id:$id, from:$from, wake_ts:$ts}' >> "$tmp_pending2" 2>/dev/null || true
+    done
+    mv "$tmp_pending2" "$WORKER_PENDING"
+    unset st_token2
+    log "worker_started_notify" "$(printf '%s' "$out" | jq -c '{count:(.tasks|length)}' 2>/dev/null || echo '{}')"
+  fi
 reason="$(IFS='；'; echo "${reasons[*]}")"
 wake "$reason" "$final_payload"
 exit 0
