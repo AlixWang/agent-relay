@@ -43,6 +43,42 @@ func TestRegisterHappyPath(t *testing.T) {
 	}
 }
 
+// New identities are stored lowercase, and a case-variant of an existing
+// peer — whatever case it was registered in — cannot be claimed.
+func TestRegisterStoresLowercaseAndRejectsCaseVariant(t *testing.T) {
+	st := openTestStore(t)
+	svc := New(st, 3600)
+	now := time.Now().Unix()
+
+	if err := st.CreatePeer(&store.Peer{ID: "Alice", Status: "active", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	code, _, err := svc.CreateInvite("", "muse", "admin", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Register(code, "alice", "muse", 1, "{}", now); err == nil {
+		t.Fatal("expected id_taken for a case-variant of an existing peer")
+	} else if re, ok := err.(*RegisterError); !ok || re.Code != "id_taken" {
+		t.Fatalf("wrong error: %v", err)
+	}
+
+	code, inv, err := svc.CreateInvite("Bob", "muse", "admin", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv.IntendedID != "bob" {
+		t.Fatalf("invite binding must be stored lowercase, got %q", inv.IntendedID)
+	}
+	peer, _, err := svc.Register(code, "BoB", "muse", 1, "{}", now)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if peer.ID != "bob" {
+		t.Fatalf("stored id = %q, want bob", peer.ID)
+	}
+}
+
 func TestRegisterBoundID(t *testing.T) {
 	st := openTestStore(t)
 	svc := New(st, 3600)

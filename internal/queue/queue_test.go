@@ -217,3 +217,36 @@ func TestPermissionDecisionExpired(t *testing.T) {
 		t.Fatalf("wrong code: %v", err)
 	}
 }
+
+// A recipient typed in the wrong case lands on the id the peer registered
+// with, so the pull sees it. Two peers that differ only by case are refused
+// rather than guessed; a name nobody has registered keeps the addressed id.
+func TestRecipientCaseFoldsToRegisteredID(t *testing.T) {
+	st := openTestStore(t)
+	mustPeer(t, st, "muse-a")
+	mustPeer(t, st, "Alice")
+	q := testSvc(st)
+	now := time.Now().Unix()
+
+	if _, _, _, err := q.Send(&SendRequest{ID: "t1", To: "alice", From: "muse-a", Payload: "hi"}, now); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	vis, _ := q.Visible("Alice", 0, 50)
+	if len(vis) != 1 || vis[0].Recipient != "Alice" {
+		t.Fatalf("should arrive under the stored id: %+v", vis)
+	}
+	if vis, _ := q.Visible("alice", 0, 50); len(vis) != 0 {
+		t.Fatalf("the wrong-case id must not be a second recipient: %+v", vis)
+	}
+
+	mustPeer(t, st, "alice")
+	if _, _, _, err := q.Send(&SendRequest{ID: "t2", To: "ALICE", From: "muse-a", Payload: "which one"}, now); err == nil {
+		t.Fatal("expected ambiguous_recipient")
+	} else if r, ok := err.(*guard.Rejection); !ok || r.Code != "ambiguous_recipient" {
+		t.Fatalf("wrong code: %v", err)
+	}
+
+	if _, _, _, err := q.Send(&SendRequest{ID: "t3", To: "nobody", From: "muse-a", Payload: "for later"}, now); err != nil {
+		t.Fatalf("unregistered recipient must still be accepted: %v", err)
+	}
+}

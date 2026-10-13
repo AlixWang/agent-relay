@@ -426,3 +426,25 @@ func TestPeerClientRevRoundTrip(t *testing.T) {
 		t.Fatalf("rev not listed: %+v err=%v", all, err)
 	}
 }
+
+// Delivery rewrites a recipient to the stored spelling, so the lookup must
+// tell "nobody", "exactly this peer" and "more than one" apart. GetPeer
+// stays byte-exact: the two must not collapse into each other.
+func TestFindPeerFold(t *testing.T) {
+	st := openTest(t)
+	if p, n, err := st.FindPeerFold("alice"); err != nil || n != 0 || p != nil {
+		t.Fatalf("empty store: p=%v n=%d err=%v", p, n, err)
+	}
+	mustPeer(t, st, "Alice")
+	p, n, err := st.FindPeerFold("alice")
+	if err != nil || n != 1 || p == nil || p.ID != "Alice" {
+		t.Fatalf("fold should find the stored spelling: p=%v n=%d err=%v", p, n, err)
+	}
+	if exact, _ := st.GetPeer("alice"); exact != nil {
+		t.Fatal("GetPeer must stay case-sensitive")
+	}
+	mustPeer(t, st, "alice")
+	if _, n, err := st.FindPeerFold("ALICE"); err != nil || n != 2 {
+		t.Fatalf("two spellings must be ambiguous: n=%d err=%v", n, err)
+	}
+}

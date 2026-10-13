@@ -71,6 +71,26 @@ func (s *Service) Send(req *SendRequest, now int64) (int64, bool, string, error)
 	if !auth.ValidID(req.From) {
 		return 0, false, "", &guard.Rejection{Code: "bad_message", Reason: "bad from"}
 	}
+	// Deliver to the id the peer actually registered with. A sender typing
+	// "Alice" for the peer "alice" used to be stored verbatim and reached
+	// nobody, since delivery matches the recipient byte for byte. "*",
+	// operator, system and room aliases are not peers and pass through.
+	if req.To != "*" && req.To != auth.OperatorID && req.To != auth.SystemID && !strings.HasPrefix(req.To, "grp_") {
+		p, n, err := s.st.FindPeerFold(req.To)
+		if err != nil {
+			return 0, false, "", err
+		}
+		switch n {
+		case 0:
+			// Nobody by that name yet: keep the addressed id. A message may
+			// be sent to an identity that has not registered.
+		case 1:
+			req.To = p.ID
+		default:
+			return 0, false, "", &guard.Rejection{Code: "ambiguous_recipient",
+				Reason: "more than one peer matches " + req.To + " ignoring case"}
+		}
+	}
 	kind := req.Kind
 	if kind == "" {
 		kind = "task"

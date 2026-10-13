@@ -203,7 +203,7 @@ Embedded static UI (see §10) + admin API. Served from the same binary via `embe
 ```sql
 -- Registered assistant identities
 CREATE TABLE peers (
-    id            TEXT PRIMARY KEY,          -- ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$
+    id            TEXT PRIMARY KEY,          -- ^[a-z0-9][A-Za-z0-9_-]{0,63}$ stored lowercased at register
     display_name  TEXT DEFAULT '',
     agent_type    TEXT DEFAULT 'generic',    -- muse | hermes | claw | generic
     protocol_ver  INTEGER DEFAULT 1,
@@ -1013,7 +1013,7 @@ POST   /verify/smoke (as self)        → server issues smoke task; see §9.4
 
 | Term | Meaning |
 |------|---------|
-| **Peer / identity** | A registered assistant (`muse-a`, `hermes-1`, …). Arbitrary string, unique. |
+| **Peer / identity** | A registered assistant (`muse-a`, `hermes-1`, …). Stored lowercase from register onward; an existing mixed-case id keeps the spelling it registered with, and a send addressed to it is rewritten to that spelling. |
 | **Envelope** | The JSON message shape in §5.2. |
 | **Seq** | Server-assigned global sequence number; the sync cursor. |
 | **Fuse** | Server-side circuit breaker that stops loop traffic (§6.1). |

@@ -121,6 +121,12 @@ type Store interface {
 	// peers
 	CreatePeer(p *Peer) error
 	GetPeer(id string) (*Peer, error)
+	// FindPeerFold returns the peer whose id matches case-insensitively.
+	// n is how many peers matched: 0 none, 1 the returned peer, >1 ambiguous
+	// (the returned peer is one of them, unspecified). Exact-id lookup stays
+	// GetPeer; this exists so a send can land on the id the peer registered
+	// with when the sender's casing differs.
+	FindPeerFold(id string) (p *Peer, n int, err error)
 	ListPeers() ([]*Peer, error)
 	UpdatePeerStatus(id, status string) error
 	UpdatePeerMeta(id, displayName string) error
@@ -384,6 +390,31 @@ func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 		return nil, err
 	}
 	return &p, nil
+}
+
+func (s *sqliteStore) FindPeerFold(id string) (*Peer, int, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM peers WHERE id = ? COLLATE NOCASE`, id).Scan(&n); err != nil {
+		return nil, 0, err
+	}
+	if n == 0 {
+		return nil, 0, nil
+	}
+	var p Peer
+	err := s.db.QueryRow(`SELECT id,display_name,agent_type,protocol_ver,capabilities,status,created_at,last_seen,
+		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
+		COALESCE(profile,''),COALESCE(profile_updated_at,0),
+		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
+		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,'')
+		FROM peers WHERE id = ? COLLATE NOCASE ORDER BY id LIMIT 1`, id).
+		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
+			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
+			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
+			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote)
+	if err != nil {
+		return nil, n, err
+	}
+	return &p, n, nil
 }
 
 func (s *sqliteStore) ListPeers() ([]*Peer, error) {

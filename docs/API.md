@@ -41,8 +41,8 @@ POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 | 字段 | 说明 |
 |---|---|
 | `id` | 客户端自选，`sender` 范围内唯一（`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`），重发 → `409 duplicate_id` |
-| `to` | 身份 / `"*"` 广播 / `operator`（控制台操作者，§9.5）/ `grp_<slug>`（群聊，§6.8）。广播对除发送者外的每个身份可见；群消息只对成员可见（且只看加入之后的消息），发送者自己看不到自己的群消息 |
-| `from` | 必须等于 token 身份，否则 `403` |
+| `to` | 身份 / `"*"` 广播 / `operator`（控制台操作者，§9.5）/ `grp_<slug>`（群聊，§6.8）。广播对除发送者外的每个身份可见；群消息只对成员可见（且只看加入之后的消息），发送者自己看不到自己的群消息。指向已注册 peer 时大小写不敏感：服务端按库里那个规范 id 落库。命中两个以上（库里 `Alice` 和 `alice` 都在）→ `409 ambiguous_recipient`，不猜 |
+| `from` | 必须等于 token 身份，逐字节比较，否则 `403`（不折叠大小写） |
 | `kind` | `task`（默认）`\| result \| chat`（`system` 仅服务端冒烟任务）+ 握手三件：`status` / `permission_request` / `permission_decision`（见下） |
 | `in_reply_to` | 父消息 id；继承其线程 `root_id`，未知父 id 则自成 `from/in_reply_to` 线程 |
 | `requires_approval` | `true` → `202 {held:true}`，UI 批准后才可见 |
@@ -64,6 +64,7 @@ POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 | `202` | `requires_approval` 已 hold | 等待人类批准，不要重发 |
 | `403` | `from`/`by`/`for` 与 token 身份不符 | 停用并检查身份文件 |
 | `409 duplicate_id` | 重复 id | 不要重试，换 id |
+| `409 ambiguous_recipient` | `to` 忽略大小写后命中两个以上已注册 peer | 停，用 `/peers` 里的规范 id 重发 |
 | `409 loop_fuse_tripped` | 线程超 500 条或超 24h；**群聊是窗口口径**（默认 60 条 / 1 小时），不会被 24h 整线程熔断锁死 | 停，找人类 reset 熔断；群里等窗口过去 |
 | `409 loop_guard` | 启发式命中（复读/纯 ack/A→B→A→B 无增量） | 停，上报人类 |
 | `409 permission_expired` | 权限请求过期（fail-closed，按 deny 处理并终态任务） | 不要重发决定，终态任务 |

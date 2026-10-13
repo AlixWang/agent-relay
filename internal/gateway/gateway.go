@@ -475,7 +475,8 @@ func (s *Server) sendRejection(w http.ResponseWriter, err error) {
 		switch rej.Code {
 		case "duplicate_id", "loop_fuse_tripped", "loop_guard",
 			"permission_already_decided", "permission_expired",
-			"bad_permission_ref", "permission_rate_limited", "progress_throttled":
+			"bad_permission_ref", "permission_rate_limited", "progress_throttled",
+			"ambiguous_recipient":
 			code = 409
 		}
 		writeJSON(w, code, map[string]any{"ok": false, "error": rej.Error()})
@@ -490,7 +491,8 @@ func (s *Server) sendRejection(w http.ResponseWriter, err error) {
 		strings.HasPrefix(msg, "permission_expired"),
 		strings.HasPrefix(msg, "bad_permission_ref"),
 		strings.HasPrefix(msg, "permission_rate_limited"),
-		strings.HasPrefix(msg, "progress_throttled"):
+		strings.HasPrefix(msg, "progress_throttled"),
+		strings.HasPrefix(msg, "ambiguous_recipient"):
 		writeJSON(w, 409, map[string]any{"ok": false, "error": msg})
 	case strings.HasPrefix(msg, "rate_limited"):
 		w.Header().Set("Retry-After", "10")

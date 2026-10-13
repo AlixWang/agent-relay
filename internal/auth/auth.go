@@ -136,6 +136,11 @@ func (s *Service) Authenticate(plaintext string) (*store.Peer, *store.TokenRow, 
 // CreateInvite generates a one-time code. The plaintext is returned once;
 // only the hash is stored. intendedID may be "" (assistant chooses).
 func (s *Service) CreateInvite(intendedID, agentType, createdBy string, now int64) (string, *store.Invite, error) {
+	if intendedID != "" {
+		// Same door as Register: the stored identity is lowercase, so the
+		// binding the invite carries must already be.
+		intendedID = strings.ToLower(intendedID)
+	}
 	if intendedID != "" && ReservedID(intendedID) {
 		return "", nil, &RegisterError{Code: "bad_id", Detail: "id " + intendedID + " is reserved for the relay"}
 	}
@@ -187,16 +192,21 @@ func (s *Service) Register(code, id, agentType string, protocolVer int, capabili
 	if !ValidID(id) {
 		return nil, "", &RegisterError{Code: "bad_id", Detail: "id must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"}
 	}
+	// Identities are stored lowercase. Existing mixed-case peers keep the
+	// id they registered with; a new one cannot take a case-variant of it.
+	id = strings.ToLower(id)
 	if ReservedID(id) {
 		return nil, "", &RegisterError{Code: "bad_id", Detail: "id " + id + " is reserved for the relay"}
 	}
 	if inv.IntendedID != "" && inv.IntendedID != id {
 		return nil, "", &RegisterError{Code: "id_mismatch", Detail: "invite is bound to identity " + inv.IntendedID}
 	}
-	if existing, err := s.Store.GetPeer(id); err != nil {
+	existing, n, err := s.Store.FindPeerFold(id)
+	if err != nil {
 		return nil, "", err
-	} else if existing != nil {
-		return nil, "", &RegisterError{Code: "id_taken", Detail: "identity already registered"}
+	}
+	if n > 0 {
+		return nil, "", &RegisterError{Code: "id_taken", Detail: "identity already registered as " + existing.ID}
 	}
 	if agentType == "" {
 		agentType = inv.AgentType
