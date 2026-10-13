@@ -418,7 +418,10 @@ fi
     now_ts="$(date +%s)"
     tmp_pending2="$(mktemp)"
     [ -f "$WORKER_PENDING" ] && cat "$WORKER_PENDING" > "$tmp_pending2" 2>/dev/null || true
-    printf '%s' "$out" | jq -c '.tasks[]? | {id, from}' 2>/dev/null | while read -r tline; do
+    # 状态机只跟踪真正的任务执行：只有 kind=task 的消息才需要 worker 执行并回 result。
+    # chat/result/status 是对话/终态/信息类消息，不进 pending——否则 result 这类
+    # 不需要 worker 的消息会在 30 分钟后误触发 status/failed（2026-10-13 实测命中）。
+    printf '%s' "$out" | jq -c '.tasks[]? | select(.kind=="task") | {id, from}' 2>/dev/null | while read -r tline; do
       tid="$(printf '%s' "$tline" | jq -r '.id // ""' 2>/dev/null || true)"
       tfrom="$(printf '%s' "$tline" | jq -r '.from // ""' 2>/dev/null || true)"
       [ -z "$tid" ] && continue
