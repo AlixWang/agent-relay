@@ -142,6 +142,69 @@ if [ "$spool_size" -gt 2097152 ]; then
   fi
 fi
 
+# ---- 2.5 第 0 层：机械消息脚本直发 ack，不唤醒 worker ----
+# 背景：2026-10-13 erdan/Grace 1:1 对照实验验证——纯机械 result 经脚本 1-6 秒直发 ack，
+# 有实质内容的 result/chat/task 对抗样本零误吞。双边 10 轮稳定性/边界/时效测试 10/10 通过。
+# 保守边界（全部满足才算机械）：kind=="result"、payload<=120 字符、单行、
+# 无实质标记（不含 ?/？/任务/问题/需求/要求/请/确认事项/待办/TODO/不过/但是/然而）。
+# prompt_update/client_update 不受影响，照旧唤醒 worker。
+# 每条直发 ack 记日志；ack 失败或读不到 token 时回落正常唤醒，不吞消息。
+# 注意：本节需要读 $BASE/.token 发 POST /ack。分类跑在 drain spool 拿到的全文 JSON 上
+#（含完整 payload，不是发给 worker 的 120 字预览）。
+layer0_done="false"
+mech_count=0
+if [ -n "$out" ] && [ "$out" != "null" ]; then
+  mech_json="$(printf '%s' "$out" | jq -c '
+    [.tasks[]? | select(.kind=="result")
+     | ((.payload // "") | tostring) as $p
+     | select(($p | length) <= 120)
+     | select(($p | contains("\n")) | not)
+     | select(($p | test("[?？]|任务|问题|需求|要求|请|确认事项|待办|TODO|不过|但是|然而")) | not)
+     | .id]
+  ' 2>/dev/null || echo '[]')"
+  mech_count="$(printf '%s' "$mech_json" | jq -r 'length' 2>/dev/null || echo 0)"
+  case "$mech_count" in ''|*[!0-9]*) mech_count=0 ;; esac
+  if [ "$mech_count" != "0" ]; then
+    layer0_token="$(cat "$BASE/.token" 2>/dev/null || true)"
+    layer0_by="$(tr -d '[:space:]' < "$BASE/identity" 2>/dev/null || echo "unknown")"
+    if [ -z "$layer0_token" ]; then
+      log "layer0_no_token" '{"detail":"读不到 .token，回落正常唤醒"}'
+    else
+      layer0_ok="true"
+      for mid in $(printf '%s' "$mech_json" | jq -r '.[]' 2>/dev/null); do
+        ack_body="$(jq -cn --arg id "$mid" --arg by "$layer0_by" '{message_id: $id, by: $by}' 2>/dev/null || true)"
+        ack_resp="$(curl -sS --max-time 8 -X POST "$RELAY_URL/ack" \
+          -H "Authorization: Bearer $layer0_token" \
+          -H 'Content-Type: application/json' \
+          -d "$ack_body" 2>/dev/null || true)"
+        if ! printf '%s' "$ack_resp" | jq -e '.ok == true' >/dev/null 2>&1; then
+          layer0_ok="false"
+          break
+        fi
+      done
+      if [ "$layer0_ok" = "true" ]; then
+        # 全部直发 ack 成功：从任务列表剔除机械消息，其余照旧唤醒 worker
+        filtered_out="$(printf '%s' "$out" | jq -c --argjson m "$mech_json" '
+          .tasks |= map(select(.id as $id | $m | index($id) | not))' 2>/dev/null || true)"
+        if [ -n "$filtered_out" ]; then
+          out="$filtered_out"
+        fi
+        layer0_done="true"
+        log "layer0_ack" "$(printf '{"count":%s,"ids":%s}' "$mech_count" "$mech_json")"
+        # 对照日志：时间戳、消息 id、事件类型（脚本直发 ack / worker 唤醒），方便双边对账
+        now_ts="$(date +%s)"
+        printf '%s' "$mech_json" | jq -r --arg ts "$now_ts" '.[] | "\($ts) \(.) layer0-script-ack"' \
+          >> "$BASE/layer0-experiment.log" 2>/dev/null || true
+        # 幂等口径统一：直发 ack 的 id 同样记入 .done_ids（服务端已确认不会重发已 ack 消息）
+        printf '%s' "$mech_json" | jq -r '.[]' >> "$BASE/.done_ids" 2>/dev/null || true
+      else
+        log "layer0_ack_failed" "$(printf '{"count":%s,"detail":"ack 接口失败，回落正常唤醒"}' "$mech_count")"
+      fi
+      unset layer0_token
+    fi
+  fi
+fi
+
 # ---- 3. 唤醒决策 ----
 msg_count=0
 has_pu="false"
@@ -213,6 +276,10 @@ fi
 if [ "$msg_count" != "0" ]; then
   reasons+=("收到 $msg_count 条新消息")
   log "messages_pending" "$(printf '%s' "$out" | jq -c '{count: (.tasks|length), ids: [.tasks[].id]}')"
+  # Layer 0 对照日志：真正唤醒 worker 的每条任务 id（格式与 layer0-script-ack 对齐）
+  now_ts="$(date +%s)"
+  printf '%s' "$out" | jq -r --arg ts "$now_ts" '.tasks[]? | "\($ts) \(.id) worker-wake"' \
+    >> "$BASE/layer0-experiment.log" 2>/dev/null || true
 fi
 
 reason="$(IFS='；'; echo "${reasons[*]}")"
