@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <style>
+    .bg { fill: #141416; }
+    @media (prefers-color-scheme: light) {
+      .bg { fill: #f4f4f5; }
+    }
+  </style>
+  <rect class="bg" width="64" height="64" rx="14"/>
+  <!-- Forked Tail -->
+  <path d="M12 48L24 37L19 33L12 48Z" fill="#4B58C9"/>
+  <path d="M16 52L26 39L22 36L16 52Z" fill="#363E8F"/>
+  <!-- Body & Flank -->
+  <path d="M24 37L36 33L29 27L22 34L24 37Z" fill="#434FB3"/>
+  <!-- Throat / Chest (Coral) -->
+  <path d="M36 33L43 27L37 22L29 27L36 33Z" fill="#F43F5E"/>
+  <!-- Head & Beak -->
+  <path d="M37 22L45 23L47 25L42 27L37 22Z" fill="#5E6AD2"/>
+  <circle cx="43.5" cy="24" r="0.9" fill="#FFFFFF"/>
+  <!-- Leading Red Wing -->
+  <path d="M29 27L11 19L27 24L29 27Z" fill="#FF5277"/>
+  <path d="M27 24L18 25L24 30L27 24Z" fill="#E11D48"/>
+  <!-- Upper Wing Feathers -->
+  <path d="M29 27L23 13L35 22L29 27Z" fill="#7C88FF"/>
+  <path d="M23 13L32 7L37 17L35 22L23 13Z" fill="#5E6AD2"/>
+  <path d="M32 7L36 6L40 14L37 17L32 7Z" fill="#9DA7FF"/>
+  <!-- Data Packet / Envelope in Beak -->
+  <path d="M46 25L53 22L55 28L48 31L46 25Z" fill="#5E6AD2"/>
+  <path d="M46 25L53 22L50 26.5L46 25Z" fill="#F43F5E"/>
+  <path d="M48 31L50 26.5L55 28" stroke="#9DA7FF" stroke-width="0.75" stroke-linecap="round"/>
+</svg>

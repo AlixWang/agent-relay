@@ -135,8 +135,11 @@ a { color: inherit; }
   display: grid; place-items: center; font-weight: var(--fw-strong); font-size: var(--fs-sm);
   letter-spacing: -0.03em;
   color: var(--fg); background: var(--raised); border: 1px solid var(--border);
+  overflow: hidden;
 }
 .logo.lg { width: 44px; height: 44px; border-radius: var(--r-lg); font-size: var(--fs-lg); }
+.logo .logo-mark { width: 22px; height: 22px; display: block; }
+.logo.lg .logo-mark { width: 32px; height: 32px; }
 
 /* ---------- login ---------- */
 .login-wrap {
