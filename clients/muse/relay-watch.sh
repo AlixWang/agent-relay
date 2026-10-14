@@ -102,9 +102,13 @@ if ! daemon_alive; then
   log "relay_daemon_started" '{"transport":"sse"}'
 fi
 
-# ---- 2.7 worker 存活检查：超时未 ack 发 status/failed ----
+# ---- 2.7 worker 存活检查：超时未 ack 发 status/cancelled ----
 # 背景：ack 只在 worker 完成才有，中间缺"执行中"状态，worker 意外中断也无报错。
-# 本节补齐：唤醒时记 pending，超时未完成发 failed。协议见 §6.5（kind=status）。
+# 本节补齐：唤醒时记 pending，超时未完成发 cancelled。协议见 §6.5（kind=status）。
+# 2026-10-14 修正（升级实测）：服务端 status 词表无 failed，只有
+# started|progress|blocked|resumed|cancelled，发 failed 会被 400 打回，改用 cancelled。
+ME_IDENTITY="$(tr -d '[:space:]' < "$BASE/identity" 2>/dev/null)"
+[ -z "$ME_IDENTITY" ] && ME_IDENTITY="unknown"
 WORKER_PENDING="$BASE/.worker_pending"
 WORKER_TIMEOUT=1800  # 30 分钟：worker 冷启动 32-532s，大任务执行更久，超 30 分钟视为卡死
 if [ -f "$WORKER_PENDING" ]; then
@@ -114,27 +118,37 @@ if [ -f "$WORKER_PENDING" ]; then
     [ -z "$pline" ] && continue
     pid="$(printf '%s' "$pline" | jq -r '.id // ""' 2>/dev/null || true)"
     pfrom="$(printf '%s' "$pline" | jq -r '.from // ""' 2>/dev/null || true)"
+    pto="$(printf '%s' "$pline" | jq -r '.to // ""' 2>/dev/null || true)"
+    [ -z "$pto" ] && pto="$ME_IDENTITY"  # 旧格式 pending 无 to：收到的 1:1 任务 recipient 恒为自己
     pts="$(printf '%s' "$pline" | jq -r '.wake_ts // 0' 2>/dev/null || echo 0)"
     [ -z "$pid" ] && continue
     # 已 ack = worker 正常完成，移出 pending
     if grep -qxF "$pid" "$BASE/.done_ids" 2>/dev/null; then
       continue
     fi
-    # 超时未完成 → 发 status/failed
+    # 超时未完成 → 发 status/cancelled（服务端词表无 failed，2026-10-14 修正）
     case "$pts" in ''|*[!0-9]*) pts=0 ;; esac
     if [ "$((now_ts - pts))" -gt "$WORKER_TIMEOUT" ]; then
       st_token="$(cat "$BASE/.token" 2>/dev/null || true)"
       if [ -n "$st_token" ]; then
-        fail_body="$(jq -cn --arg rid "$pid" --arg rfrom "$pfrom" \
-          '{kind:"status", status:"failed", to:$rfrom, in_reply_to:$rid,
-            payload:"worker 超时未返回结果（30 分钟），可能已中断或卡死"}' 2>/dev/null || true)"
-        curl -sS --max-time 8 -X POST "$RELAY_URL/messages" \
-          -H "Authorization: Bearer $st_token" \
-          -H 'Content-Type: application/json' \
-          -H 'User-Agent: RelayClient/1.0' \
-          -d "$fail_body" >/dev/null 2>&1 || true
+        case "$pto" in
+          grp_*) log "worker_timeout_skip" "$(printf '{"id":%s,"reason":"群任务无 1:1 握手，跳过 status"}' "$(printf '%s' "$pid" | jq -Rs .)")" ;;
+          *)
+            cancel_mid="${ME_IDENTITY}-cancelled-$(date +%s%N)-${pid:0:12}"
+            fail_body="$(jq -cn --arg mid "$cancel_mid" --arg rid "$pid" --arg rto "$pto" \
+              '{id:$mid, kind:"status", status:"cancelled", to:$rto, in_reply_to:$rid,
+                payload:"worker 超时未返回结果（30 分钟），可能已中断或卡死"}' 2>/dev/null || true)"
+            if [ -n "$fail_body" ]; then
+              cancel_resp="$(curl -sS --max-time 8 -X POST "$RELAY_URL/messages" \
+                -H "Authorization: Bearer $st_token" \
+                -H 'Content-Type: application/json' \
+                -H 'User-Agent: RelayClient/1.0' \
+                -d "$fail_body" 2>/dev/null || true)"
+              log "worker_timeout" "$(printf '{"id":%s,"resp":%s}' "$(printf '%s' "$pid" | jq -Rs .)" "$(printf '%s' "$cancel_resp" | head -c 200 | jq -Rs .)")"
+            fi
+            ;;
+        esac
         unset st_token
-        log "worker_timeout" "$(printf '{"id":%s}' "$(printf '%s' "$pid" | jq -Rs .)")"
       fi
       continue  # 移出 pending，不再追踪
     fi
@@ -331,22 +345,35 @@ fi
     [ -f "$WORKER_PENDING" ] && cat "$WORKER_PENDING" > "$tmp_pending2" 2>/dev/null || true
     # 状态机只跟踪真正的任务执行：只有 kind=task 的消息才需要 worker 执行并回 result。
     # chat/result/status 是对话/终态/信息类消息，不进 pending——否则 result 这类
-    # 不需要 worker 的消息会在 30 分钟后误触发 status/failed（2026-10-13 实测命中）。
-    printf '%s' "$out" | jq -c '.tasks[]? | select(.kind=="task") | {id, from}' 2>/dev/null | while read -r tline; do
+    # 不需要 worker 的消息会在 30 分钟后误触发 status/cancelled（2026-10-13 实测命中）。
+    # 2026-10-14 修正（升级实测）：① POST /messages 必须带唯一 id（缺则 400）；
+    # ② status 的 to 必须是原任务的 recipient（task.to），写 sender 会 409；
+    # ③ 群任务（to=grp_*）无 1:1 握手，跳过 status 但仍记 pending。
+    printf '%s' "$out" | jq -c '.tasks[]? | select(.kind=="task") | {id, from, to}' 2>/dev/null | while read -r tline; do
       tid="$(printf '%s' "$tline" | jq -r '.id // ""' 2>/dev/null || true)"
       tfrom="$(printf '%s' "$tline" | jq -r '.from // ""' 2>/dev/null || true)"
+      tto="$(printf '%s' "$tline" | jq -r '.to // ""' 2>/dev/null || true)"
       [ -z "$tid" ] && continue
-      start_body="$(jq -cn --arg rid "$tid" --arg rfrom "$tfrom" \
-        '{kind:"status", status:"started", to:$rfrom, in_reply_to:$rid,
-          payload:"已接单，worker 启动中"}' 2>/dev/null || true)"
-      curl -sS --max-time 8 -X POST "$RELAY_URL/messages" \
-        -H "Authorization: Bearer $st_token2" \
-        -H 'Content-Type: application/json' \
-        -H 'User-Agent: RelayClient/1.0' \
-        -d "$start_body" >/dev/null 2>&1 || true
-      # 记 pending，用于超时检查
-      jq -cn --arg id "$tid" --arg from "$tfrom" --argjson ts "$now_ts" \
-        '{id:$id, from:$from, wake_ts:$ts}' >> "$tmp_pending2" 2>/dev/null || true
+      [ -z "$tto" ] && tto="$ME_IDENTITY"  # 收到的 1:1 任务 recipient 恒为自己
+      case "$tto" in
+        grp_*) : ;;  # 群任务无 1:1 握手，跳过 status
+        *)
+          start_mid="${ME_IDENTITY}-started-$(date +%s%N)-${tid:0:12}"
+          start_body="$(jq -cn --arg mid "$start_mid" --arg rid "$tid" --arg rto "$tto" \
+            '{id:$mid, kind:"status", status:"started", to:$rto, in_reply_to:$rid,
+              payload:"已接单，worker 启动中"}' 2>/dev/null || true)"
+          if [ -n "$start_body" ]; then
+            curl -sS --max-time 8 -X POST "$RELAY_URL/messages" \
+              -H "Authorization: Bearer $st_token2" \
+              -H 'Content-Type: application/json' \
+              -H 'User-Agent: RelayClient/1.0' \
+              -d "$start_body" >/dev/null 2>&1 || true
+          fi
+          ;;
+      esac
+      # 记 pending，用于超时检查（带 to，供超时时定向 cancelled）
+      jq -cn --arg id "$tid" --arg from "$tfrom" --arg to "$tto" --argjson ts "$now_ts" \
+        '{id:$id, from:$from, to:$to, wake_ts:$ts}' >> "$tmp_pending2" 2>/dev/null || true
     done
     mv "$tmp_pending2" "$WORKER_PENDING"
     unset st_token2
