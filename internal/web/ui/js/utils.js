@@ -120,8 +120,11 @@ export function confirmAction({ title = '确认操作', body = '此操作不可�
   okBtn.textContent = okText;
   okBtn.className = danger ? 'btn btn-danger' : 'btn btn-primary';
   const ic = $('cfIc');
-  ic.className = danger ? 'icon dlg-ic bad' : 'icon dlg-ic warn';
-  ic.innerHTML = icon(danger ? 'trash' : 'alert');
+  // SVGElement.className is a read-only SVGAnimatedString; assigning it
+  // throws and aborts the confirm dialog before it opens.
+  ic.setAttribute('class', danger ? 'icon dlg-ic bad' : 'icon dlg-ic warn');
+  const use = ic.querySelector('use');
+  if (use) use.setAttribute('href', '#i-' + (danger ? 'trash' : 'alert'));
 
   return new Promise((resolve) => {
     const handler = () => {
