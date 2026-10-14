@@ -120,7 +120,7 @@ export function confirmAction({ title = '确认操作', body = '此操作不可�
   okBtn.textContent = okText;
   okBtn.className = danger ? 'btn btn-danger' : 'btn btn-primary';
   const ic = $('cfIc');
-  ic.className = danger ? 'card-ic bad' : 'card-ic warn';
+  ic.className = danger ? 'icon dlg-ic bad' : 'icon dlg-ic warn';
   ic.innerHTML = icon(danger ? 'trash' : 'alert');
 
   return new Promise((resolve) => {

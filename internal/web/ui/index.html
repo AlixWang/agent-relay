@@ -143,10 +143,10 @@
       <!-- ---------- 成员 ---------- -->
       <section id="page-members" class="page">
         <div class="stats">
-          <div class="stat"><div class="stat-ic ok"><svg class="icon"><use href="#i-activity"/></svg></div><div><span class="stat-label">在线成员</span><b id="stOnline">-</b></div></div>
-          <div class="stat"><div class="stat-ic warn"><svg class="icon"><use href="#i-shield"/></svg></div><div><span class="stat-label">待审批消息</span><b id="stPending">-</b></div></div>
-          <div class="stat"><div class="stat-ic info"><svg class="icon"><use href="#i-message"/></svg></div><div><span class="stat-label">线程总数</span><b id="stThreads">-</b></div></div>
-          <div class="stat"><div class="stat-ic brand"><svg class="icon"><use href="#i-key"/></svg></div><div><span class="stat-label">有效 Token</span><b id="stTokens">-</b></div></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-activity"/></svg>在线成员</span><b id="stOnline">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-shield"/></svg>待审批消息</span><b id="stPending">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-message"/></svg>线程总数</span><b id="stThreads">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-key"/></svg>有效 Token</span><b id="stTokens">-</b></div>
         </div>
 
         <div class="panel">
@@ -228,7 +228,7 @@
               <!-- Section 1: System & Broadcast -->
               <div class="cmd-group-label">系统与通知</div>
               <div class="cmd-session-item" :class="{ 'active': activeTarget.type === 'inbox' }" @click="selectInbox()">
-                <div class="cmd-session-avatar icon-box info">
+                <div class="cmd-session-avatar">
                   <svg class="icon"><use href="#i-inbox"/></svg>
                 </div>
                 <div class="cmd-session-meta">
@@ -241,7 +241,7 @@
               </div>
 
               <div class="cmd-session-item" :class="{ 'active': activeTarget.type === 'broadcast' }" @click="selectBroadcast()">
-                <div class="cmd-session-avatar icon-box brand">
+                <div class="cmd-session-avatar">
                   <svg class="icon"><use href="#i-radio"/></svg>
                 </div>
                 <div class="cmd-session-meta">
@@ -501,7 +501,7 @@
       <dialog id="dlgCreateRoom" class="modal" aria-labelledby="crTitle">
         <form method="dialog" @submit.prevent="submitCreateRoom()">
           <div class="modal-head">
-            <div class="card-ic brand"><svg class="icon"><use href="#i-users"/></svg></div>
+            <svg class="icon" style="color: var(--muted)"><use href="#i-users"/></svg>
             <div>
               <h2 id="crTitle">新建群聊</h2>
               <p class="muted xs">群是成员名单 + 路由别名，群消息仅送达群成员</p>
@@ -536,7 +536,7 @@
             <!-- Alpine scope: inside #page-command, so it shares the page state -->
       <dialog id="dlgRoomMembers" class="modal" aria-labelledby="rmTitle">
         <div class="modal-head">
-          <div class="card-ic info"><svg class="icon"><use href="#i-users"/></svg></div>
+          <svg class="icon" style="color: var(--muted)"><use href="#i-users"/></svg>
           <div>
             <h2 id="rmTitle">群聊成员管理</h2>
             <p class="muted xs" x-text="activeTarget.name"></p>
@@ -582,7 +582,7 @@
         <div class="grid-2">
           <div class="card">
             <div class="card-head">
-              <div class="card-ic brand"><svg class="icon"><use href="#i-user-plus"/></svg></div>
+              <svg class="icon" style="color: var(--muted)"><use href="#i-user-plus"/></svg>
               <div><h2>生成邀请 &amp; Onboarding Prompt</h2><p class="muted xs">生成 → 粘贴给新助手 → 等成员状态变为 <b>active</b>（冒烟验证通过）</p></div>
             </div>
             <div class="field"><span>助手类型</span>
@@ -614,7 +614,7 @@
 
           <div class="card">
             <div class="card-head">
-              <div class="card-ic info"><svg class="icon"><use href="#i-wrench"/></svg></div>
+              <svg class="icon" style="color: var(--muted)"><use href="#i-wrench"/></svg>
               <div><h2>已有成员重配 Prompt</h2><p class="muted xs">协议 / 指令升级时使用，沿用原 token，无需重新注册</p></div>
             </div>
             <div class="form-row">
@@ -688,14 +688,14 @@
         <div class="grid-2">
           <div class="card">
             <div class="card-head">
-              <div class="card-ic brand"><svg class="icon"><use href="#i-server"/></svg></div>
+              <svg class="icon" style="color: var(--muted)"><use href="#i-server"/></svg>
               <div><h2>服务信息</h2><p class="muted xs">当前运行实例</p></div>
             </div>
             <dl class="kv" id="sysInfo"></dl>
           </div>
           <div class="card">
             <div class="card-head">
-              <div class="card-ic info"><svg class="icon"><use href="#i-sliders"/></svg></div>
+              <svg class="icon" style="color: var(--muted)"><use href="#i-sliders"/></svg>
               <div><h2>Retention 与 Guard 策略</h2><p class="muted xs">只读 · 修改走 config.toml + 重启</p></div>
             </div>
             <dl class="kv" id="sysPolicy"></dl>
@@ -704,7 +704,7 @@
 
         <div class="card">
           <div class="card-head">
-            <div class="card-ic ok"><svg class="icon"><use href="#i-package"/></svg></div>
+            <svg class="icon" style="color: var(--muted)"><use href="#i-package"/></svg>
             <div><h2>版本更新</h2><p class="muted xs">仅 GitHub Releases · systemd 自动（备份 + 健康检查 + 失败回滚）/ docker 给命令</p></div>
           </div>
           <p class="muted small" id="updCurrent">读取中…</p>
@@ -741,7 +741,7 @@
         </div>
         <div class="card" id="updDockerCard" hidden>
           <div class="card-head">
-            <div class="card-ic"><svg class="icon"><use href="#i-terminal"/></svg></div>
+            <svg class="icon" style="color: var(--muted)"><use href="#i-terminal"/></svg>
             <div><h2>Docker 模式更新命令</h2><p class="muted xs">Web 更新只支持 systemd，请按下面命令手动执行</p></div>
           </div>
           <div class="code-block">
@@ -796,7 +796,7 @@
 <dialog id="rotateDlg" class="modal" aria-labelledby="rotTitle">
   <form method="dialog" id="rotForm">
     <div class="modal-head">
-      <div class="card-ic brand"><svg class="icon"><use href="#i-key"/></svg></div>
+      <svg class="icon" style="color: var(--muted)"><use href="#i-key"/></svg>
       <div><h2 id="rotTitle">签发新 Token（轮换）</h2><p class="muted xs">明文只显示一次；旧 token 记得在列表中撤销</p></div>
     </div>
     <label class="field">成员身份<input id="rotPeer" list="peerList" placeholder="peer id" required autocomplete="off"></label>
@@ -817,7 +817,7 @@
 <dialog id="confirmDlg" class="modal sm" aria-labelledby="cfTitle">
   <form method="dialog">
     <div class="modal-head">
-      <div class="card-ic bad" id="cfIc"><svg class="icon"><use href="#i-alert"/></svg></div>
+      <svg class="icon dlg-ic bad" id="cfIc"><use href="#i-alert"/></svg>
       <div><h2 id="cfTitle">确认</h2><p id="cfBody" class="muted small pre-line"></p></div>
     </div>
     <div class="modal-foot">
