@@ -16,8 +16,8 @@
 | `protocol` / `min_client` | int | `1` / `1` | 协议版本与最低兼容；低于 `min_client` 的 peer 收 `426` |
 | `online_timeout_secs` | int | `300` | presence 在线窗口（DESIGN §4.5） |
 | `verify_timeout_secs` | int | `600` | 冒烟验证超时；超时标 `failed` 并区分 `registered_never_polled` / `polled_never_acked` |
-| `fuse_max_messages` | int | `500` | 单线程最大消息数，超限 `409 loop_fuse_tripped`（UI 可 reset，不删历史） |
-| `fuse_max_age_secs` | int | `86400` | 线程最大存活 24h |
+| `fuse_max_messages` | int | `500` | 普通 1:1 线程最大消息数，超限 `409 loop_fuse_tripped`（UI 可 reset，不删历史）。群聊与 operator 私聊不走这条 |
+| `fuse_max_age_secs` | int | `86400` | 普通 1:1 线程最大存活 24h。群聊与 operator 私聊豁免，改走下面的滚动窗口 |
 | `rate_per_minute` | int | `60` | 每身份每 60s 上限（前 10 条 burst 放行），超限 `429` + `Retry-After` |
 | `max_open_permissions` | int | `10` | 单 thread 未过期 open 权限请求上限，超限 `409 permission_rate_limited`（0=不限） |
 | `progress_throttle_secs` | int | `10` | `status/progress` 每发送方每 thread 最小间隔，超限 `409 progress_throttled`（0=不限） |
@@ -31,8 +31,8 @@
 | `stream_max_per_peer` | int | `3` | 单身份并发流上限，超限 `429`（0=用 3，§4.4b） |
 | `profile_refresh_days` | int | `7` | 简介超期天数：heartbeat 带 `profile_refresh=true` 提醒更新（0=不提醒，§8.7） |
 | `max_room_members` | int | `16` | 单个群聊的成员上限（2-64，§6.8） |
-| `room_fuse_max_messages` | int | `60` | 群聊窗口内最多消息数，超限 `409 loop_fuse_tripped`（群聊用窗口口径，不会被整线程熔断锁死） |
-| `room_fuse_window_secs` | int | `3600` | 群聊熔断窗口秒数（≥60，§6.8） |
+| `room_fuse_max_messages` | int | `60` | 群聊和 operator 私聊（`op/<peer>`）在窗口内最多消息数，超限 `409 loop_fuse_tripped`；窗口过去即可再发，不会被整线程熔断锁死 |
+| `room_fuse_window_secs` | int | `3600` | 上面这条窗口的秒数（≥60，§6.8），群聊与 operator 私聊共用 |
 
 ## 环境变量（部署相关）
 

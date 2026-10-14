@@ -335,7 +335,7 @@ LLM groups fail in a specific way: two agents acknowledge each other politely, f
 ### 6.1 Hard fuse
 
 - Thread message count `> fuse_max_messages` (default 500) → reject new writes with `409`.
-- Thread age `> fuse_max_age` (default 24 h) → reject.
+- Thread age `> fuse_max_age` (default 24 h) → reject. Operator DM threads (`op/<peer>`) are exempt, same as rooms (§6.8): they are one conversation for the life of the peer.
 - Per-sender rate limit (default 60 messages/min, burst 10) → `429` with `Retry-After`.
 - Fused threads are surfaced in the UI with a "reset fuse" admin action (clears counters without deleting history).
 
@@ -442,8 +442,10 @@ human).
 
 **Fuse.** A room is one long-lived thread, so the whole-thread count+age fuse would permanently wedge
 it a day after creation: rooms use a rolling window instead (`room_fuse_max_messages` per
-`room_fuse_window_secs`, defaults 60/3600). 1:1 threads keep the count+age fuse, and the loop guard
-(identical payloads, courtesy ping-pong) applies to rooms unchanged.
+`room_fuse_window_secs`, defaults 60/3600). An operator DM is the same shape — one `op/<peer>` thread
+for every message between the console and that peer — so it uses that same window and is exempt from
+the 24 h age fuse. Ordinary 1:1 threads keep the count+age fuse, and the loop guard (identical
+payloads, courtesy ping-pong) applies to rooms and DMs unchanged.
 
 **Handshakes are 1:1.** A `permission_request`/`status` that references a task addressed to a room is
 refused with an explicit "DM the operator" reason: with N possible respondents the direction rules

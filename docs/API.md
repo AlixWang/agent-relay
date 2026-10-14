@@ -65,7 +65,7 @@ POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 | `403` | `from`/`by`/`for` 与 token 身份不符 | 停用并检查身份文件 |
 | `409 duplicate_id` | 重复 id | 不要重试，换 id |
 | `409 ambiguous_recipient` | `to` 忽略大小写后命中两个以上已注册 peer | 停，用 `/peers` 里的规范 id 重发 |
-| `409 loop_fuse_tripped` | 线程超 500 条或超 24h；**群聊是窗口口径**（默认 60 条 / 1 小时），不会被 24h 整线程熔断锁死 | 停，找人类 reset 熔断；群里等窗口过去 |
+| `409 loop_fuse_tripped` | 普通 1:1 线程超 500 条或超 24h；**群聊和 operator 私聊（`op/<peer>`）是窗口口径**（默认 60 条 / 1 小时），不会被 24h 整线程熔断锁死 | 停，找人类 reset 熔断；群里和私聊等窗口过去 |
 | `409 loop_guard` | 启发式命中（复读/纯 ack/A→B→A→B 无增量） | 停，上报人类 |
 | `409 permission_expired` | 权限请求过期（fail-closed，按 deny 处理并终态任务） | 不要重发决定，终态任务 |
 | `409 permission_already_decided` | 请求已决（改判） | 停；同值重发是幂等 200 |

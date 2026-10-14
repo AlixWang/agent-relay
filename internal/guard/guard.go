@@ -120,20 +120,21 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 	if err != nil {
 		return nil, err
 	}
-	if isRoomThread(rootID) {
-		// Rooms are long-lived by design: a rolling window bounds chatter
-		// without ever fusing the room itself. The age rule is skipped on
-		// purpose — applying it would wedge every room after a day.
+	if isRoomThread(rootID) || isOperatorThread(rootID) {
+		// Rooms and operator DMs are long-lived by design: a rolling window
+		// bounds chatter without ever fusing the conversation itself. The age
+		// rule is skipped on purpose — applying it would wedge every such
+		// thread a day after its first message.
 		if g.limits.RoomFuseMaxMessages > 0 && g.limits.RoomFuseWindowSecs > 0 {
-			count, err := g.st.CountRoomMessagesSince(rootID, wm, now-g.limits.RoomFuseWindowSecs)
+			count, err := g.st.CountThreadWindow(rootID, wm, now-g.limits.RoomFuseWindowSecs)
 			if err != nil {
 				return nil, err
 			}
 			if count >= g.limits.RoomFuseMaxMessages {
-				_ = g.st.AppendAudit(env.From, "room.fuse_tripped",
-					fmt.Sprintf("room=%s count=%d window=%ds", rootID, count, g.limits.RoomFuseWindowSecs), now)
+				_ = g.st.AppendAudit(env.From, "thread.fuse_tripped",
+					fmt.Sprintf("thread=%s count=%d window=%ds", rootID, count, g.limits.RoomFuseWindowSecs), now)
 				return nil, &Rejection{Code: "loop_fuse_tripped",
-					Reason: fmt.Sprintf("room %s exceeded %d messages in %d minutes; wait before posting again",
+					Reason: fmt.Sprintf("thread %s exceeded %d messages in %d minutes; wait before posting again",
 						rootID, g.limits.RoomFuseMaxMessages, g.limits.RoomFuseWindowSecs/60)}
 			}
 		}
@@ -489,6 +490,9 @@ func (g *Guard) checkHandshake(env *Envelope, rootID string, now int64) error {
 
 // isRoomThread reports whether a thread key or target names a room.
 func isRoomThread(s string) bool { return strings.HasPrefix(s, "grp_") }
+
+// isOperatorThread reports whether a thread key is an operator DM (op/<peer>).
+func isOperatorThread(s string) bool { return strings.HasPrefix(s, "op/") }
 
 // checkRoomTarget validates a send addressed to a room (§6.8): the room must
 // exist and be open, and the sender must be a member. The operator (console)

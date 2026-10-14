@@ -179,13 +179,19 @@ func (s *sqliteStore) IsRoomMember(roomID, peerID string) (bool, error) {
 	return n > 0, err
 }
 
-// CountRoomMessagesSince counts room messages after the fuse watermark and
-// inside the time window — the windowed fuse for long-lived rooms (§6.8).
-func (s *sqliteStore) CountRoomMessagesSince(roomID string, sinceSeq, sinceTs int64) (int, error) {
+// CountThreadWindow counts one thread's messages after the fuse watermark and
+// inside the time window — the rolling fuse for long-lived threads (§6.8).
+func (s *sqliteStore) CountThreadWindow(rootID string, sinceSeq, sinceTs int64) (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages
-		WHERE recipient=? AND seq>? AND created_at>?`, roomID, sinceSeq, sinceTs).Scan(&n)
+		WHERE root_id=? AND seq>? AND created_at>?`, rootID, sinceSeq, sinceTs).Scan(&n)
 	return n, err
+}
+
+// CountRoomMessagesSince is the room-shaped name of CountThreadWindow. A room's
+// root id is its alias, so the two counts are the same rows.
+func (s *sqliteStore) CountRoomMessagesSince(roomID string, sinceSeq, sinceTs int64) (int, error) {
+	return s.CountThreadWindow(roomID, sinceSeq, sinceTs)
 }
 
 // AcksForSeqs returns which peers acked each of the given message seqs.

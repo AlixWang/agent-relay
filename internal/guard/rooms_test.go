@@ -163,6 +163,41 @@ func TestRoomIgnoresThreadAgeFuse(t *testing.T) {
 	}
 }
 
+// An operator DM is one thread for the life of the peer, so the 24h age fuse
+// would lock the console out of it permanently. It takes the room's rolling
+// window instead, and both directions count toward it.
+func TestOperatorDMUsesRollingWindow(t *testing.T) {
+	st := openTestStore(t)
+	l := roomLimits() // 3 messages / 3600s
+	l.FuseMaxAgeSecs = 60
+	g := New(st, l)
+	now := time.Now().Unix()
+
+	if _, err := st.InsertMessage(&store.Message{ID: "old", Sender: "Mmei", Recipient: "operator",
+		Kind: "result", RootID: "op/Mmei", Payload: "昨天的汇报：巡检做完了", CreatedAt: now - 100000, ApprovalState: "n/a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Check(&Envelope{ID: "fresh", To: "Mmei", From: "operator", Payload: "隔了一天继续说一句"}, now); err != nil {
+		t.Fatalf("operator DM wrongly hit the age fuse: %v", err)
+	}
+	for _, env := range []struct {
+		env *Envelope
+		at  int64
+	}{
+		{&Envelope{ID: "a", To: "operator", From: "Mmei", Payload: "第一条：证书还有 30 天到期"}, now},
+		{&Envelope{ID: "b", To: "Mmei", From: "operator", Payload: "第二条：先出续期步骤"}, now + 1},
+		{&Envelope{ID: "c", To: "operator", From: "Mmei", Payload: "第三条：步骤写完了，等你确认"}, now + 2},
+	} {
+		sendOK(t, g, st, env.env, env.at)
+	}
+	if code := rejectCode(t, mustErr(g.Check(&Envelope{ID: "d", To: "Mmei", From: "operator", Payload: "第四条：窗口里的第四句，应该被挡住"}, now+3))); code != "loop_fuse_tripped" {
+		t.Fatalf("window cap: %s", code)
+	}
+	if _, err := g.Check(&Envelope{ID: "e", To: "Mmei", From: "operator", Payload: "新的一小时到了，先把测试环境的证书续上，生产环境等你确认后再动"}, now+3602); err != nil {
+		t.Fatalf("DM should accept after the window: %v", err)
+	}
+}
+
 // A task addressed to a room has no 1:1 handshake; the rejection must say what
 // to do instead, because the direction rules cannot apply.
 func TestRoomHandshakeRefusedWithGuidance(t *testing.T) {

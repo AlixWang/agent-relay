@@ -228,6 +228,11 @@ type Store interface {
 	RemoveRoomMember(roomID, peerID string) error
 	ListRoomMembers(roomID string) ([]*RoomMember, error)
 	IsRoomMember(roomID, peerID string) (bool, error)
+	// CountThreadWindow counts one thread's messages after the fuse watermark
+	// and inside the time window. Shared by rooms and operator DMs: both are
+	// one long-lived root, and a DM's two directions have different recipients,
+	// so the count is by root_id rather than recipient.
+	CountThreadWindow(rootID string, sinceSeq, sinceTs int64) (int, error)
 	CountRoomMessagesSince(roomID string, sinceSeq, sinceTs int64) (int, error)
 	// settings + operator inbox (§9.5)
 	GetSetting(key string) (string, error)
