@@ -66,6 +66,12 @@ function createCommandState() {
     messages: [],
     loadingMessages: false,
 
+    // Scroll: stickToBottom is whether the reader was already at the bottom
+    // before the latest refresh (so a poll may follow). newBelow is the
+    // "new messages below" chip shown while they are reading history.
+    stickToBottom: true,
+    newBelow: false,
+
     // Read receipts: which message's popover is open (seq), and whether the
     // dissolved-rooms group in the session list is expanded.
     ackOpen: null,
@@ -264,6 +270,12 @@ function createCommandState() {
     // Message loading
     async loadActiveMessages(silent = false) {
       if (!silent) this.loadingMessages = true;
+      // A poll only follows when the reader was already resting at the bottom;
+      // otherwise their place in history must survive the refresh.
+      const stream = $('cmdStreamContainer');
+      const wasAtBottom = !stream || this.isAtBottom(stream);
+      const prevMaxSeq = this.messages.reduce((max, m) => Math.max(max, m.seq || 0), 0);
+      this.stickToBottom = wasAtBottom;
       try {
         if (this.activeTarget.type === 'inbox') {
           const r = await api('/admin/inbox?page_size=50');
@@ -329,8 +341,17 @@ function createCommandState() {
           }));
         }
 
+        const maxSeq = this.messages.reduce((max, m) => Math.max(max, m.seq || 0), 0);
         if (!silent) {
-          this.$nextTick(() => this.scrollToBottom());
+          // Entering or switching a conversation lands on the latest message
+          // instantly — an IM opens at the bottom, it does not scroll there.
+          this.newBelow = false;
+          this.$nextTick(() => this.scrollToBottom(true));
+        } else if (wasAtBottom) {
+          this.newBelow = false;
+          this.$nextTick(() => this.scrollToBottom(false));
+        } else if (maxSeq > prevMaxSeq) {
+          this.newBelow = true;
         }
       } catch (err) {
         if (!silent) toast('加载消息流失败：' + err.message, 'bad');
@@ -339,11 +360,33 @@ function createCommandState() {
       }
     },
 
-    scrollToBottom() {
+    // 32px matches the log view's "already at the bottom" slack.
+    isAtBottom(el) {
+      return el.scrollHeight - el.scrollTop - el.clientHeight <= 32;
+    },
+
+    // instant skips the container's CSS smooth scrolling: opening a thread
+    // must jump to the bottom, not animate down from the top. Sending and
+    // following a new message keep the smooth ride.
+    scrollToBottom(instant = false) {
       const el = $('cmdStreamContainer');
-      if (el) {
+      if (!el) return;
+      if (instant) {
+        const prev = el.style.scrollBehavior;
+        el.style.scrollBehavior = 'auto';
+        el.scrollTop = el.scrollHeight;
+        el.style.scrollBehavior = prev;
+      } else {
         el.scrollTop = el.scrollHeight;
       }
+      this.stickToBottom = true;
+      this.newBelow = false;
+    },
+
+    // The reader scrolled themselves back to the bottom: nothing is "below".
+    onStreamScroll() {
+      const el = $('cmdStreamContainer');
+      if (el && this.isAtBottom(el)) this.newBelow = false;
     },
 
     // Sending message
@@ -378,7 +421,7 @@ function createCommandState() {
         });
 
         this.payload = '';
-        this.$nextTick(() => this.scrollToBottom());
+        this.$nextTick(() => this.scrollToBottom(false));
         toast(`指令已发送至 ${this.activeTarget.name} (seq ${res.seq})`, 'ok');
         refreshStats();
       } catch (err) {

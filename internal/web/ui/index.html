@@ -349,7 +349,7 @@
             </div>
 
             <!-- Message Stream -->
-            <div class="cmd-stream" id="cmdStreamContainer">
+            <div class="cmd-stream" id="cmdStreamContainer" @scroll="onStreamScroll()">
               <div class="cmd-loading" x-show="loadingMessages">
                 <span class="muted xs">加载消息中...</span>
               </div>
@@ -439,6 +439,10 @@
                   </template>
                 </div>
               </template>
+
+              <button type="button" class="cmd-jump-bottom" x-show="newBelow" x-transition.opacity @click="scrollToBottom(false)">
+                <svg class="icon xs"><use href="#i-chev-d"/></svg> 有新消息 · 回到底部
+              </button>
             </div>
 
             <!-- Dissolved room: history only, no composer. -->

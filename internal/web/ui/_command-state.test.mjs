@@ -27,8 +27,22 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 // ---- DOM / browser stubs -------------------------------------------------
 const els = {};
 const listeners = { element: [], document: [] };
+// Enough of a CSSStyleDeclaration for the scroll jump: assigning
+// el.style.scrollBehavior must read back, which a plain {} would drop.
+const documentStubStyle = () => {
+  const style = { setProperty() {}, getPropertyValue() { return ''; } };
+  for (const prop of ['scrollBehavior']) {
+    let value = '';
+    Object.defineProperty(style, prop, {
+      configurable: true,
+      get() { return value; },
+      set(v) { value = String(v); },
+    });
+  }
+  return style;
+};
 const mkEl = (id) => ({
-  id, hidden: false, className: '', textContent: '', innerHTML: '', dataset: {}, style: {},
+  id, hidden: false, className: '', textContent: '', innerHTML: '', dataset: {}, style: documentStubStyle(),
   scrollTop: 0, scrollHeight: 100, clientHeight: 100, classList: { toggle() {}, add() {}, remove() {} },
   addEventListener: (t) => listeners.element.push(`${id}:${t}`),
   getBoundingClientRect: () => ({ top: 0, left: 0, right: 100, bottom: 100, width: 100, height: 100 }),
@@ -102,7 +116,11 @@ const assert = (cond, msg) => {
 // call throws exactly like production did.
 const alpineInjectMagics = (obj) => {
   for (const name of ['nextTick', 'el', 'refs', 'store', 'watch', 'dispatch', 'root', 'data', 'id']) {
-    Object.defineProperty(obj, '$' + name, { get() { return () => {}; }, enumerable: false });
+    // Non-configurable, exactly like Alpine: a second root sharing this object
+    // throws "Cannot redefine property". $nextTick runs its callback so the
+    // scroll behaviour below is actually exercised.
+    const value = name === 'nextTick' ? (fn) => fn && fn() : () => {};
+    Object.defineProperty(obj, '$' + name, { get() { return value; }, enumerable: false });
   }
 };
 
@@ -111,7 +129,6 @@ const alpineInjectMagics = (obj) => {
 // code outside Alpine, so provide it on the instance under test before Alpine's
 // (non-configurable) stamping would make it read-only.
 const page = commandApp();
-page.$nextTick = (fn) => fn && fn();
 const secondRoot = commandApp();
 assert(page !== secondRoot, 'commandApp() must return a fresh object per Alpine root: a shared object throws "Cannot redefine property: $nextTick" out of Alpine.start()');
 alpineInjectMagics(page);
@@ -240,5 +257,58 @@ await page.loadActiveMessages(false);
 assert(page.messages.length === 2, 'inbox must render both items, got ' + page.messages.length);
 assert(page.messages[0].seq === 101 && page.messages[1].seq === 102, 'inbox must read top-down oldest-first, got seqs ' + page.messages.map((m) => m.seq).join(','));
 assert(page.inboxUnread === 2, 'unread count still comes from the API, got ' + page.inboxUnread);
+
+// 9. Opening a conversation lands on the latest message instantly. The stream's
+// CSS is scroll-behavior: smooth, which used to animate every entry down from
+// the top; the jump must override that for the assignment and then restore it.
+const stream = document.getElementById('cmdStreamContainer');
+stream.scrollHeight = 800;
+stream.clientHeight = 200;
+stream.style.scrollBehavior = 'smooth';
+let top = 0;
+const sets = [];
+Object.defineProperty(stream, 'scrollTop', {
+  configurable: true,
+  get() { return top; },
+  set(v) {
+    sets.push(stream.style.scrollBehavior + ':' + v);
+    top = v;
+  },
+});
+await page.loadActiveMessages(false);
+assert(sets.some((s) => s.startsWith('auto:')), 'entering a conversation must jump (scroll-behavior: auto), not animate from the top; sets=' + sets.join(','));
+assert(stream.scrollTop === stream.scrollHeight, 'an opened conversation must rest at the bottom, got ' + stream.scrollTop);
+assert(stream.style.scrollBehavior === 'smooth', 'the smooth behaviour must be restored after the jump, got ' + stream.style.scrollBehavior);
+assert(page.newBelow === false, 'landing at the bottom must not offer a jump chip');
+
+// 10. A poll follows only when the reader was already at the bottom.
+stream.scrollHeight = 800;
+stream.clientHeight = 200;
+stream.scrollTop = 800;
+INBOX_ITEMS.unshift({ seq: 103, id: 'n3', from: 'bob', to: 'operator', kind: 'chat', payload: '第三条', created_at: 1791555200, unread: true, thread: 'op/bob' });
+await page.loadActiveMessages(true);
+assert(stream.scrollTop === stream.scrollHeight, 'a poll while resting at the bottom must follow the new message');
+assert(page.newBelow === false, 'following must not raise the jump chip');
+
+// Reading history: the place is kept and the chip appears instead.
+stream.scrollTop = 100;
+const held = stream.scrollTop;
+INBOX_ITEMS.unshift({ seq: 104, id: 'n4', from: 'bob', to: 'operator', kind: 'chat', payload: '第四条', created_at: 1791555300, unread: true, thread: 'op/bob' });
+await page.loadActiveMessages(true);
+assert(stream.scrollTop === held, 'a poll while reading history must not move the scroll position, got ' + stream.scrollTop);
+assert(page.newBelow === true, 'newer messages below must raise the jump chip');
+
+// The chip itself is the smooth ride back down, and it clears.
+sets.length = 0;
+page.scrollToBottom(false);
+assert(sets.length === 1 && sets[0].startsWith('smooth:'), 'the jump chip and outgoing sends keep the smooth scroll, got ' + sets.join(','));
+assert(stream.scrollTop === stream.scrollHeight && page.newBelow === false, 'jumping back down clears the chip');
+
+// Scrolling back to the bottom by hand clears it too.
+stream.scrollTop = 100;
+page.newBelow = true;
+stream.scrollTop = stream.scrollHeight;
+page.onStreamScroll();
+assert(page.newBelow === false, 'scrolling back to the bottom by hand clears the chip');
 
 console.log('command state: all checks passed');

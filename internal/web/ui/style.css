@@ -989,7 +989,33 @@ main.full-bleed {
   flex-direction: column;
   gap: var(--s-3);
   scroll-behavior: smooth;
+  position: relative;
 }
+
+/* Shown only while the reader is up in history and a poll brought newer
+   messages. Opening a thread jumps straight to the bottom, so it stays hidden
+   until they scroll away. */
+.cmd-jump-bottom {
+  position: sticky;
+  bottom: 8px;
+  align-self: center;
+  margin-top: auto;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--brand) 40%, var(--border));
+  background: var(--panel);
+  color: var(--brand);
+  font: inherit;
+  font-size: var(--fs-xs);
+  box-shadow: 0 4px 14px rgb(0 0 0 / .18);
+  cursor: pointer;
+}
+
+.cmd-jump-bottom:hover { background: var(--raised); }
 
 .cmd-loading {
   text-align: center;
