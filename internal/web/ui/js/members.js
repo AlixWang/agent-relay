@@ -111,7 +111,8 @@ function bindNoteCells(tbody) {
       const input = cell.querySelector('input');
       input.focus();
       input.select();
-      const close = () => refreshPeers();
+      // 退出编辑必须绕过 refreshPeers 的编辑锁，否则保存和取消都重绘不了这个格子。
+      const close = () => { peerState.noteClosing = true; refreshPeers(); };
       cell.querySelector('[data-cancel]').onclick = (ev) => { ev.stopPropagation(); close(); };
       const commit = async (ev) => {
         ev?.stopPropagation?.();
@@ -136,7 +137,9 @@ function bindNoteCells(tbody) {
 
 export async function refreshPeers() {
   // 有备注正在编辑时不重绘，避免输入到一半被刷新吞掉。
-  if (document.querySelector('.note-cell.editing')) return;
+  // 保存和取消会先置 noteClosing，只放行这一次。
+  if (peerState.noteClosing) peerState.noteClosing = false;
+  else if (document.querySelector('.note-cell.editing')) return;
   const table = $('peerTable');
   if (!table) return;
   const tbody = table.querySelector('tbody');
