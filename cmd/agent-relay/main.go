@@ -19,6 +19,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/config"
 	"github.com/AlixWang/agent-relay/internal/gateway"
 	"github.com/AlixWang/agent-relay/internal/guard"
+	"github.com/AlixWang/agent-relay/internal/muse"
 	"github.com/AlixWang/agent-relay/internal/presence"
 	"github.com/AlixWang/agent-relay/internal/queue"
 	"github.com/AlixWang/agent-relay/internal/retention"
@@ -93,6 +94,27 @@ func main() {
 	p := presence.New(st, int64(cfg.OnlineTimeoutSecs), cfg.OfflineWebhookURL)
 	v := verify.New(st, int64(cfg.VerifyTimeoutSecs))
 
+	// Optional Muse account authorization + keepalive (§4.9). A failure here
+	// disables only the optional feature: the relay must still start.
+	museSvc, museErr := muse.New(st, muse.Options{
+		BaseURL:           cfg.MuseBaseURL,
+		ProxyURL:          cfg.MuseProxyURL,
+		HTTPTimeout:       time.Duration(cfg.MuseHTTPTimeoutSecs) * time.Second,
+		KeepaliveInterval: time.Duration(cfg.MuseKeepaliveSecs) * time.Second,
+		WakeCooldown:      time.Duration(cfg.MuseWakeCooldownSecs) * time.Second,
+		DataDir:           cfg.DataDir,
+		AutoWake:          cfg.MuseAutoWake,
+	})
+	if museErr != nil {
+		museSvc = nil
+		log.Printf("WARN: muse keepalive disabled: %v", museErr)
+	}
+	if museSvc != nil {
+		p.OnOffline = func(peerID string, offlineSecs int64) {
+			museSvc.MaybeWakeOffline(peerID, offlineSecs)
+		}
+	}
+
 	bind := cfg.BindAddr()
 	// serverAddr is what assistants see in onboarding prompts. Behind a
 	// reverse proxy it is the public address, not the local bind.
@@ -110,6 +132,7 @@ func main() {
 	gw.SetGuard(g)
 	// SSE fan-out (DESIGN §4.4b): in-memory wake-ups, DB stays authoritative.
 	gw.SetStream(stream.New(cfg.StreamMaxPerPeer, 500))
+	gw.SetMuse(museSvc)
 	if cfg.AdminPasswordHash != "" {
 		gw.SetAdminHash([]byte(cfg.AdminPasswordHash))
 	} else {
@@ -146,6 +169,9 @@ func main() {
 	go presenceLoop(ctx, p)
 	go verifyLoop(ctx, v)
 	go retentionLoop(ctx, st, cfg)
+	if museSvc != nil && cfg.MuseKeepaliveSecs > 0 {
+		go museLoop(ctx, museSvc, cfg)
+	}
 
 	log.Printf("agent-relay v%d listening on %s (db=%s)", serverVersion, bind, dbPath)
 	go func() {
@@ -224,6 +250,41 @@ func verifyLoop(ctx context.Context, v *verify.Service) {
 			return
 		case <-t.C:
 			v.Sweep(time.Now().Unix())
+		}
+	}
+}
+
+// museLoop renews authorized Muse sessions and keeps their VMs warm. It waits
+// 15s after boot so the relay is serving before optional outbound traffic, then
+// runs on the configured interval. Zero interval never reaches here.
+func museLoop(ctx context.Context, m *muse.Service, cfg *config.Config) {
+	interval := time.Duration(cfg.MuseKeepaliveSecs) * time.Second
+	if interval <= 0 {
+		return
+	}
+	run := func() {
+		sum, err := m.KeepaliveAll(ctx, false)
+		if err != nil {
+			log.Printf("muse: keepalive: %v", err)
+			return
+		}
+		log.Printf("muse: keepalive total=%d ok=%d failed=%d skipped=%d needs_reauth=%d wake_ok=%d",
+			sum.Total, sum.OK, sum.Failed, sum.Skipped, sum.NeedsReauth, sum.WakeOK)
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(15 * time.Second):
+	}
+	run()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			run()
 		}
 	}
 }

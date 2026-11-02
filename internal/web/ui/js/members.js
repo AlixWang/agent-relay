@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { $, esc, icon, ago, fmtTime, avatar, toast, confirmAction, renderPager } from './utils.js';
 import { currentRoute } from './router.js';
 import { serverPromptVersion, serverClientVersion, serverReceiverRev, refreshStats } from './auth.js';
+import { openMuseAuth, wakeMuseAccount, museAuthTone, museAuthLabel } from './muse.js';
 
 export const peerState = {
   page: 1,
@@ -67,6 +68,37 @@ const transportBadge = (p) => {
   return isSSE
     ? `<span class="badge ok">${icon('zap', 'xs')}SSE</span>`
     : `<span class="badge">${icon('radio', 'xs')}轮询</span>`;
+};
+
+// Operator-only Muse authorization summary (§4.9). The server fills p.muse
+// only on GET /admin/peers; assistants never see it.
+const museBadge = (p) => {
+  const m = p.muse;
+  if (!m) return '';
+  const tone = museAuthTone(m);
+  const tip = [
+    `Muse 授权 · ${m.auth_state}`,
+    `VM ${m.vm_state || '?'}`,
+    m.expires_at ? `会话到期 ${fmtTime(m.expires_at)}` : '',
+    m.last_error || '',
+  ].filter(Boolean).join('\n');
+  return `<span class="badge${tone !== 'muted' ? ' ' + tone : ''}" title="${esc(tip)}">${esc(museAuthLabel(m))}</span>`;
+};
+
+const museAction = (p) => {
+  const m = p.muse;
+  if (!m) {
+    return p.agent_type === 'muse'
+      ? `<button class="btn-icon" data-act="muse-auth" data-id="${esc(p.id)}" data-tip="授权 Muse 保活" aria-label="授权 Muse 保活">${icon('key')}</button>`
+      : '';
+  }
+  if (m.auth_state === 'needs_reauth') {
+    return `<button class="btn-icon warn" data-act="muse-auth" data-id="${esc(p.id)}" data-tip="Muse 授权失效，重新授权" aria-label="重新授权 Muse">${icon('key')}</button>`;
+  }
+  if (!p.online && m.enabled) {
+    return `<button class="btn-icon" data-act="muse-wake" data-account="${esc(m.account_id)}" data-id="${esc(p.id)}" data-tip="唤醒 Muse 沙盒" aria-label="唤醒 Muse 沙盒">${icon('zap')}</button>`;
+  }
+  return '';
 };
 
 const capsBadges = (c) => {
@@ -207,6 +239,7 @@ export async function refreshPeers() {
           <div class="online-cell">
             <span><span class="dot ${p.online ? 'on' : 'off'}"></span>${p.online ? '在线' : '离线'}</span>
             <small title="${fmtTime(p.last_seen)}">${esc(ago(p.last_seen))}</small>
+            ${museBadge(p)}
           </div>
         </td>
         <td>${transportBadge(p)}</td>
@@ -230,6 +263,7 @@ export async function refreshPeers() {
         </td>
         <td class="td-actions">
           <div class="row-btns tight">
+            ${museAction(p)}
             ${p.status === 'suspended'
               ? `<button class="btn-icon ok" data-act="activate" data-id="${esc(p.id)}" data-tip="激活解封" aria-label="激活解封">${icon('play')}</button>`
               : `<button class="btn-icon warn" data-act="suspend" data-id="${esc(p.id)}" data-tip="暂停服务" aria-label="暂停服务">${icon('pause')}</button>`}
@@ -251,6 +285,16 @@ export async function refreshPeers() {
         e.stopPropagation();
         const id = btn.dataset.id;
         const act = btn.dataset.act;
+        if (act === 'muse-auth') {
+          openMuseAuth(id, () => { refreshPeers(); refreshStats(); });
+          return;
+        }
+        if (act === 'muse-wake') {
+          await wakeMuseAccount(btn.dataset.account);
+          refreshPeers();
+          refreshStats();
+          return;
+        }
         if (act === 'del') {
           const ok = await confirmAction({
             title: `删除成员 ${id}？`,

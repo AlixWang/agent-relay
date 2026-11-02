@@ -124,6 +124,11 @@ export async function refreshSystem() {
     const r = c.retention || {};
     const g = c.guard || {};
     const p = c.presence || {};
+    const m = c.muse || {};
+    const museRows = c.muse ? `
+        <dt>${icon('zap', 'xs')} Muse 保活</dt><dd>${m.enabled ? (m.keepalive_secs ? `每 ${m.keepalive_secs} 秒` : '手动') : '未启用'}</dd>
+        <dt>${icon('alert', 'xs')} Muse 自动唤醒</dt><dd>${m.auto_wake ? '开' : '关'} · 冷却 ${m.wake_cooldown_secs ?? 300} 秒</dd>
+        <dt>${icon('server', 'xs')} Muse 出口</dt><dd>${m.proxy_configured ? '已配置代理' : '环境代理/直连'}${m.base_url ? ' · ' + esc(m.base_url) : ''}</dd>` : '';
     const sysPolicy = $('sysPolicy');
     if (sysPolicy) {
       sysPolicy.innerHTML = `
@@ -134,6 +139,7 @@ export async function refreshSystem() {
         <dt>${icon('activity', 'xs')} 发送限流速率</dt><dd>${g.rate_per_minute} 次 / 分钟</dd>
         <dt>${icon('radio', 'xs')} 在线判定超时</dt><dd>${p.online_timeout_secs} 秒</dd>
         <dt>${icon('shield', 'xs')} 冒烟验证超时</dt><dd>${p.verify_timeout_secs} 秒</dd>
+        ${museRows}
       `;
     }
   } catch (err) {

@@ -194,6 +194,38 @@ SQLite (WAL mode) behind a repository interface so Postgres is a drop-in later. 
 
 Embedded static UI (see §10) + admin API. Served from the same binary via `embed.FS`. No separate frontend build artifact to deploy in v1 beyond the bundled assets.
 
+### 4.9 Muse account authorization & keepalive (`internal/muse`, optional)
+
+A Muse assistant runs inside a cloud sandbox VM. When the VM sleeps or restarts,
+`relay-tail` stops, heartbeats cease and presence marks the peer offline. Waking it
+needs two things the relay cannot infer: a valid Muse session cookie and the
+**current** `vm_id` (the old id stops working after a sandbox restart).
+
+- **Authorization:** an operator binds one muse.ai account to one relay peer by
+  pasting the browser `Cookie` header (`hatch_sess` + `hatch_vml` essential). The
+  cookie jar is AES-GCM encrypted at rest with `data_dir/muse-cookie.key` (0600)
+  and is never returned by the admin API. Deleting the binding deletes the
+  ciphertext; deleting/pruning a peer cascades.
+- **Control plane:** `GET {base}/api/session` renews `hatch_vml`/`hatch_sess` and
+  returns `vm_id`/`vm_state`; `POST {base}/api/hatch/vm/wake` asks Muse to boot
+  the VM. A wake HTTP 200 is only an acknowledgement — a second `/api/session`
+  must report `vm_state == RUNNING`.
+- **Background keepalive:** every `muse_keepalive_secs` (default 900) each enabled
+  account is renewed and woken. On an online→offline presence transition,
+  `presence.OnOffline` asks `muse.Service` to wake that peer's account (subject to
+  the per-account `auto_wake`, `enabled`, `needs_reauth`, `DISABLED` and cooldown
+  guards). The hook returns immediately; the wake runs in its own goroutine.
+- **Failure semantics:** 401 marks `needs_reauth` and preserves the old cookie;
+  403/429/5xx/timeouts/non-JSON are transient and preserve the last confirmed
+  state; a wake that is not confirmed RUNNING is reported as `wake_ok=false`, not
+  success. This mirrors the reference implementation
+  (`czg86389-hub/muse2api`) and avoids the two field failures: stale `vm_id`
+  reuse and “wake 200 = success”.
+- **Out of scope:** no headless-browser/CDP chat automation, no cookie importer
+  extension, no multi-account rotation. One Muse account should have one
+  keepalive owner; running muse2api's keepalive on the same account will rotate
+  cookies against this service.
+
 ---
 
 ## 5. Data Model & Protocol Spec
@@ -269,6 +301,30 @@ CREATE TABLE audit_log (
     detail        TEXT DEFAULT ''
 );
 
+-- Optional Muse account authorization (§4.9). One account per peer; the
+-- cookie jar is AES-GCM ciphertext, never plaintext and never served.
+CREATE TABLE muse_accounts (
+    id                TEXT PRIMARY KEY,
+    peer_id           TEXT NOT NULL UNIQUE,
+    label             TEXT DEFAULT '',
+    cookies_enc       TEXT DEFAULT '',
+    cookies_exp       TEXT DEFAULT '{}',     -- JSON name → unix expiry
+    session_status    TEXT DEFAULT '',
+    vm_id             TEXT DEFAULT '',
+    vm_state          TEXT DEFAULT '',
+    auth_state        TEXT DEFAULT 'unverified', -- unverified | ok | needs_reauth
+    last_error        TEXT DEFAULT '',
+    last_keepalive_at INTEGER DEFAULT 0,
+    last_attempt_at   INTEGER DEFAULT 0,
+    last_attempt_ok   INTEGER DEFAULT 0,
+    last_wake_at      INTEGER DEFAULT 0,
+    last_wake_ok      INTEGER DEFAULT 0,
+    auto_wake         INTEGER DEFAULT 1,
+    enabled           INTEGER DEFAULT 1,
+    authorized_at     INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL
+);
+
 CREATE INDEX idx_messages_recipient_seq ON messages(recipient, seq);
 CREATE INDEX idx_messages_root ON messages(root_id, seq);
 ```
@@ -318,6 +374,8 @@ Admin (session cookie, separate from agent tokens):
 | `GET /admin/messages?thread=<root_id>` | Inspect a thread; force-approve/reject held messages. |
 | `GET /admin/audit` | Audit log query/export. |
 | `POST /admin/prompts` | Generate an onboarding prompt for a chosen agent type (§9.3). |
+| `GET/POST /admin/muse/accounts` · `PATCH/DELETE /admin/muse/accounts/:id` | Optional Muse account authorization (§4.9): write-only cookie binding, enable/auto-wake switches, revoke. |
+| `POST /admin/muse/accounts/:id/keepalive` · `/wake` · `POST /admin/muse/keepalive` · `GET /admin/muse/status` | Manual session renewal / VM wake / all-account sweep / loop status. |
 
 ### 5.4 Ordering, dedup, and sync
 
@@ -778,8 +836,12 @@ with `?v=<tag>` cache busting.
 ### 9.1 Members
 
 - Table of peers: identity, type, status (pending/verifying/active/suspended), online dot, last seen, protocol version, capabilities badges.
-- Actions: invite (generates the onboarding prompt — §9.3's output, copy button), suspend/reactivate, revoke tokens, rename display label.
+- Actions: invite (generates the onboarding prompt — §9.3's output, copy button), suspend/reactivate, revoke tokens, rename display label, authorize/wake Muse (§4.9).
 - Offline highlighting: peers past the alert threshold are flagged with age ("offline 23m").
+- The **Muse 保活** page (`/#muse`) lists authorized accounts: auth state, cookie expiry,
+  VM state, last keepalive/wake, wake-recovered, per-account auto-wake switch and
+  keepalive/wake/re-authorize/delete actions. A compact Muse badge and wake button
+  also appear in the members table for bound peers.
 
 ### 9.2 Prompt Generator
 

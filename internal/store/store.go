@@ -234,6 +234,14 @@ type Store interface {
 	// so the count is by root_id rather than recipient.
 	CountThreadWindow(rootID string, sinceSeq, sinceTs int64) (int, error)
 	CountRoomMessagesSince(roomID string, sinceSeq, sinceTs int64) (int, error)
+	// muse accounts (§4.9): one authorized muse.ai account per peer. Cookies
+	// are opaque ciphertext; only internal/muse encrypts/decrypts them.
+	CreateMuseAccount(a *MuseAccount) error
+	GetMuseAccount(id string) (*MuseAccount, error)
+	GetMuseAccountByPeer(peerID string) (*MuseAccount, error)
+	ListMuseAccounts() ([]*MuseAccount, error)
+	SaveMuseAccount(a *MuseAccount) error
+	DeleteMuseAccount(id string) error
 	// settings + operator inbox (§9.5)
 	GetSetting(key string) (string, error)
 	SetSetting(key, value string, ts int64) error
@@ -503,11 +511,24 @@ func (s *sqliteStore) TouchPeer(id string, ts int64) error {
 }
 
 func (s *sqliteStore) PrunePeers(olderThan int64) (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM peers WHERE last_seen>0 AND last_seen<?`, olderThan)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	defer tx.Rollback()
+	// A pruned peer's Muse authorization (cookie ciphertext) must not linger.
+	if _, err := tx.Exec(`DELETE FROM muse_accounts WHERE peer_id IN
+		(SELECT id FROM peers WHERE last_seen>0 AND last_seen<?)`, olderThan); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`DELETE FROM peers WHERE last_seen>0 AND last_seen<?`, olderThan)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, tx.Commit()
 }
 
 func (s *sqliteStore) DeletePeer(id string, ts int64) (int64, error) {
@@ -524,6 +545,9 @@ func (s *sqliteStore) DeletePeer(id string, ts int64) (int64, error) {
 	}
 	revoked, _ := res.RowsAffected()
 	if _, err := tx.Exec(`DELETE FROM verify_state WHERE peer_id=?`, id); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM muse_accounts WHERE peer_id=?`, id); err != nil {
 		return 0, err
 	}
 	res, err = tx.Exec(`DELETE FROM peers WHERE id=?`, id)

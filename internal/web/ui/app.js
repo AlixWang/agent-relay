@@ -5,6 +5,7 @@ import { initTheme } from './js/utils.js';
 import { initNavigation, setRoute, onRoute } from './js/router.js';
 import { initAuth, refreshStats, showLogin } from './js/auth.js';
 import { initMembers, refreshPeers } from './js/members.js';
+import { initMuse, refreshMuse, stopMuse } from './js/muse.js';
 import { initThreads, refreshThreads } from './js/threads.js';
 import { initPrompts } from './js/prompts.js';
 import { initAudit, refreshAudit } from './js/audit.js';
@@ -17,6 +18,7 @@ Alpine.data('commandApp', commandApp);
 
 // Wire route handlers
 onRoute('members', refreshPeers);
+onRoute('muse', refreshMuse, stopMuse);
 onRoute('threads', refreshThreads);
 onRoute('command', refreshCommand, stopCommand);
 onRoute('audit', refreshAudit);
@@ -28,6 +30,7 @@ initTheme();
 initNavigation();
 initAuth();
 initMembers();
+initMuse();
 initThreads();
 initPrompts();
 initAudit();

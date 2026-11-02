@@ -72,3 +72,19 @@ profile_refresh_days = 7
 max_room_members = 16
 room_fuse_max_messages = 60
 room_fuse_window_secs = 3600
+
+# Muse account authorization + keepalive (DESIGN §4.9). Optional: with no
+# authorized accounts these settings cause no outbound traffic. The console's
+# Muse page binds one muse.ai account per member; the server renews
+# /api/session and keeps the sandbox VM warm via /api/hatch/vm/wake.
+# 0 disables the background loop (manual buttons still work).
+muse_keepalive_secs = 900
+# 0 selects the default 300s; otherwise must be >= 60.
+muse_wake_cooldown_secs = 300
+muse_http_timeout_secs = 12
+muse_auto_wake = true
+# Production must use https. http is accepted only for loopback test servers.
+muse_base_url = "https://muse.ai"
+# Optional outbound proxy (muse.ai blocked / fixed egress needed).
+# Empty = honour HTTPS_PROXY from the service environment.
+muse_proxy_url = ""

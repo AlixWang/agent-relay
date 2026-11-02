@@ -157,6 +157,31 @@ CREATE TABLE IF NOT EXISTS settings (
     value         TEXT DEFAULT '',
     updated_at    INTEGER DEFAULT 0
 );
+-- Muse account authorization + keepalive (§4.9): one Muse account per relay
+-- peer. cookies_enc is AES-GCM ciphertext (key in data_dir/muse-cookie.key,
+-- 0600) and is never returned by the admin API. No FK on peer_id: DeletePeer
+-- and PrunePeers clean the binding in their own transactions.
+CREATE TABLE IF NOT EXISTS muse_accounts (
+    id                TEXT PRIMARY KEY,
+    peer_id           TEXT NOT NULL UNIQUE,
+    label             TEXT DEFAULT '',
+    cookies_enc       TEXT DEFAULT '',
+    cookies_exp       TEXT DEFAULT '{}',
+    session_status    TEXT DEFAULT '',
+    vm_id             TEXT DEFAULT '',
+    vm_state          TEXT DEFAULT '',
+    auth_state        TEXT DEFAULT 'unverified',
+    last_error        TEXT DEFAULT '',
+    last_keepalive_at INTEGER DEFAULT 0,
+    last_attempt_at   INTEGER DEFAULT 0,
+    last_attempt_ok   INTEGER DEFAULT 0,
+    last_wake_at      INTEGER DEFAULT 0,
+    last_wake_ok      INTEGER DEFAULT 0,
+    auto_wake         INTEGER DEFAULT 1,
+    enabled           INTEGER DEFAULT 1,
+    authorized_at     INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_room_members_peer ON room_members(peer_id, room_id);
 CREATE INDEX IF NOT EXISTS idx_messages_recipient_seq ON messages(recipient, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_root ON messages(root_id, seq);

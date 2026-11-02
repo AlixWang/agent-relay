@@ -111,6 +111,7 @@ func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
 		"/js/router.js",
 		"/js/auth.js",
 		"/js/members.js",
+		"/js/muse.js",
 		"/js/threads.js",
 		"/js/prompts.js",
 		"/js/audit.js",
@@ -200,6 +201,48 @@ func probeRoute(t *testing.T, f *fixture, method, path, cookie string) int {
 	rec := httptest.NewRecorder()
 	f.mux.ServeHTTP(rec, req)
 	return rec.Code
+}
+
+// The Muse keepalive page is the operator's only authorization/keepalive
+// surface; a missing asset or unbound button is a silent feature outage.
+func TestConsoleMusePanelWiring(t *testing.T) {
+	f := newFixture(t)
+	f.mux = f.srv.Handler(web.Handler())
+	cookie := f.adminLogin(t)
+
+	code, page := getRaw(t, f, "/", cookie)
+	if code != 200 {
+		t.Fatalf("console page: %d", code)
+	}
+	for _, need := range []string{
+		`id="page-muse"`, `id="museTable"`, `id="museDlg"`, `id="navMuse"`,
+		`id="museAuthorize"`, `id="museKeepaliveAll"`, `id="museForm"`,
+	} {
+		if !strings.Contains(page, need) {
+			t.Fatalf("muse panel markup lost %s", need)
+		}
+	}
+	code, js := getRaw(t, f, "/js/muse.js", cookie)
+	if code != 200 {
+		t.Fatalf("muse js: %d", code)
+	}
+	for _, need := range []string{
+		"/admin/muse/accounts", "refreshMuse", "wakeMuseAccount", "openMuseAuth", "museURL",
+	} {
+		if !strings.Contains(js, need) {
+			t.Fatalf("muse js lost %q", need)
+		}
+	}
+	_, members := getRaw(t, f, "/js/members.js", cookie)
+	for _, need := range []string{"muse-wake", "openMuseAuth", "museBadge"} {
+		if !strings.Contains(members, need) {
+			t.Fatalf("members integration lost %q", need)
+		}
+	}
+	_, app := getRaw(t, f, "/app.js", cookie)
+	if !strings.Contains(app, "onRoute('muse'") {
+		t.Fatal("app.js does not wire the muse route")
+	}
 }
 
 // The console must use class names defined in style.css and contain shell containers.

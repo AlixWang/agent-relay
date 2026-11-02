@@ -3,6 +3,7 @@ import { $ } from './utils.js';
 
 export const routeMeta = {
   members: { title: '成员', desc: '注册助手状态、在线心跳与路由能力' },
+  muse:    { title: 'Muse 保活', desc: 'Muse 账号授权、会话续期与沙盒唤醒' },
   threads: { title: '消息 & 线程', desc: '会话流转、熔断保护与安全审批' },
   command: { title: '指挥台', desc: '多助手群聊协同、定向指令调度与收件箱' },
   prompts: { title: '邀请 & Prompt', desc: '助手入驻凭据签发与版本指令生成' },

@@ -79,6 +79,20 @@ sudo $EDITOR /etc/agent-relay/config.toml
 # 必改：admin_password_hash；确认：listen_addr="auto"，port=18789
 ```
 
+### Muse 保活出站（可选）
+
+如果启用控制台的「Muse 保活」，relay 服务器需要能访问 `muse_base_url`（默认
+`https://muse.ai`）。出口被限制/需要固定地区时：
+
+```toml
+muse_proxy_url = "http://127.0.0.1:7890"   # 或 socks5://...
+```
+
+留空则走服务环境里的 `HTTPS_PROXY`。Muse 返回 403/429/5xx/超时按瞬时失败处理，
+不会清空 Cookie；只有 401 才需要重新授权。授权请求来自 relay 服务器出口，不是
+导出 Cookie 的浏览器；同一 Muse 账号不要和 muse2api 同时做 `/api/session` 轮换。
+备份 `data_dir` 时连同 `muse-cookie.key` 一起备份，否则已授权账号需要重新粘贴 Cookie。
+
 ## 4. 起服务
 
 ```bash

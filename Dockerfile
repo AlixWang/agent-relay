@@ -24,7 +24,12 @@ RUN REV="${RECEIVER_REV:-$(find cmd/relay-tail -name '*.go' -type f | LC_ALL=C s
      -o /out/agent-relay ./cmd/agent-relay
 
 FROM debian:bookworm-slim
-RUN useradd -r -d /var/lib/agent-relay agent-relay \
+# CA roots are required for outbound HTTPS: the release/update check and the
+# optional Muse session/wake calls. debian-slim does not guarantee them.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && useradd -r -d /var/lib/agent-relay agent-relay \
   && mkdir -p /var/lib/agent-relay /etc/agent-relay \
   && chown agent-relay:agent-relay /var/lib/agent-relay
 COPY --from=build /out/agent-relay /usr/local/bin/agent-relay

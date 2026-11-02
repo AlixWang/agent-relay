@@ -20,6 +20,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/auth"
 	"github.com/AlixWang/agent-relay/internal/config"
 	"github.com/AlixWang/agent-relay/internal/guard"
+	"github.com/AlixWang/agent-relay/internal/muse"
 	"github.com/AlixWang/agent-relay/internal/presence"
 	"github.com/AlixWang/agent-relay/internal/prompts"
 	"github.com/AlixWang/agent-relay/internal/queue"
@@ -49,6 +50,7 @@ type Server struct {
 	presence *presence.Service
 	verify   *verify.Service
 	stream   *stream.Hub
+	muse     *muse.Service
 
 	adminHash []byte
 	mu        sync.Mutex
@@ -71,6 +73,11 @@ func New(cfg *config.Config, st store.Store, au *auth.Service, q *queue.Service,
 // New so existing construction sites don't change signature. Nil hub
 // disables push: Publish calls become no-ops.
 func (s *Server) SetStream(h *stream.Hub) { s.stream = h }
+
+// SetMuse wires the optional Muse authorization/keepalive service (DESIGN
+// §4.9). Nil keeps the feature off: the admin routes answer 503 and peers get
+// no Muse summary.
+func (s *Server) SetMuse(m *muse.Service) { s.muse = m }
 
 // notifyStream wakes held SSE subscribers after a newly visible message.
 // The DB stays the source of truth: subscribers re-query VisibleTo, so a
@@ -133,6 +140,17 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("POST /admin/prompts", s.requireAdmin(s.handleAdminPrompts))
 	mux.HandleFunc("GET /admin/stats", s.requireAdmin(s.handleAdminStats))
 	mux.HandleFunc("GET /admin/config", s.requireAdmin(s.handleAdminConfig))
+
+	// Muse account authorization + keepalive (§4.9). Optional: all handlers
+	// answer 503 when no service is wired, so the routes stay discoverable.
+	mux.HandleFunc("GET /admin/muse/accounts", s.requireAdmin(s.handleAdminMuseList))
+	mux.HandleFunc("POST /admin/muse/accounts", s.requireAdmin(s.handleAdminMuseCreate))
+	mux.HandleFunc("PATCH /admin/muse/accounts/{id}", s.requireAdmin(s.handleAdminMusePatch))
+	mux.HandleFunc("DELETE /admin/muse/accounts/{id}", s.requireAdmin(s.handleAdminMuseDelete))
+	mux.HandleFunc("POST /admin/muse/accounts/{id}/keepalive", s.requireAdmin(s.handleAdminMuseKeepalive))
+	mux.HandleFunc("POST /admin/muse/accounts/{id}/wake", s.requireAdmin(s.handleAdminMuseWake))
+	mux.HandleFunc("POST /admin/muse/keepalive", s.requireAdmin(s.handleAdminMuseKeepaliveAll))
+	mux.HandleFunc("GET /admin/muse/status", s.requireAdmin(s.handleAdminMuseStatus))
 
 	// Console command center (§9.5): operator sends, rooms, inbox. The
 	// operator speaks on the normal message path as the reserved "operator"
@@ -1048,6 +1066,9 @@ func (s *Server) handleAdminListPeers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "peers failed")
 		return
 	}
+	// Operator-only Muse summary (DESIGN §4.9). Agent-facing /peers never
+	// calls this, so the authorization state stays in the admin trust domain.
+	s.attachMuse(views)
 	// Facets are computed over the unfiltered set so filter chips can show
 	// "全部 N / 在线 M" regardless of the current selection.
 	facets := map[string]int{"all": len(views)}
@@ -1600,6 +1621,27 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		body["tokens_active"] = c.TokensActive
 		body["audit_total"] = c.AuditTotal
 	}
+	// Muse nav badge (§4.9): authorizations needing a fresh cookie.
+	if s.muse != nil {
+		if accounts, err := s.muse.List(); err == nil {
+			ok, needs, auto := 0, 0, 0
+			for _, a := range accounts {
+				if a.AuthState == "ok" {
+					ok++
+				}
+				if a.AuthState == "needs_reauth" {
+					needs++
+				}
+				if a.Enabled && a.AutoWake {
+					auto++
+				}
+			}
+			body["muse_authorized"] = len(accounts)
+			body["muse_ok"] = ok
+			body["muse_needs_reauth"] = needs
+			body["muse_auto_wake"] = auto
+		}
+	}
 	writeJSON(w, 200, body)
 }
 
@@ -1622,6 +1664,15 @@ func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		"presence": map[string]any{
 			"online_timeout_secs": s.cfg.OnlineTimeoutSecs,
 			"verify_timeout_secs": s.cfg.VerifyTimeoutSecs,
+		},
+		"muse": map[string]any{
+			"enabled":            s.muse != nil,
+			"keepalive_secs":     s.cfg.MuseKeepaliveSecs,
+			"wake_cooldown_secs": s.cfg.MuseWakeCooldownSecs,
+			"http_timeout_secs":  s.cfg.MuseHTTPTimeoutSecs,
+			"auto_wake":          s.cfg.MuseAutoWake,
+			"base_url":           s.cfg.MuseBaseURL,
+			"proxy_configured":   s.cfg.MuseProxyURL != "",
 		},
 	})
 }

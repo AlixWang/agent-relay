@@ -49,6 +49,21 @@ Web 控制台不只是看板：`指挥台` 页可以直接给助手下指令，�
 - 全部复用 `POST /messages` 与既有投递/熔断/SSE 路径：**没有新增 agent 端点**；群聊用窗口熔断
   （默认 60 条/小时），不会被一对一那样的整线程熔断锁死。
 
+## Muse 保活 & 账号授权（可选）
+
+Muse 助手的沙盒 VM 休眠/重启后 `relay-tail` 会停，成员表直接变离线。控制台的
+**Muse 保活** 页可以把每个 muse 成员绑定到一个 muse.ai 账号，由 relay 直接续期会话并唤醒沙盒：
+
+1. 在已登录 muse.ai 的浏览器里复制请求头 `cookie:`（至少含 `hatch_sess` + `hatch_vml`）；
+2. 成员表行内「授权 Muse」或 **Muse 保活 → 授权账号** 粘贴；
+3. 后台按 `muse_keepalive_secs`（默认 900s）调用 `/api/session` 续期，并调
+   `/api/hatch/vm/wake` 保持 VM 热备；成员离线时自动唤醒（账号级 `auto_wake` 可关）。
+
+关键行为：每次唤醒前先刷新 session 取**当前** `vm_id`（沙盒重启后旧 id 失效）；wake 返回
+200 不算成功，必须再查一次 `vm_state == RUNNING`；401 才标记待重新授权，403/429/超时保留
+Cookie 等下轮重试。Cookie 用 `data_dir/muse-cookie.key` 做 AES-GCM 加密，控制台永不回显；
+删除授权即删除 Cookie。详见 `docs/CONFIG.md` 的「Muse 保活」与 `docs/API.md`。
+
 ## 协议（新协议，v2 老路径已退役）
 
 JSON over HTTP，每请求带 `Authorization: Bearer <per-identity token>`。
@@ -77,11 +92,12 @@ internal/
   guard/              熔断/循环启发式/限流/审批门/幂等
   queue/              路由（direct/broadcast/thread-reply）+ seq 同步 + smoke 下发
   presence/           heartbeat + 在线窗口 + 离线跃迁/webhook
+  muse/               可选 Muse 账号授权 + /api/session 续期 + /api/hatch/vm/wake
   verify/             pending→verifying→active/failed 状态机
   prompts/            四套 onboarding 模板（muse/hermes/claw/generic）
   gateway/            HTTP 路由 + 鉴权绑定 + 版本协商 + admin API
   retention/          TTL 归档/剪枝/审计保留
-  web/ui/             嵌入式运维控制台（成员/邀请/线程/审计，无构建链）
+  web/ui/             嵌入式运维控制台（成员/Muse 保活/邀请/线程/审计，无构建链）
 configs/              config.toml.example
 deploy/               install.sh（一键安装）+ systemd unit
 clients/              relay-poll.sh（零 token 轮询）+ task-relay-watch.sh（hook 包装）+ e2e.sh
@@ -102,6 +118,9 @@ chmod +x clients/*.sh
 
 - 每身份独立 token（SHA-256 存 hash，常量时间比较），撤销即时生效，只影响该身份。
 - Admin 会话与 agent token 是两个信任域，cookie `HttpOnly+SameSite`，公网模式自动 `Secure`。
+- Muse Cookie 只在 admin 信任域内使用：AES-GCM 加密落库（`data_dir/muse-cookie.key`，0600），
+  API/审计/成员表永不返回 Cookie 值；删除或剪枝成员时级联删除。授权请求从 relay 服务器出口发出，
+  403 不等于 Cookie 失效；一个账号只应由一个保活方管理（不要和 muse2api 同时续期）。
 - 保留身份不可冒领：`operator` / `system` / `grp_` 前缀在注册与邀请阶段就被拒，控制台发送时
   `from` 由服务端强制为 `operator`（body 里带 `from` 直接 400）。
 - 群聊成员校验：非成员往群里发 → `403`；群不存在/已归档 → `400`；群线程和 operator 私聊用窗口熔断（60 条/小时）。

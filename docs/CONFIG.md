@@ -9,7 +9,7 @@
 |---|---|---|---|
 | `listen_addr` | string | `"auto"` | `"auto"`/`"tailnet"` = 绑定 `tailscale ip -4`，失败回退 `127.0.0.1`；其他值原样使用（`127.0.0.1` 用于测试，公网模式才可用 `0.0.0.0`） |
 | `port` | int | `18789` | 监听端口 |
-| `data_dir` | string | `/var/lib/agent-relay` | SQLite 文件 + `archive/` JSONL 归档目录 |
+| `data_dir` | string | `/var/lib/agent-relay` | SQLite 文件 + `archive/` JSONL 归档目录 + `muse-cookie.key`（Muse Cookie 加密密钥） |
 | `public` | bool | `false` | 公网 HTTPS 模式；`true` 时必须配 `tls_cert`+`tls_key`，UI cookie 才带 `Secure` |
 | `tls_cert` / `tls_key` | string | `""` | 公网模式证书路径（Let's Encrypt 或自备） |
 | `admin_password_hash` | string | `""` | bcrypt hash；`agent-relay -hash 'pw'` 生成。为空则启动时打印一次性随机密码（重启失效，仅开发用） |
@@ -33,6 +33,34 @@
 | `max_room_members` | int | `16` | 单个群聊的成员上限（2-64，§6.8） |
 | `room_fuse_max_messages` | int | `60` | 群聊和 operator 私聊（`op/<peer>`）在窗口内最多消息数，超限 `409 loop_fuse_tripped`；窗口过去即可再发，不会被整线程熔断锁死 |
 | `room_fuse_window_secs` | int | `3600` | 上面这条窗口的秒数（≥60，§6.8），群聊与 operator 私聊共用 |
+| `muse_keepalive_secs` | int | `900` | Muse 后台保活周期；0=关闭后台循环（手动按钮仍可用），>0 必须 ≥60（§4.9） |
+| `muse_wake_cooldown_secs` | int | `300` | 同一账号两次自动唤醒的最小间隔；0=使用默认 300，>0 必须 ≥60 |
+| `muse_http_timeout_secs` | int | `12` | 调 muse.ai 的单请求超时（1–60） |
+| `muse_auto_wake` | bool | `true` | 全局自动唤醒开关；账号级 `auto_wake` 还可单独关闭 |
+| `muse_base_url` | string | `"https://muse.ai"` | Muse 控制面地址；生产必须 https，http 仅允许 loopback（测试） |
+| `muse_proxy_url` | string | `""` | 出站代理（http/https/socks5）；空=使用服务环境里的 `HTTPS_PROXY` |
+
+## Muse 保活（可选）
+
+控制台的「Muse 保活」页为每个 muse 成员绑定一个 muse.ai 账号（粘贴
+`hatch_sess` + `hatch_vml`）。服务端只调用两个端点：
+
+- `GET /api/session`：续签 `hatch_vml` / `hatch_sess`，返回当前 `vm_id` / `vm_state`；
+- `POST /api/hatch/vm/wake`：唤醒沙盒 VM；HTTP 200 只算“请求已接受”，
+  必须再次 `/api/session` 复核 `vm_state == RUNNING` 才算成功。
+
+行为约定：
+
+- **401** = Cookie 失效 → 标记 `needs_reauth`，保留旧 Cookie，后台暂停该账号直到重新授权；
+- **403/429/5xx/超时/非 JSON** = 瞬时失败 → 保留 Cookie 与上次有效状态，下一轮重试；
+- 每次唤醒前都重新取当前 `vm_id`，不使用缓存值（沙盒重启后旧 id 会失效）；
+- 成员在线→离线跃迁时自动唤醒；账号级 `auto_wake` 或全局 `muse_auto_wake` 可关闭；
+- 一个 Muse 账号同一时间只应由一个保活方管理。不要和 muse2api 同时对同一账号调用
+  `/api/session`，两边轮换 Cookie 会互相顶掉；
+- 授权请求从 relay 服务器出口发出，不是导出 Cookie 的浏览器。出口 IP/地区被风控时
+  会返回 403，可配 `muse_proxy_url` 或 `HTTPS_PROXY`；
+- Cookie 用 `data_dir/muse-cookie.key`（0600）做 AES-GCM 加密，API 永不回显。
+  **备份 data_dir 时连同该密钥一起备份**；密钥丢失后所有已授权账号需要重新粘贴 Cookie。
 
 ## 环境变量（部署相关）
 

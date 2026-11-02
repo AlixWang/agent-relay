@@ -74,15 +74,25 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 	defer hook.Close()
 
 	s := New(st, 300, hook.URL)
+	var offCalls atomic.Int32
+	var offPeer string
+	var offSecs int64
+	s.OnOffline = func(peerID string, offlineSecs int64) {
+		offCalls.Add(1)
+		offPeer, offSecs = peerID, offlineSecs
+	}
 	// Baseline sweep: tracks without firing.
 	s.Sweep(2100)
-	if calls.Load() != 0 {
+	if calls.Load() != 0 || offCalls.Load() != 0 {
 		t.Fatal("baseline sweep must not fire")
 	}
-	// Cross the timeout: exactly one event + webhook.
+	// Cross the timeout: exactly one event + webhook + callback.
 	s.Sweep(2301)
 	if calls.Load() != 1 {
 		t.Fatalf("webhook calls: %d", calls.Load())
+	}
+	if offCalls.Load() != 1 || offPeer != "a" || offSecs != 301 {
+		t.Fatalf("offline callback: calls=%d peer=%q secs=%d", offCalls.Load(), offPeer, offSecs)
 	}
 	var body map[string]any
 	if err := json.Unmarshal(lastBody, &body); err != nil {
@@ -97,7 +107,7 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 	}
 	// Repeat sweep: no duplicate event while still offline.
 	s.Sweep(2400)
-	if calls.Load() != 1 {
+	if calls.Load() != 1 || offCalls.Load() != 1 {
 		t.Fatal("duplicate offline event")
 	}
 	entries, _ = st.ListAudit("system", "peer.offline", 0, 10)
@@ -115,6 +125,9 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 	s.Sweep(2900)
 	if calls.Load() != 2 {
 		t.Fatalf("second transition should fire: %d", calls.Load())
+	}
+	if offCalls.Load() != 2 {
+		t.Fatalf("offline callback second transition: %d", offCalls.Load())
 	}
 }
 

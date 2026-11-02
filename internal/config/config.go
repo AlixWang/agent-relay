@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -74,6 +75,17 @@ type Config struct {
 	MaxRoomMembers      int `toml:"max_room_members"`
 	RoomFuseMaxMessages int `toml:"room_fuse_max_messages"`
 	RoomFuseWindowSecs  int `toml:"room_fuse_window_secs"`
+
+	// Muse account authorization + keepalive (DESIGN §4.9). Optional: with
+	// no authorized accounts the loop performs no network calls. A zero
+	// keepalive interval disables the background loop (manual actions still
+	// work); a zero wake cooldown means the default 300s.
+	MuseKeepaliveSecs    int    `toml:"muse_keepalive_secs"`
+	MuseWakeCooldownSecs int    `toml:"muse_wake_cooldown_secs"`
+	MuseHTTPTimeoutSecs  int    `toml:"muse_http_timeout_secs"`
+	MuseAutoWake         bool   `toml:"muse_auto_wake"`
+	MuseBaseURL          string `toml:"muse_base_url"`
+	MuseProxyURL         string `toml:"muse_proxy_url"`
 }
 
 // Default returns the documented defaults (DESIGN §6.1, §10.2).
@@ -103,6 +115,11 @@ func Default() *Config {
 		MaxRoomMembers:       16,
 		RoomFuseMaxMessages:  60,
 		RoomFuseWindowSecs:   3600,
+		MuseKeepaliveSecs:    900,
+		MuseWakeCooldownSecs: 300,
+		MuseHTTPTimeoutSecs:  12,
+		MuseAutoWake:         true,
+		MuseBaseURL:          "https://muse.ai",
 	}
 }
 
@@ -136,6 +153,9 @@ func Load(path string) (*Config, error) {
 		"profile_refresh_days": true,
 		"max_room_members":     true, "room_fuse_max_messages": true,
 		"room_fuse_window_secs": true,
+		"muse_keepalive_secs":   true, "muse_wake_cooldown_secs": true,
+		"muse_http_timeout_secs": true, "muse_auto_wake": true,
+		"muse_base_url": true, "muse_proxy_url": true,
 	}
 	for k := range raw {
 		if !known[k] {
@@ -206,7 +226,70 @@ func (c *Config) Validate() error {
 	if c.RoomFuseWindowSecs < 60 {
 		return fmt.Errorf("room_fuse_window_secs must be >= 60")
 	}
+	if c.MuseKeepaliveSecs < 0 || (c.MuseKeepaliveSecs > 0 && c.MuseKeepaliveSecs < 60) {
+		return fmt.Errorf("muse_keepalive_secs must be 0 (disabled) or >= 60")
+	}
+	if c.MuseWakeCooldownSecs < 0 || (c.MuseWakeCooldownSecs > 0 && c.MuseWakeCooldownSecs < 60) {
+		return fmt.Errorf("muse_wake_cooldown_secs must be 0 (default) or >= 60")
+	}
+	if c.MuseHTTPTimeoutSecs < 1 || c.MuseHTTPTimeoutSecs > 60 {
+		return fmt.Errorf("muse_http_timeout_secs must be 1-60")
+	}
+	if c.MuseBaseURL != "" {
+		if err := validateMuseBaseURL(c.MuseBaseURL); err != nil {
+			return err
+		}
+	}
+	if c.MuseProxyURL != "" {
+		if err := validateMuseProxyURL(c.MuseProxyURL); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// validateMuseBaseURL keeps the cookie-bearing control plane on TLS except for
+// loopback test servers. A path/query is rejected so the endpoint join is
+// unambiguous.
+func validateMuseBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("muse_base_url is not a valid URL")
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return fmt.Errorf("muse_base_url must be http(s)")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return fmt.Errorf("muse_base_url must be an origin only (no userinfo/path/query/fragment)")
+	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("muse_base_url must use https unless the host is loopback")
+	}
+	return nil
+}
+
+func validateMuseProxyURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("muse_proxy_url is not a valid URL")
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5":
+	default:
+		return fmt.Errorf("muse_proxy_url must be http(s) or socks5")
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("muse_proxy_url must not carry a fragment")
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // BindAddr resolves listen_addr to a concrete "ip:port".

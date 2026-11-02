@@ -53,6 +53,24 @@ type PeerView struct {
 	// "sse" = holding a live /messages/stream; "poll" = short-polling
 	// (or offline/unknown). Computed from the stream hub, not stored.
 	Transport string `json:"transport,omitempty"`
+	// Muse is the operator-only Muse authorization summary (§4.9). Filled by
+	// the gateway on GET /admin/peers; nil on the agent-facing GET /peers.
+	Muse *PeerMuseView `json:"muse,omitempty"`
+}
+
+// PeerMuseView is the small member-table summary of a Muse authorization.
+// It carries no cookie material.
+type PeerMuseView struct {
+	AccountID       string `json:"account_id"`
+	AuthState       string `json:"auth_state"`
+	VMState         string `json:"vm_state,omitempty"`
+	ExpiresAt       int64  `json:"expires_at,omitempty"`
+	LastKeepaliveAt int64  `json:"last_keepalive_at,omitempty"`
+	LastWakeAt      int64  `json:"last_wake_at,omitempty"`
+	LastAttemptOK   bool   `json:"last_attempt_ok"`
+	LastError       string `json:"last_error,omitempty"`
+	Enabled         bool   `json:"enabled"`
+	AutoWake        bool   `json:"auto_wake"`
 }
 
 // Service tracks last-seen and fires offline transitions.
@@ -60,6 +78,10 @@ type Service struct {
 	st            store.Store
 	onlineTimeout int64
 	webhookURL    string
+	// OnOffline is called after an online→offline transition is audited and
+	// before the webhook. It must not block: the Muse integration spawns its
+	// own goroutine. Nil disables the hook.
+	OnOffline func(peerID string, offlineSecs int64)
 
 	mu        sync.Mutex
 	wasOnline map[string]bool
@@ -213,6 +235,9 @@ func (s *Service) Sweep(now int64) {
 			offlineSecs := now - p.LastSeen
 			_ = s.st.AppendAudit("system", "peer.offline",
 				"peer="+p.ID+formatSecs(offlineSecs), now)
+			if s.OnOffline != nil {
+				s.OnOffline(p.ID, offlineSecs)
+			}
 			s.fireWebhook(p.ID, offlineSecs, now)
 		}
 	}

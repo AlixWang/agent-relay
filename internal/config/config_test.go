@@ -151,3 +151,65 @@ func TestHandshakeDefaults(t *testing.T) {
 		t.Fatalf("not applied: %+v", loaded)
 	}
 }
+
+func TestMuseConfig(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default must validate: %v", err)
+	}
+	if cfg.MuseKeepaliveSecs != 900 || cfg.MuseWakeCooldownSecs != 300 ||
+		cfg.MuseHTTPTimeoutSecs != 12 || !cfg.MuseAutoWake ||
+		cfg.MuseBaseURL != "https://muse.ai" || cfg.MuseProxyURL != "" {
+		t.Fatalf("muse defaults: %+v", cfg)
+	}
+
+	// Loading the documented keys overrides defaults; 0 disables the loop and
+	// means the default cooldown.
+	dir := t.TempDir()
+	path := dir + "/muse.toml"
+	data := "muse_keepalive_secs = 0\nmuse_wake_cooldown_secs = 0\n" +
+		"muse_http_timeout_secs = 20\nmuse_auto_wake = false\n" +
+		"muse_base_url = \"http://127.0.0.1:18610\"\n" +
+		"muse_proxy_url = \"http://127.0.0.1:7890\"\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.MuseKeepaliveSecs != 0 || loaded.MuseWakeCooldownSecs != 0 ||
+		loaded.MuseHTTPTimeoutSecs != 20 || loaded.MuseAutoWake ||
+		loaded.MuseBaseURL != "http://127.0.0.1:18610" ||
+		loaded.MuseProxyURL != "http://127.0.0.1:7890" {
+		t.Fatalf("muse keys not applied: %+v", loaded)
+	}
+
+	bad := []func(*Config){
+		func(c *Config) { c.MuseKeepaliveSecs = 30 },
+		func(c *Config) { c.MuseWakeCooldownSecs = 30 },
+		func(c *Config) { c.MuseHTTPTimeoutSecs = 0 },
+		func(c *Config) { c.MuseHTTPTimeoutSecs = 61 },
+		func(c *Config) { c.MuseBaseURL = "http://muse.ai" },
+		func(c *Config) { c.MuseBaseURL = "https://muse.ai/thread/new" },
+		func(c *Config) { c.MuseBaseURL = "ftp://muse.ai" },
+		func(c *Config) { c.MuseProxyURL = "ftp://127.0.0.1:1" },
+	}
+	for i, mutate := range bad {
+		c := Default()
+		mutate(c)
+		if err := c.Validate(); err == nil {
+			t.Fatalf("bad muse config %d must fail: %+v", i, c)
+		}
+	}
+	// A loopback http base is allowed for tests; https is always allowed.
+	ok := Default()
+	ok.MuseBaseURL = "http://localhost:18610"
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("loopback http must pass: %v", err)
+	}
+	ok.MuseBaseURL = "https://muse.ai/"
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("https root must pass: %v", err)
+	}
+}

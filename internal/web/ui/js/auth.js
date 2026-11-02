@@ -69,6 +69,13 @@ export async function refreshStats() {
       navInbox.hidden = inbox === 0;
     }
 
+    const navMuse = $('navMuse');
+    if (navMuse) {
+      const needs = s.muse_needs_reauth || 0;
+      navMuse.textContent = needs > 0 ? needs : '';
+      navMuse.hidden = needs === 0;
+    }
+
     if (s.prompt_version) serverPromptVersion = s.prompt_version;
     if (s.client_version) serverClientVersion = s.client_version;
     if (s.receiver_rev) serverReceiverRev = s.receiver_rev;

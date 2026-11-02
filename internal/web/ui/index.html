@@ -123,6 +123,7 @@
     <nav class="sb-nav" aria-label="主导航">
       <div class="sb-group">运行</div>
       <a href="#members" data-route="members" class="sb-link"><svg class="icon"><use href="#i-users"/></svg><span>成员</span><em id="navOnline" class="sb-count"></em></a>
+      <a href="#muse" data-route="muse" class="sb-link"><svg class="icon"><use href="#i-zap"/></svg><span>Muse 保活</span><em id="navMuse" class="sb-count warn" hidden></em></a>
       <a href="#threads" data-route="threads" class="sb-link"><svg class="icon"><use href="#i-message"/></svg><span>消息线程</span><em id="navPending" class="sb-count warn" hidden></em></a>
       <a href="#command" data-route="command" class="sb-link"><svg class="icon"><use href="#i-send"/></svg><span>指挥台</span><em id="navInbox" class="sb-count warn" hidden></em></a>
       <div class="sb-group">接入</div>
@@ -190,6 +191,42 @@
           </div>
           <div class="pager" id="peerPager"></div>
         </div>
+      </section>
+
+      <!-- ---------- Muse 保活 ---------- -->
+      <section id="page-muse" class="page" hidden>
+        <div class="stats">
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-bot"/></svg>已授权</span><b id="museTotal">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-ok"/></svg>保活正常</span><b id="museOK">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-alert"/></svg>待重新授权</span><b id="museReauth">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-zap"/></svg>自动唤醒</span><b id="museAuto">-</b></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-bar">
+            <div class="seg" id="museSeg" role="tablist">
+              <button data-v="" class="on">全部 <em id="museFcAll"></em></button>
+              <button data-v="ok">正常 <em id="museFcOK"></em></button>
+              <button data-v="needs_reauth">待授权 <em id="museFcReauth"></em></button>
+              <button data-v="offline">离线 <em id="museFcOffline"></em></button>
+            </div>
+            <div class="bar-right">
+              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="museQ" type="search" placeholder="搜索成员 / 标签 / 错误"></label>
+              <label class="switch" data-tip="每 15 秒自动刷新"><input type="checkbox" id="museAutoRefresh"><span></span>自动</label>
+              <button class="btn btn-outline btn-sm" id="museRefresh"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
+              <button class="btn btn-outline btn-sm" id="museKeepaliveAll"><svg class="icon"><use href="#i-zap"/></svg>全部保活</button>
+              <button class="btn btn-primary btn-sm" id="museAuthorize"><svg class="icon"><use href="#i-key"/></svg>授权账号</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="museTable">
+              <thead><tr><th>成员</th><th>账号</th><th>授权状态</th><th>会话到期</th><th>VM</th><th>上次保活</th><th>上次唤醒</th><th>自动唤醒</th><th class="th-right">操作</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="hint" id="museStatus"><svg class="icon xs"><use href="#i-info"/></svg><span>尚未运行</span></p>
+        </div>
+        <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg>授权后只调用 muse.ai 的 /api/session 与 /api/hatch/vm/wake：按配置周期续期 Cookie、保持沙盒 VM 热备，成员离线时自动唤醒。不会读取聊天内容，也不会代发消息。唤醒成功但节点未上线时，检查沙盒里的 Hatch hook 是否仍在跑 relay-watch.sh。</p>
       </section>
 
       <!-- ---------- 消息线程 ---------- -->
@@ -830,6 +867,28 @@
     <div class="modal-foot">
       <button type="button" class="btn btn-ghost" data-close>关闭</button>
       <button type="submit" class="btn btn-primary" id="rotBtn" value="go"><svg class="icon"><use href="#i-key"/></svg>签发</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Muse authorization dialog ============ -->
+<dialog id="museDlg" class="modal" aria-labelledby="museDlgTitle">
+  <form method="dialog" id="museForm">
+    <div class="modal-head">
+      <svg class="icon dlg-ic" style="color: var(--muted)"><use href="#i-zap"/></svg>
+      <div><h2 id="museDlgTitle">授权 Muse 账号</h2><p id="museDlgDesc" class="muted xs">粘贴 muse.ai 登录态 Cookie，授权后台续期与唤醒。</p></div>
+    </div>
+    <label class="field">成员<select id="musePeer" required></select></label>
+    <label class="field">账号标签<input id="museLabel" maxlength="200" placeholder="如登录邮箱" autocomplete="off"></label>
+    <label class="field">Muse Cookie<textarea id="museCookies" rows="4" placeholder="hatch_sess=...; hatch_vml=..." required></textarea></label>
+    <label class="switch"><input type="checkbox" id="museAutoWake" checked><span></span>离线自动唤醒</label>
+    <label class="switch"><input type="checkbox" id="museEnabled" checked><span></span>启用后台保活</label>
+    <div class="alert alert-info"><svg class="icon"><use href="#i-info"/></svg><span>必要 Cookie：<b>hatch_sess</b> + <b>hatch_vml</b>。从已登录 muse.ai 的浏览器 F12 → Network → 任意请求 → Request Headers 复制 <code>cookie:</code> 整行。Cookie 等同账号凭证，服务端 AES-GCM 加密、永不回显。</span></div>
+    <div class="alert alert-warn"><svg class="icon"><use href="#i-alert"/></svg><span>授权请求从 relay 服务器出口发出；403/风控需配置 <code>muse_proxy_url</code>。同一 Muse 账号同一时间只应由一个保活方管理（不要和 muse2api 同时保活）。</span></div>
+    <p id="museDlgErr" class="alert alert-bad" hidden></p>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <button type="submit" class="btn btn-primary" id="museDlgSubmit"><svg class="icon"><use href="#i-key"/></svg>授权</button>
     </div>
   </form>
 </dialog>
