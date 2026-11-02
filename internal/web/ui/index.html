@@ -880,10 +880,10 @@
     </div>
     <label class="field">成员<select id="musePeer" required></select></label>
     <label class="field">账号标签<input id="museLabel" maxlength="200" placeholder="如登录邮箱" autocomplete="off"></label>
-    <label class="field">Muse Cookie<textarea id="museCookies" rows="4" placeholder="hatch_sess=...; hatch_vml=..." required></textarea></label>
+    <label class="field">Muse Cookie<textarea id="museCookies" rows="4" placeholder="hatch_sess=..." required></textarea></label>
     <label class="switch"><input type="checkbox" id="museAutoWake" checked><span></span>离线自动唤醒</label>
     <label class="switch"><input type="checkbox" id="museEnabled" checked><span></span>启用后台保活</label>
-    <div class="alert alert-info"><svg class="icon"><use href="#i-info"/></svg><span>必要 Cookie：<b>hatch_sess</b> + <b>hatch_vml</b>。从已登录 muse.ai 的浏览器 F12 → Network → 任意请求 → Request Headers 复制 <code>cookie:</code> 整行。Cookie 等同账号凭证，服务端 AES-GCM 加密、永不回显。</span></div>
+    <div class="alert alert-info"><svg class="icon"><use href="#i-info"/></svg><span>必需 Cookie：<b>hatch_sess</b>（登录态）。<b>hatch_vml</b> 可选——浏览器里有就一并带上，没有也能授权，服务端会在 <code>/api/session</code> 续签。从已登录 muse.ai 的浏览器 F12 → Network 筛选 <code>api</code> 请求 → Request Headers 复制 <code>cookie:</code> 整行。Cookie 等同账号凭证，服务端 AES-GCM 加密、永不回显。</span></div>
     <div class="alert alert-warn"><svg class="icon"><use href="#i-alert"/></svg><span>授权请求从 relay 服务器出口发出；403/风控需配置 <code>muse_proxy_url</code>。同一 Muse 账号同一时间只应由一个保活方管理（不要和 muse2api 同时保活）。</span></div>
     <p id="museDlgErr" class="alert alert-bad" hidden></p>
     <div class="modal-foot">

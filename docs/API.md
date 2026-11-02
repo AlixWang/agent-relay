@@ -136,8 +136,9 @@ GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last
 ### Muse 账号授权与保活（DESIGN §4.9）
 
 - `cookies` 接受浏览器 `Cookie:` 头字符串（`hatch_sess=...; hatch_vml=...`）或 JSON 对象；
-  `hatch_sess` 与 `hatch_vml` 必需，其余（如 `hatch_gw`）一并加密保存。响应只返回
-  `cookie_names` / `essential_ok` / `cookies_exp` / `expires_at`，**不返回任何 Cookie 值或密文**。
+  仅 `hatch_sess` 必需（`hatch_vml` 可由 `/api/session` 续签，授权时没有也可），其余（如 `hatch_gw`）
+  一并加密保存。响应只返回 `cookie_names` / `essential_ok` / `cookies_exp` / `expires_at`，
+  **不返回任何 Cookie 值或密文**。
 - 授权/重授权会先调 `GET /api/session` 探测：401 → 400，不落库（重授权时旧 Cookie 保留）；
   403/429/5xx/超时 → 仍保存但标记 `unverified` 并返回 `warning`，下一轮保活重试。
 - `auth_state`：`ok`（最近一次 session 确认）、`needs_reauth`（401，保留旧 Cookie，后台暂停）、

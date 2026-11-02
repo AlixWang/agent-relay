@@ -42,7 +42,10 @@ func museError(w http.ResponseWriter, err error) {
 	case errors.Is(err, muse.ErrAlreadyAuthorized):
 		writeErr(w, http.StatusConflict, "peer already has a muse account")
 	case errors.Is(err, muse.ErrMissingCookies):
-		writeErr(w, http.StatusBadRequest, "missing essential cookies (hatch_sess, hatch_vml)")
+		// Authorize/Reauthorize wrap the sentinel with the names that were
+		// actually absent; keep that detail so the dialog does not claim both
+		// cookies are missing when only one is.
+		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, muse.ErrBadCookies):
 		writeErr(w, http.StatusBadRequest, "invalid cookie string")
 	case errors.Is(err, muse.ErrUnauthorized):

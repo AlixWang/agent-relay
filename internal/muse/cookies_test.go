@@ -26,7 +26,14 @@ func TestParseCookieInput(t *testing.T) {
 
 	if one, err := parseCookieInput("hatch_sess=s"); err != nil {
 		t.Fatalf("parse one: %v", err)
-	} else if missing := missingEssential(one); len(missing) != 1 || missing[0] != "hatch_vml" {
+	} else if missing := missingEssential(one); len(missing) != 0 {
+		t.Fatalf("session-only cookie must be accepted: %v", missing)
+	} else if exp := minEssentialExpiry(map[string]int64{"hatch_sess": 5000, "hatch_vml": 3000}); exp != 3000 {
+		t.Fatalf("hatch_vml expiry must still be tracked: %d", exp)
+	}
+	if noSession, err := parseCookieInput("hatch_vml=v"); err != nil {
+		t.Fatalf("parse vml only: %v", err)
+	} else if missing := missingEssential(noSession); len(missing) != 1 || missing[0] != "hatch_sess" {
 		t.Fatalf("missing detection: %v", missing)
 	}
 	if _, err := parseCookieInput("bad name=x"); err == nil {

@@ -243,8 +243,10 @@ func TestAuthorizeRenewsWakesAndEncrypts(t *testing.T) {
 
 func TestAuthorizeRejectsMissingCookiesAndUnknownPeer(t *testing.T) {
 	env := newTestEnv(t, true)
-	if _, err := env.svc.Authorize(context.Background(), "alice", "", "hatch_sess=x", true, true); !errors.Is(err, ErrMissingCookies) {
+	if _, err := env.svc.Authorize(context.Background(), "alice", "", "hatch_vml=x", true, true); !errors.Is(err, ErrMissingCookies) {
 		t.Fatalf("missing: %v", err)
+	} else if msg := err.Error(); !strings.Contains(msg, "hatch_sess") || strings.Contains(msg, "hatch_vml") {
+		t.Fatalf("missing-cookie error should name only hatch_sess: %q", msg)
 	}
 	if _, err := env.svc.Authorize(context.Background(), "nobody", "", "hatch_sess=x; hatch_vml=y", true, true); !errors.Is(err, ErrUnknownPeer) {
 		t.Fatalf("unknown peer: %v", err)
@@ -254,6 +256,20 @@ func TestAuthorizeRejectsMissingCookiesAndUnknownPeer(t *testing.T) {
 	}
 	if list, _ := env.svc.List(); len(list) != 0 {
 		t.Fatalf("failed authorization must not persist: %+v", list)
+	}
+}
+
+func TestAuthorizeAcceptsSessionOnlyCookie(t *testing.T) {
+	env := newTestEnv(t, true)
+	a, err := env.svc.Authorize(context.Background(), "alice", "", "hatch_sess=only-sess", true, true)
+	if err != nil {
+		t.Fatalf("session-only cookie rejected: %v", err)
+	}
+	if !a.EssentialOK || a.AuthState != "ok" || a.VMState != "RUNNING" {
+		t.Fatalf("account: %+v", a)
+	}
+	if !contains(a.CookieNames, "hatch_vml") {
+		t.Fatalf("session renewal should have stored hatch_vml: %+v", a.CookieNames)
 	}
 }
 

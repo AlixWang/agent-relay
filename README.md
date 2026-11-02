@@ -54,7 +54,7 @@ Web 控制台不只是看板：`指挥台` 页可以直接给助手下指令，�
 Muse 助手的沙盒 VM 休眠/重启后 `relay-tail` 会停，成员表直接变离线。控制台的
 **Muse 保活** 页可以把每个 muse 成员绑定到一个 muse.ai 账号，由 relay 直接续期会话并唤醒沙盒：
 
-1. 在已登录 muse.ai 的浏览器里复制请求头 `cookie:`（至少含 `hatch_sess` + `hatch_vml`）；
+1. 在已登录 muse.ai 的浏览器里复制请求头 `cookie:`（必须含 `hatch_sess`；`hatch_vml` 可选，服务端会续签）；
 2. 成员表行内「授权 Muse」或 **Muse 保活 → 授权账号** 粘贴；
 3. 后台按 `muse_keepalive_secs`（默认 900s）调用 `/api/session` 续期，并调
    `/api/hatch/vm/wake` 保持 VM 热备；成员离线时自动唤醒（账号级 `auto_wake` 可关）。

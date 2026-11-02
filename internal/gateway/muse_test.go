@@ -207,10 +207,12 @@ func TestMuseAuthorizationValidation(t *testing.T) {
 	f.registerPeer(t, "alice", "muse")
 	admin := f.adminLogin(t)
 
-	if code, _ := f.doAuth(t, "POST", "/admin/muse/accounts", map[string]any{
-		"peer_id": "alice", "cookies": "hatch_sess=x",
+	if code, out := f.doAuth(t, "POST", "/admin/muse/accounts", map[string]any{
+		"peer_id": "alice", "cookies": "hatch_vml=x",
 	}, admin); code != 400 {
 		t.Fatalf("missing cookie: %d", code)
+	} else if msg, _ := out["error"].(string); !strings.Contains(msg, "hatch_sess") || strings.Contains(msg, "hatch_vml") {
+		t.Fatalf("missing-cookie message should name only hatch_sess: %q", msg)
 	}
 	if code, _ := f.doAuth(t, "POST", "/admin/muse/accounts", map[string]any{
 		"peer_id": "alice", "cookies": "not-a-cookie",
@@ -223,9 +225,9 @@ func TestMuseAuthorizationValidation(t *testing.T) {
 		t.Fatalf("unknown peer: %d", code)
 	}
 	if code, _ := f.doAuth(t, "POST", "/admin/muse/accounts", map[string]any{
-		"peer_id": "alice", "cookies": "hatch_sess=x; hatch_vml=y",
+		"peer_id": "alice", "cookies": "hatch_sess=x",
 	}, admin); code != 200 {
-		t.Fatalf("first authorize: %d", code)
+		t.Fatalf("session-only authorize: %d", code)
 	}
 	if code, _ := f.doAuth(t, "POST", "/admin/muse/accounts", map[string]any{
 		"peer_id": "alice", "cookies": "hatch_sess=x; hatch_vml=y",

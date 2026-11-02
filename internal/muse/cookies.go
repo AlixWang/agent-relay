@@ -9,11 +9,15 @@ import (
 	"time"
 )
 
-// Muse's two essential cookies (muse2api's ESSENTIAL_COOKIES): hatch_sess is
-// the login session, hatch_vml is the short-lived VM credential that must be
-// renewed roughly every 48h. hatch_gw and the device cookie are carried along
-// but not required.
-var essentialNames = []string{"hatch_sess", "hatch_vml"}
+// Only hatch_sess is required at import time: it is the login session. The
+// short-lived hatch_vml VM credential is issued/rotated by GET /api/session and
+// is absent from a fresh browser session, so requiring it would reject a valid
+// cookie (muse2api's ESSENTIAL_COOKIES is likewise hatch_sess only).
+var essentialNames = []string{"hatch_sess"}
+
+// expiryNames feed Account.ExpiresAt. hatch_vml is optional at import but is
+// the tighter deadline once /api/session has issued it.
+var expiryNames = []string{"hatch_sess", "hatch_vml"}
 
 const (
 	maxCookieInput = 32 << 10
@@ -174,7 +178,7 @@ func mergeSetCookies(cookies map[string]string, exp map[string]int64, set []*htt
 
 func minEssentialExpiry(exp map[string]int64) int64 {
 	var min int64
-	for _, name := range essentialNames {
+	for _, name := range expiryNames {
 		v := exp[name]
 		if v > 0 && (min == 0 || v < min) {
 			min = v

@@ -202,7 +202,8 @@ needs two things the relay cannot infer: a valid Muse session cookie and the
 **current** `vm_id` (the old id stops working after a sandbox restart).
 
 - **Authorization:** an operator binds one muse.ai account to one relay peer by
-  pasting the browser `Cookie` header (`hatch_sess` + `hatch_vml` essential). The
+  pasting the browser `Cookie` header (`hatch_sess` is the only required cookie;
+  `hatch_vml` is optional and issued by `/api/session`). The
   cookie jar is AES-GCM encrypted at rest with `data_dir/muse-cookie.key` (0600)
   and is never returned by the admin API. Deleting the binding deletes the
   ciphertext; deleting/pruning a peer cascades.

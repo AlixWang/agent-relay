@@ -43,7 +43,7 @@
 ## Muse 保活（可选）
 
 控制台的「Muse 保活」页为每个 muse 成员绑定一个 muse.ai 账号（粘贴
-`hatch_sess` + `hatch_vml`）。服务端只调用两个端点：
+`hatch_sess` 登录态即可，`hatch_vml` 可选）。服务端只调用两个端点：
 
 - `GET /api/session`：续签 `hatch_vml` / `hatch_sess`，返回当前 `vm_id` / `vm_state`；
 - `POST /api/hatch/vm/wake`：唤醒沙盒 VM；HTTP 200 只算“请求已接受”，

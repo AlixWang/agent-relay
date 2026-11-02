@@ -643,7 +643,7 @@ func (s *Service) openAccount(a *store.MuseAccount) (map[string]string, map[stri
 		return nil, nil, fmt.Errorf("invalid cookie JSON: %w", err)
 	}
 	if missing := missingEssential(cookies); len(missing) > 0 {
-		return cookies, parseCookiesExp(a.CookiesExp), ErrMissingCookies
+		return cookies, parseCookiesExp(a.CookiesExp), fmt.Errorf("%w: %s", ErrMissingCookies, strings.Join(missing, ", "))
 	}
 	return cookies, parseCookiesExp(a.CookiesExp), nil
 }

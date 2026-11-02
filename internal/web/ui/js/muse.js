@@ -415,7 +415,7 @@ async function submitMuseForm(e) {
   const peerID = $('musePeer')?.value || '';
   const cookies = ($('museCookies')?.value || '').trim();
   if (!peerID) return showDlgError('请选择成员');
-  if (!cookies) return showDlgError('请粘贴 Muse Cookie（至少 hatch_sess + hatch_vml）');
+  if (!cookies) return showDlgError('请粘贴 Muse Cookie（至少含 hatch_sess）');
 
   const btn = $('museDlgSubmit');
   const old = btn ? btn.innerHTML : '';
