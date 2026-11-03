@@ -436,14 +436,22 @@
                         <div class="cmd-msg-author">
                           <div class="cmd-avatar-inline" x-html="renderAvatar(m.from, 'xs')"></div>
                           <b x-text="m.from"></b>
-                          <span class="badge xs" :class="m.kind === 'task' ? 'brand' : 'info'" x-text="m.kind"></span>
+                          <span class="badge xs" :class="m.kind === 'task' ? 'brand' : (m.kind === 'result' ? 'ok' : 'info')" x-text="m.kind"></span>
                         </div>
                         <div class="cmd-msg-info">
                           <span class="mono xs" x-show="m.seq" x-text="'#' + m.seq"></span>
                           <span class="muted xs" x-text="formatTime(m.time)"></span>
+                          <button type="button" class="cmd-msg-copy" @click="copyMessage(m)" title="复制消息内容" aria-label="复制消息内容">
+                            <svg class="icon xs"><use href="#i-copy"/></svg>
+                          </button>
                         </div>
                       </div>
-                      <div class="cmd-msg-body" x-text="m.payload"></div>
+                      <!-- m.payload is untrusted: renderMessage() escapes every text run before adding its own markup. -->
+                      <div class="cmd-msg-body" :class="{ 'is-collapsed': needsCollapse(m) && !isExpanded(m) }" x-html="renderMessage(m.payload)"></div>
+                      <button type="button" class="cmd-msg-expand" x-show="needsCollapse(m)" @click="toggleMessage(m)" :aria-expanded="isExpanded(m) ? 'true' : 'false'">
+                        <span x-text="isExpanded(m) ? '收起' : '展开全文'"></span>
+                        <svg class="icon xs" :class="isExpanded(m) ? 'rot-180' : ''"><use href="#i-chev-d"/></svg>
+                      </button>
                       <!-- Read receipts: the badge summarises, a click opens the names.
                            Who counts: members who were already in the room when the
                            message was sent (start_seq), minus the sender. A private

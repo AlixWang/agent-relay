@@ -311,4 +311,14 @@ stream.scrollTop = stream.scrollHeight;
 page.onStreamScroll();
 assert(page.newBelow === false, 'scrolling back to the bottom by hand clears the chip');
 
+// 11. Long messages collapse by default but can be expanded per message.
+const longMsg = { seq: 999, payload: 'x'.repeat(1200) };
+assert(page.needsCollapse(longMsg) === true, 'a long report must start collapsed');
+assert(page.isExpanded(longMsg) === false, 'a long report must not start expanded');
+page.toggleMessage(longMsg);
+assert(page.isExpanded(longMsg) === true, 'clicking 展开全文 must expand that message');
+page.toggleMessage(longMsg);
+assert(page.isExpanded(longMsg) === false, 'clicking 收起 must collapse it again');
+assert(page.renderMessage('- fe: ok').includes('msg-li-label'), 'the command state must use the safe renderer');
+
 console.log('command state: all checks passed');

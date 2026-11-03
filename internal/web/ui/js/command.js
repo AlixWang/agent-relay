@@ -1,6 +1,7 @@
 // Command & Group Chat Console module (Alpine.js component)
 import { api } from './api.js';
-import { $, esc, icon, ago, fmtTime, avatar, toast, confirmAction, setupDialog } from './utils.js';
+import { $, esc, icon, ago, fmtTime, avatar, toast, confirmAction, setupDialog, copyToClipboard } from './utils.js';
+import { renderMessage as renderMessageHTML, messageIsLong } from './message.js';
 import { currentRoute, onRoute } from './router.js';
 import { refreshStats } from './auth.js';
 
@@ -76,6 +77,11 @@ function createCommandState() {
     // dissolved-rooms group in the session list is expanded.
     ackOpen: null,
     showArchived: false,
+
+    // Long-message reading state, keyed by message seq/id. Collapsed by
+    // default (see needsCollapse) so one giant report does not push the rest
+    // of the conversation off-screen.
+    expandedMsgs: {},
 
     // Mobile drawer for the session list (<=900px): toggled by the menu
     // button in .cmd-chat-header, closed on session select.
@@ -703,6 +709,33 @@ function createCommandState() {
 
     renderAvatar(id, cls = '') {
       return avatar(id, cls);
+    },
+
+    // ---- long-message reading ------------------------------------------
+    messageKey(m) {
+      return String((m && (m.seq ?? m.id)) ?? '');
+    },
+
+    needsCollapse(m) {
+      return messageIsLong(m && m.payload);
+    },
+
+    isExpanded(m) {
+      return !!this.expandedMsgs[this.messageKey(m)];
+    },
+
+    toggleMessage(m) {
+      const key = this.messageKey(m);
+      this.expandedMsgs[key] = !this.expandedMsgs[key];
+    },
+
+    renderMessage(payload) {
+      return renderMessageHTML(payload);
+    },
+
+    async copyMessage(m) {
+      const ok = await copyToClipboard(m && m.payload);
+      toast(ok ? '已复制消息内容' : '复制失败', ok ? 'ok' : 'bad');
     },
   };
 }

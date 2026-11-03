@@ -118,6 +118,7 @@ func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
 		"/js/tokens.js",
 		"/js/system.js",
 		"/js/command.js",
+		"/js/message.js",
 		"/",
 	} {
 		code, body := getRaw(t, f, asset, cookie)
@@ -242,6 +243,45 @@ func TestConsoleMusePanelWiring(t *testing.T) {
 	_, app := getRaw(t, f, "/app.js", cookie)
 	if !strings.Contains(app, "onRoute('muse'") {
 		t.Fatal("app.js does not wire the muse route")
+	}
+}
+
+// Long agent reports used to render as one pre-wrap wall of text. The console
+// now uses the safe message renderer plus a collapse/expand affordance; losing
+// either half silently brings the bad reading experience back.
+func TestConsoleCommandMessageCardWiring(t *testing.T) {
+	f := newFixture(t)
+	f.mux = f.srv.Handler(web.Handler())
+	cookie := f.adminLogin(t)
+
+	code, page := getRaw(t, f, "/", cookie)
+	if code != 200 {
+		t.Fatalf("console page: %d", code)
+	}
+	for _, need := range []string{
+		`x-html="renderMessage(m.payload)"`,
+		`class="cmd-msg-expand"`,
+		`class="cmd-msg-copy"`,
+		`needsCollapse(m)`,
+	} {
+		if !strings.Contains(page, need) {
+			t.Fatalf("command message card lost %s", need)
+		}
+	}
+
+	code, js := getRaw(t, f, "/js/message.js", cookie)
+	if code != 200 {
+		t.Fatalf("message renderer: %d", code)
+	}
+	for _, need := range []string{
+		"export function renderMessage",
+		"export function messageIsLong",
+		"msg-summary",
+		"msg-li-label",
+	} {
+		if !strings.Contains(js, need) {
+			t.Fatalf("message renderer lost %q", need)
+		}
 	}
 }
 
