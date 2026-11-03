@@ -1,6 +1,7 @@
 // Threads and messages tab module
 import { api } from './api.js';
 import { $, esc, icon, ago, fmtTime, avatar, toast, confirmAction, renderPager, copyToClipboard, setupDialog, msgPayloadMap } from './utils.js';
+import { renderMessage } from './message.js';
 import { refreshStats } from './auth.js';
 
 export const threadState = {
@@ -163,20 +164,23 @@ export async function refreshSearch() {
       const isPending = m.approval_state === 'pending';
       return `<div class="msg ${isPending ? 'held' : ''}">
         <div class="msg-head">
-          <span class="num">#${m.seq}</span>
-          ${avatar(m.sender, 'sm')}
-          <b>${esc(m.sender)}</b>
-          <span>→</span>
-          ${avatar(m.recipient, 'sm')}
-          <b>${esc(m.recipient)}</b>
-          <span class="badge mono xs">${esc(m.kind)}</span>
-          ${isPending ? `<span class="badge warn">${icon('shield', 'xs')}待审批</span>` : ''}
-          <span class="sp"></span>
-          <span class="muted xs" title="${fmtTime(m.created_at)}">${esc(ago(m.created_at))}</span>
-          <button class="btn btn-ghost btn-xs" data-copy-msg="${m.seq}" title="复制消息内容">${icon('copy', 'xs')}复制</button>
-          <button class="btn btn-ghost btn-xs" data-view-thread="${esc(m.thread)}">${icon('eye', 'xs')}查看线程</button>
+          <div class="msg-head-main">
+            <span class="num">#${m.seq}</span>
+            ${avatar(m.sender, 'sm')}
+            <b>${esc(m.sender)}</b>
+            <span>→</span>
+            ${avatar(m.recipient, 'sm')}
+            <b>${esc(m.recipient)}</b>
+            <span class="badge mono xs">${esc(m.kind)}</span>
+            ${isPending ? `<span class="badge warn">${icon('shield', 'xs')}待审批</span>` : ''}
+          </div>
+          <div class="msg-head-meta">
+            <span class="muted xs" title="${fmtTime(m.created_at)}">${esc(ago(m.created_at))}</span>
+            <button class="btn btn-ghost btn-xs" data-copy-msg="${m.seq}" title="复制消息内容">${icon('copy', 'xs')}复制</button>
+            <button class="btn btn-ghost btn-xs" data-view-thread="${esc(m.thread)}">${icon('eye', 'xs')}查看线程</button>
+          </div>
         </div>
-        <div class="msg-body clamp">${esc(m.payload)}</div>
+        <div class="msg-body"><div class="rich-text is-preview">${renderMessage(m.payload)}</div></div>
         <div class="msg-foot">
           <span>thread: <code>${esc(m.thread)}</code></span>
           <span>id: <code>${esc(m.id)}</code></span>
@@ -295,7 +299,7 @@ export async function viewThread(root) {
   if (expMd) {
     expMd.onclick = () => {
       const expDropdown = $('expDropdown'); if (expDropdown) expDropdown.open = false;
-      window.location = '/admin/messages/export?thread=' + encodeURIComponent(root) + '&format=' + format;
+      window.location = '/admin/messages/export?thread=' + encodeURIComponent(root) + '&format=markdown';
     };
   }
   const expJsonl = $('expJsonl');
@@ -322,20 +326,23 @@ export async function viewThread(root) {
       const isPending = m.approval_state === 'pending';
       return `<div class="msg ${isPending ? 'held' : ''}">
         <div class="msg-head">
-          <span class="num">#${m.seq}</span>
-          ${avatar(m.sender, 'sm')}
-          <b>${esc(m.sender)}</b>
-          <span>→</span>
-          ${avatar(m.recipient, 'sm')}
-          <b>${esc(m.recipient)}</b>
-          <span class="badge mono xs">${esc(m.kind)}</span>
-          <span class="sp"></span>
-          <span class="muted xs" title="${fmtTime(m.created_at)}">${esc(ago(m.created_at))}</span>
-          <button class="btn btn-ghost btn-xs" data-copy-msg="${m.seq}" title="复制消息内容">${icon('copy', 'xs')}复制</button>
+          <div class="msg-head-main">
+            <span class="num">#${m.seq}</span>
+            ${avatar(m.sender, 'sm')}
+            <b>${esc(m.sender)}</b>
+            <span>→</span>
+            ${avatar(m.recipient, 'sm')}
+            <b>${esc(m.recipient)}</b>
+            <span class="badge mono xs">${esc(m.kind)}</span>
+          </div>
+          <div class="msg-head-meta">
+            <span class="muted xs" title="${fmtTime(m.created_at)}">${esc(ago(m.created_at))}</span>
+            <button class="btn btn-ghost btn-xs" data-copy-msg="${m.seq}" title="复制消息内容">${icon('copy', 'xs')}复制</button>
+          </div>
         </div>
         ${renderHandshakeBadge(m)}
         ${renderHandshakeFields(m)}
-        <div class="msg-body">${esc(m.payload)}</div>
+        <div class="msg-body"><div class="rich-text">${renderMessage(m.payload)}</div></div>
         <div class="msg-foot">
           <span>id: <code>${esc(m.id)}</code></span>
           <span>ack: ${m.acked_count || 0}</span>

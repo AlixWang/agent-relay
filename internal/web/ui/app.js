@@ -14,6 +14,18 @@ import { initTokens, refreshTokens } from './js/tokens.js';
 import { initSystem, refreshSystem } from './js/system.js';
 import { commandApp, refreshCommand, stopCommand } from './js/command.js';
 
+// The operations console is a fixed app shell: page-level pinch zoom shrinks
+// the visual viewport and clips panes (the command stream, the composer).
+// Android honours the viewport meta; iOS Safari ignores `user-scalable=no`
+// since iOS 10, so block its two-finger gesture explicitly on touch devices.
+// Desktop trackpad gestures and browser zoom shortcuts are untouched.
+function initTouchGuards() {
+  if (!window.matchMedia || !window.matchMedia('(pointer: coarse)').matches) return;
+  for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+    document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+  }
+}
+
 // Register Alpine.js components
 Alpine.data('commandApp', commandApp);
 
@@ -28,6 +40,7 @@ onRoute('tokens', refreshTokens);
 onRoute('system', refreshSystem);
 
 // Initialize application modules
+initTouchGuards();
 initTheme();
 initNavigation();
 initAuth();

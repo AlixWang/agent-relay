@@ -1,4 +1,4 @@
-.PHONY: build build-prod test test-ui-js test-coverage clean setup fmt lint run help
+.PHONY: build build-prod test test-ui-js test-ui-mobile test-coverage clean setup fmt lint run help
 
 # Build the project
 build:
@@ -14,6 +14,12 @@ test: test-ui-js
 test-ui-js:
 	@command -v node >/dev/null || (echo "Error: node not installed (needed for test-ui-js)" && exit 1)
 	@for f in internal/web/ui/_*.test.mjs; do echo "node $$f"; node "$$f" || exit 1; done
+
+# Browser layout regression checks for the mobile console. First run needs
+# `cd tests/mobile && npm ci && npx playwright install chromium`.
+test-ui-mobile:
+	@command -v node >/dev/null || (echo "Error: node not installed (needed for test-ui-mobile)" && exit 1)
+	cd tests/mobile && npm ci --no-audit --no-fund && npx playwright test
 
 # Run tests with coverage
 test-coverage:
@@ -51,6 +57,7 @@ help:
 	@echo "  build-prod     - Build optimized binary for production"
 	@echo "  test           - Run tests"
 	@echo "  test-ui-js     - Run console UI update panel logic tests"
+	@echo "  test-ui-mobile - Run Playwright mobile layout e2e tests"
 	@echo "  test-coverage  - Run tests with coverage"
 	@echo "  clean          - Clean build artifacts"
 	@echo "  fmt            - Format code"

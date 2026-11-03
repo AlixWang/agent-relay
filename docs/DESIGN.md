@@ -949,7 +949,7 @@ with `?v=<tag>` cache busting.
 ### 9.3 Messages & Threads
 
 - Thread list (by `root_id`) with message counts, participant list, fuse state, and approval holds.
-- Message inspector: payload, seq, delivery/ack state per recipient.
+- Message inspector: payload rendered as safe Markdown (headings, lists, code blocks, pipe tables) in the command stream, thread drawer and search results, plus seq and delivery/ack state per recipient. The stored payload and copy/export stay raw text.
 - Actions: approve/reject held messages, trip/reset a fuse manually, export a thread as Markdown/JSONL.
 
 ### 9.4 Audit & Tokens

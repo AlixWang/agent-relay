@@ -1,6 +1,8 @@
 /* agent-relay console — Linear-style, dense, one accent. Pure CSS. */
 
-html { scrollbar-gutter: stable; }
+/* The console is an app shell: allow panning/scrolling but never browser pinch
+   zoom, which shrinks the visual viewport and clips panes on phones. */
+html { scrollbar-gutter: stable; touch-action: pan-x pan-y; }
 
 :root, [data-theme="dark"] {
   /* Typography tokens */
@@ -108,6 +110,7 @@ body {
   font: var(--fs-md)/1.5 var(--font);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  touch-action: pan-x pan-y;
 }
 h1, h2, h3 { margin: 0; letter-spacing: -0.02em; }
 h1 { font-size: var(--fs-lg); font-weight: var(--fw-strong); }
@@ -504,9 +507,11 @@ pre.log[data-state="bad"] { border-color: color-mix(in srgb, var(--bad) 45%, tra
 .msg-list .msg { border: 0; border-bottom: 1px solid var(--border-soft); border-radius: 0; }
 .msg-list .msg:last-child { border-bottom: 0; }
 .msg { padding: 14px 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); display: flex; flex-direction: column; gap: var(--s-2); }
-.msg-head { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; font-size: var(--fs-xs); color: var(--muted); }
+.msg-head { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; row-gap: 6px; font-size: var(--fs-xs); color: var(--muted); }
 .msg-head b { color: var(--fg); font-family: var(--mono); font-weight: 600; font-size: var(--fs-sm); }
-.msg-head .sp { flex: 1; }
+.msg-head-main { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; min-width: 0; flex: 1 1 auto; }
+.msg-head-main b { white-space: nowrap; }
+.msg-head-meta { display: flex; align-items: center; gap: var(--s-2); margin-left: auto; flex: none; }
 .msg-body { white-space: pre-wrap; word-break: break-word; font-size: var(--fs-sm); color: var(--fg-2); line-height: 1.6; }
 .msg-body.clamp { display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .msg.held { border-color: color-mix(in srgb, var(--warn) 55%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 10%, transparent); }
@@ -576,206 +581,6 @@ dialog::backdrop { background: rgb(0 0 0 / .55); backdrop-filter: blur(2px); }
 .toast button { border: 0; background: none; color: var(--muted-2); cursor: pointer; padding: 0; }
 .toast.leaving { opacity: 0; transform: translateX(16px); }
 @starting-style { .toast:popover-open { opacity: 0; } }
-
-/* ---------- responsive ---------- */
-@media (max-width: 1100px) {
-  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .grid-2 { grid-template-columns: 1fr; }
-}
-@media (max-width: 900px) {
-  .only-mobile { display: inline-grid !important; }
-  .sidebar { position: fixed; left: 0; top: 0; z-index: 60; transform: translateX(-100%); transition: transform .2s ease; box-shadow: var(--shadow); }
-  .shell.nav-open .sidebar { transform: none; }
-  .shell.nav-open .sb-scrim { display: block; position: fixed; inset: 0; z-index: 55; background: rgb(0 0 0 / .5); }
-  .topbar { padding: 10px 14px; }
-  main { padding: var(--s-4) 14px 40px; }
-  .search input { width: 100%; }
-  .bar-right, .bar-left { width: 100%; margin-left: 0; }
-  .bar-right .search, .bar-left .search { flex: 1; }
-  .type-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  #onlinePill { display: none; }
-  /* ---------- command console: sessions become a drawer (P0) ---------- */
-  body.cmd-active { overflow-x: hidden; overflow-y: auto; }
-  .cmd-layout { position: relative; }
-  .cmd-sessions {
-    position: absolute; left: 0; top: 0; bottom: 0; z-index: 40;
-    width: min(300px, 85vw); min-width: 0; max-width: none;
-    transform: translateX(-102%); transition: transform .2s ease;
-    box-shadow: var(--shadow);
-  }
-  .cmd-layout.sessions-open .cmd-sessions { transform: none; }
-  .cmd-layout.sessions-open .cmd-scrim {
-    display: block; position: absolute; inset: 0; z-index: 30;
-    background: rgb(0 0 0 / .5);
-  }
-  .cmd-chat { min-width: 0; }
-  .cmd-chat-header { height: auto; min-height: 54px; padding: var(--s-2) 12px; gap: var(--s-2); flex-wrap: wrap; }
-  .cmd-chat-title { flex: 1; min-width: 0; }
-  .cmd-chat-title h2 { font-size: var(--fs-md); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .cmd-chat-title p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .cmd-chat-actions { flex-wrap: wrap; gap: var(--s-2); }
-  .cmd-stream { padding: 14px; }
-  .cmd-msg { max-width: min(92%, 760px); }
-  .cmd-dock { padding: var(--s-2) 12px; }
-  .cmd-composer-toolbar { flex-wrap: wrap; gap: var(--s-2); }
-  .cmd-kind-toggle { flex-wrap: wrap; max-width: 100%; }
-  .kind-opt { white-space: nowrap; }
-  .cmd-input-row { gap: var(--s-2); }
-  .cmd-input-row textarea { min-width: 0; }
-  .cmd-chips-bar { min-width: 0; flex-wrap: wrap; }
-  .cmd-chips-scroll { flex: 1; min-width: 0; }
-}
-@media (max-width: 560px) {
-  .stats { gap: var(--s-2); }
-  .stat { padding: var(--s-3); }
-  .form-row { flex-direction: column; align-items: stretch; }
-  .field { min-width: 0; }
-  .field-btn .btn { width: 100%; }
-  .seg { overflow-x: auto; max-width: 100%; }
-  .pager { justify-content: center; }
-  .drawer-head { flex-direction: column; align-items: stretch; gap: var(--s-3); }
-  .drawer-actions { justify-content: flex-start; }
-  /* ---------- touch targets & small text (P1) ---------- */
-  .btn-icon { width: 44px; height: 44px; }
-  .btn-icon.xs { width: 44px; height: 44px; }
-  .pager-nav button { min-width: 44px; height: 44px; }
-  .seg button { min-height: 44px; padding: var(--s-2) 12px; font-size: var(--fs-sm); }
-  .xs { font-size: var(--fs-xs); }
-  .badge { font-size: var(--fs-xs); }
-  .table thead th { font-size: var(--fs-xs); }
-  .cmd-group-label { font-size: var(--fs-xs); }
-  .kind-opt { padding: var(--s-2) 10px; font-size: var(--fs-xs); }
-  /* ---------- command console tightening (P0) ---------- */
-  .cmd-stream { padding: var(--s-3) 10px; gap: var(--s-3); }
-  .cmd-msg { max-width: min(94%, 760px); }
-  .cmd-dock { padding: var(--s-2) 10px; }
-  .cmd-input-row { gap: var(--s-2); }
-  .cmd-send-btn { min-height: 44px; padding: var(--s-2) 12px; }
-  .cmd-hint { display: none; }
-  /* ---------- long content (P2) ---------- */
-  .invite-box { flex-wrap: wrap; }
-  .kv { grid-template-columns: 1fr; }
-  .kv dt { padding-bottom: 2px; border-bottom: 0; }
-  .kv dd { text-align: left; padding-top: 0; }
-}
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; }
-}
-
-/* ========== Conversations ========== */
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: var(--s-4);
-}
-
-.card.clickable {
-  cursor: pointer;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-}
-
-.card.clickable:hover {
-  box-shadow: var(--shadow);
-}
-
-.stat-row {
-  display: flex;
-  gap: var(--s-6);
-  font-size: var(--fs-sm);
-  color: var(--fg-2);
-}
-
-.member-select {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  max-height: 300px;
-  overflow-y: auto;
-  padding: var(--s-2);
-  background: var(--panel);
-  border-radius: var(--r-md);
-}
-
-.checkbox-label {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  padding: 6px 8px;
-  border-radius: var(--r-md);
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-
-.checkbox-label:hover {
-  background: var(--hover);
-}
-
-.checkbox-label input[type="checkbox"] {
-  margin: 0;
-}
-
-.msg-item {
-  padding: var(--s-3);
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.msg-item:last-child {
-  border-bottom: none;
-}
-
-.msg-head {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  margin-bottom: 6px;
-  font-size: var(--fs-sm);
-}
-
-.msg-body {
-  padding-left: 36px;
-  color: var(--fg-2);
-  white-space: pre-wrap;
-  word-wrap: break-word;
-}
-
-.conv-input-area {
-  position: sticky;
-  bottom: 0;
-  padding: var(--s-4);
-  background: var(--panel);
-  border-top: 1px solid var(--border);
-}
-
-.conv-input-area textarea {
-  width: 100%;
-  min-height: 80px;
-  padding: var(--s-3);
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  color: var(--fg);
-  font-family: var(--font);
-  font-size: var(--fs-md);
-  resize: vertical;
-}
-
-.conv-input-area textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.conv-input-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 8px;
-  gap: var(--s-2);
-}
-
-#convMessagesContainer {
-  flex: 1;
-  overflow-y: auto;
-  max-height: calc(100vh - 300px);
-}
 
 /* =========================================================================
    Command & ChatOps Console Redesign (.cmd-*)
@@ -1108,7 +913,9 @@ main.full-bleed {
 .cmd-msg-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  row-gap: 4px;
   gap: var(--s-3);
   margin-bottom: 6px;
   font-size: var(--fs-xs);
@@ -1117,7 +924,20 @@ main.full-bleed {
 .cmd-msg-author {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--s-2);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* A sender id is one token: letting a flex child shrink it produced one
+   character per line ("b / o / b") in the 320px command view. */
+.cmd-msg-author b {
+  min-width: 0;
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cmd-avatar-inline .avatar {
@@ -1132,7 +952,12 @@ main.full-bleed {
   display: flex;
   align-items: center;
   gap: var(--s-2);
+  flex: 0 0 auto;
+  margin-left: auto;
+  white-space: nowrap;
 }
+
+.cmd-msg-info > span { white-space: nowrap; }
 
 .cmd-msg-copy {
   display: inline-flex;
@@ -1157,20 +982,21 @@ main.full-bleed {
   background: var(--hover);
 }
 
-.cmd-msg-body {
+/* Shared safe-Markdown typography. The command bubbles and the thread
+   inspector both use it, so agent reports look the same everywhere. */
+.rich-text {
   white-space: normal;
-  font-size: 0.9rem;
-  color: var(--fg);
+  color: inherit;
   font-family: var(--font);
   line-height: 1.75;
   overflow-wrap: anywhere;
 }
 
-.cmd-msg-body > :first-child { margin-top: 0; }
-.cmd-msg-body > :last-child { margin-bottom: 0; }
-.cmd-msg-body p { margin: 0 0 .6em; }
+.rich-text > :first-child { margin-top: 0; }
+.rich-text > :last-child { margin-bottom: 0; }
+.rich-text p { margin: 0 0 .6em; }
 
-.cmd-msg-body .msg-heading {
+.rich-text .msg-heading {
   margin: 1em 0 .4em;
   font-size: .95rem;
   line-height: 1.5;
@@ -1179,26 +1005,26 @@ main.full-bleed {
   letter-spacing: 0;
 }
 
-.cmd-msg-body .msg-section {
+.rich-text .msg-section {
   padding-left: 9px;
   border-left: 3px solid color-mix(in srgb, var(--accent) 62%, transparent);
 }
 
-.cmd-msg-body ul,
-.cmd-msg-body ol {
+.rich-text ul,
+.rich-text ol {
   margin: .3em 0 .65em;
   padding-left: 1.35em;
 }
 
-.cmd-msg-body li {
+.rich-text li {
   margin: .22em 0;
   padding-left: .1em;
 }
 
-.cmd-msg-body li::marker { color: var(--muted-2); }
-.cmd-msg-body .msg-li-label { color: var(--fg); font-weight: 650; }
+.rich-text li::marker { color: var(--muted-2); }
+.rich-text .msg-li-label { color: var(--fg); font-weight: 650; }
 
-.cmd-msg-body blockquote {
+.rich-text blockquote {
   margin: .6em 0;
   padding: .4em .8em;
   border-left: 3px solid var(--border);
@@ -1207,7 +1033,14 @@ main.full-bleed {
   color: var(--fg-2);
 }
 
-.cmd-msg-body code {
+.rich-text a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.rich-text a:hover { color: var(--accent-hover); }
+
+.rich-text code {
   padding: .08em .32em;
   border: 1px solid var(--border-soft);
   border-radius: var(--r-sm);
@@ -1216,7 +1049,7 @@ main.full-bleed {
   font-size: .86em;
 }
 
-.cmd-msg-body .msg-code {
+.rich-text .msg-code {
   margin: .65em 0;
   padding: 9px 11px;
   border: 1px solid var(--border);
@@ -1226,7 +1059,7 @@ main.full-bleed {
   line-height: 1.55;
 }
 
-.cmd-msg-body .msg-code code {
+.rich-text .msg-code code {
   padding: 0;
   border: 0;
   background: none;
@@ -1234,13 +1067,13 @@ main.full-bleed {
   font-size: .84em;
 }
 
-.cmd-msg-body hr {
+.rich-text hr {
   margin: .8em 0;
   border: 0;
   border-top: 1px solid var(--border);
 }
 
-.cmd-msg-body .msg-summary {
+.rich-text .msg-summary {
   margin: .7em 0 0;
   padding: 9px 12px;
   border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
@@ -1249,11 +1082,56 @@ main.full-bleed {
   color: var(--fg-2);
 }
 
-.cmd-msg-body .msg-summary-k {
+.rich-text .msg-summary-k {
   margin-right: .2em;
   color: var(--fg);
   font-weight: 650;
 }
+
+.rich-text .msg-table-wrap {
+  margin: .65em 0;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg);
+}
+
+.rich-text .msg-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .86em;
+  line-height: 1.55;
+}
+
+.rich-text .msg-table th,
+.rich-text .msg-table td {
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--border-soft);
+  text-align: left;
+  vertical-align: top;
+}
+
+.rich-text .msg-table th {
+  background: var(--raised);
+  color: var(--fg);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.rich-text .msg-table tr:last-child td { border-bottom: 0; }
+.rich-text .msg-table .msg-align-center { text-align: center; }
+.rich-text .msg-table .msg-align-right { text-align: right; }
+
+/* Search results are previews: keep four-ish lines with a soft cut. */
+.rich-text.is-preview {
+  max-height: 8.4em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 76%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 76%, transparent 100%);
+}
+
+.cmd-msg-body { font-size: .9rem; }
 
 /* Very long agent reports start collapsed: the reader gets the opening and a
    clear way to expand, instead of one card monopolising the viewport. */
@@ -1475,7 +1353,116 @@ button.ack-badge:is(.ok, .warn) { color: var(--tone); background: color-mix(in s
 /* ---------- touch devices ---------- */
 @media (pointer: coarse) {
   .btn { height: var(--h-lg); min-height: 40px; }
+  /* Dense metadata rows would otherwise grow by 20px just because the copy
+     button inherited the coarse-pointer control height. */
+  .msg-head .btn { height: 28px; min-height: 28px; }
   .btn-icon { width: 40px; height: 40px; min-width: 40px; min-height: 40px; }
   input, select { height: var(--h-lg); min-height: 40px; }
   .seg button { height: var(--h-lg); min-height: 40px; }
+}
+
+/* ---------- responsive ---------- */
+@media (max-width: 1100px) {
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid-2 { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .only-mobile { display: inline-grid !important; }
+  .sidebar { position: fixed; left: 0; top: 0; z-index: 60; transform: translateX(-100%); transition: transform .2s ease; box-shadow: var(--shadow); }
+  .shell.nav-open .sidebar { transform: none; }
+  .shell.nav-open .sb-scrim { display: block; position: fixed; inset: 0; z-index: 55; background: rgb(0 0 0 / .5); }
+  .topbar { padding: 10px 14px; }
+  main { padding: var(--s-4) 14px 40px; }
+  .search input { width: 100%; }
+  .bar-right, .bar-left { width: 100%; margin-left: 0; }
+  .bar-right .search, .bar-left .search { flex: 1; }
+  .type-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #onlinePill { display: none; }
+  /* ---------- command console: sessions become a drawer (P0) ---------- */
+  body.cmd-active { overflow-x: hidden; overflow-y: auto; }
+  .cmd-layout { position: relative; }
+  .cmd-sessions {
+    position: absolute; left: 0; top: 0; bottom: 0; z-index: 40;
+    width: min(300px, 85vw); min-width: 0; max-width: none;
+    transform: translateX(-102%); transition: transform .2s ease;
+    box-shadow: var(--shadow);
+  }
+  .cmd-layout.sessions-open .cmd-sessions { transform: none; }
+  .cmd-layout.sessions-open .cmd-scrim {
+    display: block; position: absolute; inset: 0; z-index: 30;
+    background: rgb(0 0 0 / .5);
+  }
+  .cmd-chat { min-width: 0; }
+  .cmd-chat-header { height: auto; min-height: 54px; padding: var(--s-2) 12px; gap: var(--s-2); flex-wrap: wrap; }
+  .cmd-chat-title { flex: 1; min-width: 0; }
+  .cmd-chat-title h2 { font-size: var(--fs-md); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cmd-chat-title p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cmd-chat-actions { flex-wrap: wrap; gap: var(--s-2); }
+  .cmd-stream { padding: 14px; }
+  .cmd-msg { max-width: min(92%, 760px); }
+  .cmd-dock { padding: var(--s-2) 12px; }
+  .cmd-composer-toolbar { flex-wrap: wrap; gap: var(--s-2); }
+  .cmd-kind-toggle { flex-wrap: wrap; max-width: 100%; }
+  .kind-opt { white-space: nowrap; }
+  .cmd-input-row { gap: var(--s-2); }
+  .cmd-input-row textarea { min-width: 0; }
+  .cmd-chips-bar { min-width: 0; flex-wrap: wrap; }
+  .cmd-chips-scroll { flex: 1; min-width: 0; }
+  /* iOS Safari zooms the whole page when it focuses a control below 16px,
+     which looks like a stray pinch-zoom and clips the console. The class
+     selectors repeat the base rules that carry a higher specificity. */
+  input, select, textarea,
+  .cmd-sessions-header .search-wrap input,
+  .cmd-input-row textarea,
+  .modal textarea,
+  .pager-info select { font-size: 16px; }
+  body.cmd-active .cmd-dock { padding-bottom: calc(var(--s-2) + env(safe-area-inset-bottom, 0px)); }
+}
+@media (max-width: 560px) {
+  .stats { gap: var(--s-2); }
+  .stat { padding: var(--s-3); }
+  .form-row { flex-direction: column; align-items: stretch; }
+  .field { min-width: 0; }
+  .field-btn .btn { width: 100%; }
+  .seg { overflow-x: auto; max-width: 100%; }
+  .pager { justify-content: center; }
+  .drawer-head { flex-direction: column; align-items: stretch; gap: var(--s-3); }
+  .drawer-actions { justify-content: flex-start; }
+  /* The copy/export dropdowns are left-aligned in the mobile drawer; right:0
+     used to push the 140px menu past the left edge of a 320px screen. */
+  .drawer-actions .dropdown .menu { left: 0; right: auto; max-width: calc(100vw - 36px); }
+  /* One row for menu + title, one full-width row for the actions: squeezing
+     the title beside "群成员管理 / 解散群聊" used to reduce it to "运 2.". */
+  .cmd-chat-header { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; }
+  .cmd-chat-title { grid-column: 2; }
+  .cmd-chat-actions { grid-column: 1 / -1; justify-content: flex-end; flex-wrap: wrap; }
+  /* An empty table has no need for the 760px data columns; without this the
+     empty state was clipped to the left edge of a horizontally scrolled table. */
+  .table:has(td.empty-td) { min-width: 0; }
+  .table:has(td.empty-td) thead { display: none; }
+  /* ---------- touch targets & small text (P1) ---------- */
+  .btn-icon { width: 44px; height: 44px; }
+  .btn-icon.xs { width: 44px; height: 44px; }
+  .pager-nav button { min-width: 44px; height: 44px; }
+  .seg button { min-height: 44px; padding: var(--s-2) 12px; font-size: var(--fs-sm); }
+  .xs { font-size: var(--fs-xs); }
+  .badge { font-size: var(--fs-xs); }
+  .table thead th { font-size: var(--fs-xs); }
+  .cmd-group-label { font-size: var(--fs-xs); }
+  .kind-opt { padding: var(--s-2) 10px; font-size: var(--fs-xs); }
+  /* ---------- command console tightening (P0) ---------- */
+  .cmd-stream { padding: var(--s-3) 10px; gap: var(--s-3); }
+  .cmd-msg { max-width: min(94%, 760px); }
+  .cmd-dock { padding: var(--s-2) 10px; }
+  .cmd-input-row { gap: var(--s-2); }
+  .cmd-send-btn { min-height: 44px; padding: var(--s-2) 12px; }
+  .cmd-hint { display: none; }
+  /* ---------- long content (P2) ---------- */
+  .invite-box { flex-wrap: wrap; }
+  .kv { grid-template-columns: 1fr; }
+  .kv dt { padding-bottom: 2px; border-bottom: 0; }
+  .kv dd { text-align: left; padding-top: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
 }

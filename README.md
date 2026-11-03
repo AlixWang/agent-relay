@@ -123,8 +123,13 @@ prototype/            Python v2 原型（回滚备份，不再演进）
 
 ```bash
 go test ./...
-./clients/e2e.sh http://127.0.0.1:18789   # 起临时 server 跑注册→冒烟→广播→审批→guard 全链
+make test-ui-js                          # 控制台纯 JS 行为测试（node，无浏览器）
+./clients/e2e.sh http://127.0.0.1:18789  # 起临时 server 跑注册→冒烟→广播→审批→guard 全链
 chmod +x clients/*.sh
+
+# 移动端布局 e2e（Playwright，首次需安装浏览器）
+cd tests/mobile && npm ci && npx playwright install chromium
+npm test
 ```
 
 ## 安全要点

@@ -11,6 +11,11 @@
 __pycache__/
 *.pyc
 
+# Playwright mobile layout tests
+node_modules/
+test-results/
+playwright-report/
+
 # Templ generated code (internal/web/views/*_templ.go) is COMMITTED so a clean
 # checkout builds with plain `go build` — no CLI, no network, no build chain.
 # After editing a .templ file run `make generate` and commit the result; CI

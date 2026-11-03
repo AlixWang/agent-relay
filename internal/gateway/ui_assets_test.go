@@ -285,6 +285,70 @@ func TestConsoleCommandMessageCardWiring(t *testing.T) {
 	}
 }
 
+// Mobile behaviour is not testable in Go, but the pieces that silently
+// disappear are: the viewport lock, the shared Markdown body in the thread
+// inspector, and the responsive rules living after the command-console base
+// styles (the cascade order bug that squeezed message headers on phones).
+func TestConsoleMobileViewportAndThreadMarkdown(t *testing.T) {
+	f := newFixture(t)
+	f.mux = f.srv.Handler(web.Handler())
+	cookie := f.adminLogin(t)
+
+	code, page := getRaw(t, f, "/", cookie)
+	if code != 200 {
+		t.Fatalf("console page: %d", code)
+	}
+	for _, need := range []string{
+		`name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"`,
+		`class="cmd-msg-body rich-text"`,
+	} {
+		if !strings.Contains(page, need) {
+			t.Fatalf("console page lost %s", need)
+		}
+	}
+
+	code, css := getRaw(t, f, "/style.css", cookie)
+	if code != 200 {
+		t.Fatalf("style.css: %d", code)
+	}
+	for _, need := range []string{
+		"touch-action: pan-x pan-y",
+		"font-size: 16px;",
+		".cmd-input-row textarea",
+		".table:has(td.empty-td)",
+		".rich-text .msg-table",
+	} {
+		if !strings.Contains(css, need) {
+			t.Fatalf("style.css lost %s", need)
+		}
+	}
+	// The responsive section must stay after the .cmd-* base rules: same
+	// specificity, earlier rules lose, and that is how the mobile header was
+	// left pinned at 54px with its action row spilling into the stream.
+	responsive := strings.LastIndex(css, "/* ---------- responsive ---------- */")
+	cmdBase := strings.Index(css, "Command & ChatOps Console Redesign")
+	if responsive < 0 || cmdBase < 0 || responsive < cmdBase {
+		t.Fatal("responsive rules must come after the command-console base styles")
+	}
+
+	code, js := getRaw(t, f, "/js/threads.js", cookie)
+	if code != 200 {
+		t.Fatalf("threads js: %d", code)
+	}
+	for _, need := range []string{
+		"from './message.js'",
+		"rich-text is-preview",
+		"renderMessage(m.payload)",
+	} {
+		if !strings.Contains(js, need) {
+			t.Fatalf("thread inspector lost %s", need)
+		}
+	}
+	if strings.Contains(js, "${esc(m.payload)}") {
+		t.Fatal("thread inspector still renders raw payload instead of Markdown")
+	}
+}
+
 // The console must use class names defined in style.css and contain shell containers.
 func TestConsoleMarkupMatchesStylesheet(t *testing.T) {
 	f := newFixture(t)

@@ -67,6 +67,24 @@ assert.equal(
   'blockquote'
 );
 
+// Pipe tables keep their structure and column alignment, including inline
+// formatting inside cells.
+const table = renderMessage('| 项目 | 状态 |\n| --- | :---: |\n| api-gateway | **正常** |\n| 队列 | 37 条 |');
+assert.ok(table.includes('<div class="msg-table-wrap"><table class="msg-table">'), 'table wrapper: ' + table);
+assert.ok(table.includes('<th>项目</th>'), 'table header: ' + table);
+assert.ok(table.includes('<th class="msg-align-center">状态</th>'), 'column alignment: ' + table);
+assert.ok(
+  table.includes('<td class="msg-align-center"><strong>正常</strong></td>'),
+  'cell inline formatting: ' + table
+);
+assert.ok(table.includes('<td>api-gateway</td>'), 'table body: ' + table);
+
+// Table cells are untrusted text too: raw HTML must stay escaped.
+const tableXss = renderMessage('| 名称 | 值 |\n| --- | --- |\n| <img src=x onerror=alert(1)> | `a|b` |');
+assert.ok(tableXss.includes('&lt;img src=x onerror=alert(1)&gt;'), 'table cell must escape html: ' + tableXss);
+assert.ok(!tableXss.includes('<img'), 'table cell must not emit raw img');
+assert.ok(tableXss.includes('<code>a|b</code>'), 'escaped pipe stays in inline code: ' + tableXss);
+
 // Collapse threshold: normal chat is never hidden; a long report is.
 assert.equal(messageIsLong('收到，马上处理'), false, 'short chat must not collapse');
 assert.equal(messageIsLong('x'.repeat(1200)), true, 'long text must collapse');

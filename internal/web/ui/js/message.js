@@ -8,6 +8,7 @@
 //   - Markdown headings (#, ##, ...) and Chinese "一、" section headings
 //   - bullet / ordered lists, with a bold label before the first colon
 //   - blockquotes, fenced code blocks and inline code
+//   - pipe tables with optional column alignment
 //   - bold / italic / safe (http, https, mailto) links
 //
 // Raw HTML is never passed through: every text run is escaped before the
@@ -107,6 +108,83 @@ function isFence(line) {
   return /^\s*(`{3,}|~{3,})\s*[\w.+-]*\s*$/.test(line);
 }
 
+// Split a pipe-table row. A leading/trailing pipe is optional; "\|" is a
+// literal pipe inside a cell. Kept deliberately small: agents write compact
+// status tables, not arbitrary CSV with quoted separators.
+function splitTableRow(line) {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+
+  const cells = [];
+  let cur = '';
+  let inCode = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    // A backslash only escapes a pipe in a table cell; leave other backslashes
+    // (Windows paths, regexes) alone.
+    if (ch === '\\' && s[i + 1] === '|') {
+      cur += '|';
+      i++;
+    } else if (ch === '`') {
+      inCode = !inCode;
+      cur += ch;
+    } else if (ch === '|' && !inCode) {
+      cells.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+function isTableSeparator(line) {
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isTableStart(lines, i) {
+  return i + 1 < lines.length && lines[i].includes('|') && isTableSeparator(lines[i + 1]);
+}
+
+function tableAlignClass(separatorCell) {
+  const left = separatorCell.startsWith(':');
+  const right = separatorCell.endsWith(':');
+  if (left && right) return ' class="msg-align-center"';
+  if (right) return ' class="msg-align-right"';
+  return '';
+}
+
+function renderTable(lines, start) {
+  const header = splitTableRow(lines[start]);
+  const separators = splitTableRow(lines[start + 1]);
+  const alignments = header.map((_, idx) => separators[idx] || '---');
+  let i = start + 2;
+  const rows = [];
+
+  while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+    let cells = splitTableRow(lines[i]);
+    // Missing cells become empty; extra cells are dropped so the header row
+    // controls the column count and a ragged table still renders predictably.
+    while (cells.length < header.length) cells.push('');
+    if (cells.length > header.length) cells = cells.slice(0, header.length);
+    rows.push(cells);
+    i++;
+  }
+
+  const th = header.map((cell, idx) => `<th${tableAlignClass(alignments[idx])}>${inline(cell)}</th>`).join('');
+  const body = rows.map((row) => '<tr>' + row.map((cell, idx) =>
+    `<td${tableAlignClass(alignments[idx])}>${inline(cell)}</td>`
+  ).join('') + '</tr>').join('');
+
+  return {
+    html: `<div class="msg-table-wrap"><table class="msg-table"><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table></div>`,
+    next: i,
+  };
+}
+
 function isBlockStart(line) {
   const s = line.trim();
   return (
@@ -142,7 +220,8 @@ function renderList(lines, start, ordered) {
       lines[i].trim() &&
       /^\s+/.test(lines[i]) &&
       !itemRe.test(lines[i]) &&
-      !isBlockStart(lines[i])
+      !isBlockStart(lines[i]) &&
+      !isTableStart(lines, i)
     ) {
       content += ' ' + lines[i].trim();
       i++;
@@ -238,6 +317,14 @@ export function renderMessage(value) {
       continue;
     }
 
+    // Pipe tables: header row + | --- | separator, then body rows.
+    if (isTableStart(lines, i)) {
+      const table = renderTable(lines, i);
+      out.push(table.html);
+      i = table.next;
+      continue;
+    }
+
     // A closing "共同结论：" / "结论：" callout stands out from the body.
     const summary = line.trim().match(/^((?:共同)?(?:结论|小结|总结))([：:])\s*(.*)$/);
     if (summary) {
@@ -255,7 +342,7 @@ export function renderMessage(value) {
 
     // Paragraph: consecutive plain lines keep their explicit line breaks.
     const para = [];
-    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) {
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i]) && !isTableStart(lines, i)) {
       para.push(lines[i]);
       i++;
     }

@@ -42,3 +42,26 @@ jobs:
         run: |
           go build -o ./agent-relay-ci ./cmd/agent-relay
           BIN=./agent-relay-ci ./clients/e2e.sh http://127.0.0.1:18789
+
+  ui-mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tests/mobile/package-lock.json
+
+      - name: install mobile test dependencies
+        working-directory: tests/mobile
+        run: npm ci --no-audit --no-fund
+
+      - name: install chromium
+        working-directory: tests/mobile
+        run: npx playwright install --with-deps chromium
+
+      - name: mobile layout e2e
+        working-directory: tests/mobile
+        run: npx playwright test

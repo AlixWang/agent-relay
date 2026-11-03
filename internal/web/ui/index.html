@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="color-scheme" content="dark light">
 <title>agent-relay · 运维控制台</title>
 <script>
@@ -480,7 +480,7 @@
                         </div>
                       </div>
                       <!-- m.payload is untrusted: renderMessage() escapes every text run before adding its own markup. -->
-                      <div class="cmd-msg-body" :class="{ 'is-collapsed': needsCollapse(m) && !isExpanded(m) }" x-html="renderMessage(m.payload)"></div>
+                      <div class="cmd-msg-body rich-text" :class="{ 'is-collapsed': needsCollapse(m) && !isExpanded(m) }" x-html="renderMessage(m.payload)"></div>
                       <button type="button" class="cmd-msg-expand" x-show="needsCollapse(m)" @click="toggleMessage(m)" :aria-expanded="isExpanded(m) ? 'true' : 'false'">
                         <span x-text="isExpanded(m) ? '收起' : '展开全文'"></span>
                         <svg class="icon xs" :class="isExpanded(m) ? 'rot-180' : ''"><use href="#i-chev-d"/></svg>
