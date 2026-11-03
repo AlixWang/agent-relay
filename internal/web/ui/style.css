@@ -440,6 +440,11 @@ input[type="checkbox"] { height: auto; accent-color: var(--accent); }
 .kv-detail .v { color: var(--fg); }
 .time-cell { white-space: nowrap; display: flex; flex-direction: column; line-height: 1.35; }
 .time-cell small { color: var(--muted-2); font-size: var(--fs-xs); }
+.log-row { cursor: pointer; }
+.log-fields td { background: var(--bg); padding: 0 14px 12px; }
+.log-json-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 0 4px; }
+.log-json-head span { color: var(--muted-2); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .04em; }
+.log-fields pre { max-height: 260px; border: 1px solid var(--border); border-radius: var(--r-md); }
 
 /* skeleton / empty */
 .skel td { padding: 14px; }

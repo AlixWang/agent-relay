@@ -59,6 +59,11 @@ type Config struct {
 	MessageTTLDays       int   `toml:"message_ttl_days"`
 	PeerPruneAfterDays   int   `toml:"peer_prune_after_days"`
 	AuditRetentionDays   int   `toml:"audit_retention_days"`
+	// Agent runtime diagnostics (DESIGN §4.11): short-lived operational logs
+	// uploaded by clients, separate from the audit trail.
+	AgentLogRetentionDays  int `toml:"agent_log_retention_days"`
+	AgentLogRatePerMinute  int `toml:"agent_log_rate_per_minute"`
+	AgentLogMaxRowsPerPeer int `toml:"agent_log_max_rows_per_peer"`
 
 	OfflineWebhookURL string `toml:"offline_webhook_url"`
 	MaxBodyBytes      int    `toml:"max_body_bytes"`
@@ -115,6 +120,9 @@ func Default() *Config {
 		MessageTTLDays:               30,
 		PeerPruneAfterDays:           7,
 		AuditRetentionDays:           90,
+		AgentLogRetentionDays:        30,
+		AgentLogRatePerMinute:        60,
+		AgentLogMaxRowsPerPeer:       20000,
 		MaxBodyBytes:                 1 << 20,
 		StreamKeepaliveSecs:          20,
 		StreamMaxPerPeer:             3,
@@ -156,6 +164,7 @@ func Load(path string) (*Config, error) {
 		"require_task_approval_from_peers": true, "max_open_permissions": true,
 		"progress_throttle_secs": true, "permission_ttl_secs": true, "message_ttl_days": true,
 		"peer_prune_after_days": true, "audit_retention_days": true,
+		"agent_log_retention_days": true, "agent_log_rate_per_minute": true, "agent_log_max_rows_per_peer": true,
 		"offline_webhook_url": true, "max_body_bytes": true,
 		"stream_keepalive_secs": true, "stream_max_per_peer": true,
 		"profile_refresh_days": true,
@@ -206,6 +215,15 @@ func (c *Config) Validate() error {
 	}
 	if c.RatePerMinute < 1 {
 		return fmt.Errorf("rate_per_minute must be >= 1")
+	}
+	if c.AgentLogRetentionDays < 0 {
+		return fmt.Errorf("agent_log_retention_days must be >= 0")
+	}
+	if c.AgentLogRatePerMinute < 1 {
+		return fmt.Errorf("agent_log_rate_per_minute must be >= 1")
+	}
+	if c.AgentLogMaxRowsPerPeer < 0 {
+		return fmt.Errorf("agent_log_max_rows_per_peer must be >= 0")
 	}
 	if c.MaxOpenPermissions < 0 {
 		return fmt.Errorf("max_open_permissions must be >= 0")

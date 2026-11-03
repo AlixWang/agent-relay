@@ -56,6 +56,13 @@ message_ttl_days = 30
 peer_prune_after_days = 7
 audit_retention_days = 90
 
+# Agent runtime diagnostics (DESIGN §4.11): separate from audit. Clients
+# batch-upload through POST /logs; the table is pruned by age and capped per
+# peer. 0 disables age pruning / row cap; the rate must be >= 1.
+agent_log_retention_days = 30
+agent_log_rate_per_minute = 60
+agent_log_max_rows_per_peer = 20000
+
 # Optional generic POST webhook for peer offline transitions:
 # {"peer_id": "...", "offline_secs": 1234, "ts": 1728...}
 offline_webhook_url = ""

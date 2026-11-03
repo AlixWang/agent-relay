@@ -31,6 +31,18 @@ AUTH_FAIL_MARKER="$BASE/.relay_auth_failed"
 PROMPT_VER_FILE="$BASE/.prompt_version"
 CLIENT_VER_FILE="$BASE/.client_version"
 CLIENT_REV_FILE="$BASE/.client_rev"
+AGENT_LOG_FILE="$SPOOL_DIR/agent-log.jsonl"
+AGENT_LOG_OFFSET="$BASE/.agent_log_offset"
+TAIL_ERR_OFFSET="$BASE/.relay-tail-err.offset"
+TAIL_ERR_LAST="$BASE/.relay-tail-err.last"
+TAIL_ERR_LAST_TS="$BASE/.relay-tail-err.last.ts"
+AGENT_LOG_UPLOAD="${AGENT_LOG_UPLOAD:-1}"
+AGENT_LOG_LEVEL="${AGENT_LOG_LEVEL:-info}"
+AGENT_LOG_MAX_BYTES="${AGENT_LOG_MAX_BYTES:-1048576}"
+AGENT_LOG_BATCH="${AGENT_LOG_BATCH:-20}"
+AGENT_LOG_SEQ=0
+ME_IDENTITY="$(tr -d '[:space:]' < "$BASE/identity" 2>/dev/null || true)"
+[ -z "$ME_IDENTITY" ] && ME_IDENTITY="unknown"
 
 # ---------- 本地适配：唤醒/日志原语 ----------
 # 默认实现：wake 只把事件记到 pending.log，等人工或你自己的调度来处理。
@@ -40,10 +52,165 @@ wake() {
   # $1 = 人话原因（通知/日志用），$2 = 事件 JSON（worker 按 id 去 spool 取全文）
   printf '[%s] %s\n%s\n' "$(date -u +%FT%TZ)" "${1-}" "${2-}" >> "$SPOOL_DIR/pending.log"
 }
+as_uint() {
+  case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac
+}
+log_level_of() {
+  case "${1-}" in
+    *skip*|*truncated*|*duplicate*) printf 'warn' ;;
+    *error*|*failed*|*timeout*|*missing*|*unreachable*) printf 'error' ;;
+    *) printf 'info' ;;
+  esac
+}
+canonical_event() {
+  case "${1-}" in
+    relay_binary_missing) printf 'watchdog.binary_missing' ;;
+    relay_auth_error) printf 'watchdog.auth_error' ;;
+    relay_daemon_started) printf 'watchdog.daemon_started' ;;
+    spool_truncated) printf 'spool.truncated' ;;
+    worker_timeout) printf 'worker.timeout' ;;
+    worker_timeout_skip) printf 'worker.timeout_skipped' ;;
+    layer0_ack) printf 'ack.layer0' ;;
+    layer0_ack_failed|layer0_no_token) printf 'ack.layer0_failed' ;;
+    prompt_update_pending) printf 'update.prompt_pending' ;;
+    client_update_pending) printf 'update.client_pending' ;;
+    messages_pending) printf 'spool.drained' ;;
+    worker_started_notify) printf 'worker.started' ;;
+    wake_lock_expired) printf 'wake.lock_expired' ;;
+    wake_skipped_busy) printf 'wake.skipped_busy' ;;
+    wake_started) printf 'wake.started' ;;
+    client_update_ignored) printf 'update.client_ignored' ;;
+    prompt_update_duplicate) printf 'update.prompt_duplicate' ;;
+    client_update_same_rev) printf 'update.client_same_rev' ;;
+    client_update_duplicate) printf 'update.client_duplicate' ;;
+    *) printf '%s' "${1-}" ;;
+  esac
+}
+log_event() {
+  # log_event level event message fields-json [task_id] [thread] [source]
+  local level="${1:-info}" event="${2:-}" message="${3:-}" fields="${4:-}"
+  local task_id="${5:-}" thread="${6:-}" source="${7:-relay-watch}"
+  [ -z "$fields" ] && fields='{}'
+  event="$(canonical_event "$event")"
+  if [ -z "$task_id" ]; then
+    task_id="$(printf '%s' "$fields" | jq -r '(.task_id // .id // "") | tostring' 2>/dev/null || true)"
+  fi
+  if [ -z "$thread" ]; then
+    thread="$(printf '%s' "$fields" | jq -r '(.thread // .root_id // "") | tostring' 2>/dev/null || true)"
+  fi
+  # Local human log first: upload failures must never lose the local trail.
+  local detail="$fields"
+  [ -n "$message" ] && detail="$message $fields"
+  printf '[%s] %s %s\n' "$(date -u +%FT%TZ)" "$event" "$detail" >> "$BASE/relay-watch.log" || true
+  [ "$AGENT_LOG_UPLOAD" = "1" ] || return 0
+  case "$AGENT_LOG_LEVEL" in
+    error) [ "$level" = "error" ] || return 0 ;;
+    warn) [ "$level" = "error" ] || [ "$level" = "warn" ] || return 0 ;;
+  esac
+  if [ "$AGENT_LOG_LEVEL" != "debug" ] && [ "$level" = "debug" ]; then
+    return 0
+  fi
+  AGENT_LOG_SEQ=$((AGENT_LOG_SEQ + 1))
+  local ts id line
+  ts="$(date +%s)"
+  id="${ME_IDENTITY}-watch-${ts}-$$-${RANDOM}-${AGENT_LOG_SEQ}"
+  line="$(jq -cn --arg id "$id" --argjson ts "$ts" --arg level "$level" --arg source "$source" \
+    --arg event "$event" --arg message "$message" --arg task_id "$task_id" --arg thread "$thread" --arg f "$fields" \
+    '{id:$id,ts:$ts,level:$level,source:$source,event:$event,message:$message,task_id:$task_id,thread:$thread,fields:(try ($f|fromjson) catch {})}' 2>/dev/null || true)"
+  if [ -n "$line" ]; then
+    printf '%s\n' "$line" >> "$AGENT_LOG_FILE" || true
+  fi
+  return 0
+}
 log() {
-  printf '[%s] %s %s\n' "$(date -u +%FT%TZ)" "${1-}" "${2-}" >> "$BASE/relay-watch.log"
+  # 兼容旧调用：log event fields-json（level 按事件名推断）
+  local event="${1:-}" fields="${2:-}" message="${3:-}"
+  event="$(canonical_event "$event")"
+  log_event "$(log_level_of "$event")" "$event" "$message" "$fields" || true
+  return 0
 }
 silent() { :; }  # 无事发生；调用处随后 exit 0
+
+flush_agent_logs() {
+  # Best-effort batch upload at script exit. Never let log delivery block or
+  # fail the watchdog: the local relay-watch.log remains the source of truth.
+  [ "$AGENT_LOG_UPLOAD" = "1" ] || return 0
+  [ -s "$AGENT_LOG_FILE" ] || return 0
+  [ -f "$BASE/.token" ] || return 0
+  local offset total count batch resp token size batch_max
+  batch_max="$(as_uint "$AGENT_LOG_BATCH")"
+  [ "$batch_max" -gt 0 ] || batch_max=20
+  [ "$batch_max" -gt 100 ] && batch_max=100
+  offset="$(as_uint "$(cat "$AGENT_LOG_OFFSET" 2>/dev/null || echo 0)")"
+  total="$(as_uint "$(wc -l < "$AGENT_LOG_FILE" 2>/dev/null | tr -d '[:space:]' || echo 0)")"
+  if [ "$total" -lt "$offset" ]; then
+    offset=0
+  fi
+  [ "$total" -le "$offset" ] && return 0
+  count=$((total - offset))
+  [ "$count" -gt "$batch_max" ] && count="$batch_max"
+  batch="$(tail -n +"$((offset + 1))" "$AGENT_LOG_FILE" | head -n "$count" | \
+    jq -sc '{version:1, client:{version:"watch-1",rev:""}, events:.}' 2>/dev/null || true)"
+  [ -z "$batch" ] && return 0
+  token="$(cat "$BASE/.token" 2>/dev/null || true)"
+  [ -z "$token" ] && return 0
+  resp="$(curl -sS --max-time 3 -X POST "$RELAY_URL/logs" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -H 'User-Agent: RelayClient/1.0' \
+    -d "$batch" 2>/dev/null || true)"
+  if printf '%s' "$resp" | jq -e '.ok == true' >/dev/null 2>&1; then
+    printf '%s' "$((offset + count))" > "$AGENT_LOG_OFFSET"
+    size="$(as_uint "$(wc -c < "$AGENT_LOG_FILE" 2>/dev/null | tr -d '[:space:]' || echo 0)")"
+    if [ "$size" -gt "$AGENT_LOG_MAX_BYTES" ]; then
+      total="$(as_uint "$(wc -l < "$AGENT_LOG_FILE" 2>/dev/null | tr -d '[:space:]' || echo 0)")"
+      offset="$(as_uint "$(cat "$AGENT_LOG_OFFSET" 2>/dev/null || echo 0)")"
+      if [ "$offset" -ge "$total" ]; then
+        : > "$AGENT_LOG_FILE"
+        printf '0' > "$AGENT_LOG_OFFSET"
+      fi
+    fi
+  fi
+  unset token
+}
+
+capture_tail_stderr() {
+  # Surface relay-tail stderr without changing the Go receiver (and therefore
+  # without a receiver_rev/client_update nudge). First run starts at EOF so we
+  # never upload a pre-existing log history.
+  [ -f "$SPOOL_ERR" ] || return 0
+  local off total now last_line last_ts event level line
+  if [ ! -f "$TAIL_ERR_OFFSET" ]; then
+    wc -c < "$SPOOL_ERR" 2>/dev/null | tr -d '[:space:]' > "$TAIL_ERR_OFFSET" || true
+    return 0
+  fi
+  off="$(as_uint "$(cat "$TAIL_ERR_OFFSET" 2>/dev/null || echo 0)")"
+  total="$(as_uint "$(wc -c < "$SPOOL_ERR" 2>/dev/null | tr -d '[:space:]' || echo 0)")"
+  [ "$total" -le "$off" ] && return 0
+  now="$(date +%s)"
+  last_line="$(cat "$TAIL_ERR_LAST" 2>/dev/null || true)"
+  last_ts="$(as_uint "$(cat "$TAIL_ERR_LAST_TS" 2>/dev/null || echo 0)")"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$line" ] && continue
+    if [ "$line" = "$last_line" ] && [ $((now - last_ts)) -lt 60 ]; then
+      continue
+    fi
+    case "$line" in
+      *401*|*426*) event="receiver.auth_error"; level="error" ;;
+      *unreachable*|*connection*|*connect*|*timeout*|*5xx*) event="receiver.unreachable"; level="error" ;;
+      *error*|*failed*) event="receiver.stderr"; level="error" ;;
+      *) event="receiver.stderr"; level="warn" ;;
+    esac
+    printf '%s' "$line" > "$TAIL_ERR_LAST" || true
+    printf '%s' "$now" > "$TAIL_ERR_LAST_TS" || true
+    last_line="$line"
+    last_ts="$now"
+    log_event "$level" "$event" "relay-tail stderr" \
+      "$(jq -cn --arg line "$line" '{line:$line}' 2>/dev/null || echo '{}')" "" "" "relay-tail"
+  done < <(tail -c +"$((off + 1))" "$SPOOL_ERR" 2>/dev/null)
+  printf '%s' "$total" > "$TAIL_ERR_OFFSET"
+}
+trap 'flush_agent_logs || true' EXIT
 # --------------------------------------------
 
 mkdir -p "$SPOOL_DIR"
@@ -54,7 +221,8 @@ daemon_alive() {
   [ -f "$PIDFILE" ] || return 1
   local pid
   pid="$(tr -d '[:space:]' < "$PIDFILE" 2>/dev/null || true)"
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  pid="$(as_uint "$pid")"
+  [ "$pid" -gt 0 ] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   # PID 复用盲区（2026-10-12 Lisa 实测）：沙箱/VM 重启后 pidfile 残留旧 PID，
   # 若被其他进程复用，kill -0 照样通过，看门狗会误判 daemon 存活、SSE 静默断线。
@@ -107,8 +275,6 @@ fi
 # 本节补齐：唤醒时记 pending，超时未完成发 cancelled。协议见 §6.5（kind=status）。
 # 2026-10-14 修正（升级实测）：服务端 status 词表无 failed，只有
 # started|progress|blocked|resumed|cancelled，发 failed 会被 400 打回，改用 cancelled。
-ME_IDENTITY="$(tr -d '[:space:]' < "$BASE/identity" 2>/dev/null)"
-[ -z "$ME_IDENTITY" ] && ME_IDENTITY="unknown"
 WORKER_PENDING="$BASE/.worker_pending"
 WORKER_TIMEOUT=1800  # 30 分钟：worker 冷启动 32-532s，大任务执行更久，超 30 分钟视为卡死
 if [ -f "$WORKER_PENDING" ]; then
@@ -119,7 +285,12 @@ if [ -f "$WORKER_PENDING" ]; then
     pid="$(printf '%s' "$pline" | jq -r '.id // ""' 2>/dev/null || true)"
     pfrom="$(printf '%s' "$pline" | jq -r '.from // ""' 2>/dev/null || true)"
     pto="$(printf '%s' "$pline" | jq -r '.to // ""' 2>/dev/null || true)"
+    pthread="$(printf '%s' "$pline" | jq -r '.thread // ""' 2>/dev/null || true)"
     [ -z "$pto" ] && pto="$ME_IDENTITY"  # 旧格式 pending 无 to：收到的 1:1 任务 recipient 恒为自己
+    # 旧版把 recipient（自己）写进 pending；status/cancelled 必须发给任务发送方。
+    if [ "$pto" = "$ME_IDENTITY" ] && [ -n "$pfrom" ]; then
+      pto="$pfrom"
+    fi
     pts="$(printf '%s' "$pline" | jq -r '.wake_ts // 0' 2>/dev/null || echo 0)"
     [ -z "$pid" ] && continue
     # 已 ack = worker 正常完成，移出 pending
@@ -127,12 +298,12 @@ if [ -f "$WORKER_PENDING" ]; then
       continue
     fi
     # 超时未完成 → 发 status/cancelled（服务端词表无 failed，2026-10-14 修正）
-    case "$pts" in ''|*[!0-9]*) pts=0 ;; esac
+    pts="$(as_uint "$pts")"
     if [ "$((now_ts - pts))" -gt "$WORKER_TIMEOUT" ]; then
       st_token="$(cat "$BASE/.token" 2>/dev/null || true)"
       if [ -n "$st_token" ]; then
         case "$pto" in
-          grp_*) log "worker_timeout_skip" "$(printf '{"id":%s,"reason":"群任务无 1:1 握手，跳过 status"}' "$(printf '%s' "$pid" | jq -Rs .)")" ;;
+          grp_*) log "worker_timeout_skip" "$(jq -cn --arg id "$pid" --arg thread "$pthread" '{id:$id,thread:$thread,reason:"群任务无 1:1 握手，跳过 status"}' 2>/dev/null || echo '{}')" ;;
           *)
             cancel_mid="${ME_IDENTITY}-cancelled-$(date +%s%N)-${pid:0:12}"
             fail_body="$(jq -cn --arg mid "$cancel_mid" --arg rid "$pid" --arg rto "$pto" \
@@ -144,7 +315,7 @@ if [ -f "$WORKER_PENDING" ]; then
                 -H 'Content-Type: application/json' \
                 -H 'User-Agent: RelayClient/1.0' \
                 -d "$fail_body" 2>/dev/null || true)"
-              log "worker_timeout" "$(printf '{"id":%s,"resp":%s}' "$(printf '%s' "$pid" | jq -Rs .)" "$(printf '%s' "$cancel_resp" | head -c 200 | jq -Rs .)")"
+              log "worker_timeout" "$(jq -cn --arg id "$pid" --arg resp "$(printf '%s' "$cancel_resp" | head -c 200)" --arg thread "$pthread" '{id:$id,resp:$resp,thread:$thread}' 2>/dev/null || echo '{}')"
             fi
             ;;
         esac
@@ -158,10 +329,8 @@ if [ -f "$WORKER_PENDING" ]; then
 fi
 
 # ---- 2. drain spool ----
-offset="$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)"
-case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
-total="$(wc -l < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)"
-case "$total" in ''|*[!0-9]*) total=0 ;; esac
+offset="$(as_uint "$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)")"
+total="$(as_uint "$(wc -l < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)")"
 out=""
 if [ "$total" -gt "$offset" ]; then
   newlines="$(mktemp)"
@@ -178,18 +347,18 @@ if [ "$total" -gt "$offset" ]; then
   # offset 只在解析成功后推进：坏行不推进，下一轮重跑（at-least-once）
   if [ -n "$out" ] && [ "$out" != "null" ]; then
     printf '%s' "$total" > "$OFFSET_FILE"
+    log_event debug "spool.drained" "spool 已读取" "$(jq -cn --argjson lines "$total" '{lines:$lines}' 2>/dev/null || echo '{}')"
   else
     out=""
+    log_event warn "spool.parse_error" "spool 解析失败" '{"spool":"wake.jsonl"}'
   fi
 fi
 
 # spool 过大且已排空则截断，防止无限增长
-spool_size="$(wc -c < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)"
-case "$spool_size" in ''|*[!0-9]*) spool_size=0 ;; esac
+spool_size="$(as_uint "$(wc -c < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)")"
 if [ "$spool_size" -gt 2097152 ]; then
-  cur_total="$(wc -l < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)"
-  cur_offset="$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)"
-  case "$cur_offset" in ''|*[!0-9]*) cur_offset=0 ;; esac
+  cur_total="$(as_uint "$(wc -l < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)")"
+  cur_offset="$(as_uint "$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)")"
   if [ "$cur_offset" -ge "$cur_total" ]; then
     : > "$SPOOL"
     printf '0' > "$OFFSET_FILE"
@@ -217,8 +386,7 @@ if [ -n "$out" ] && [ "$out" != "null" ]; then
      | select(($p | test("[?？]|任务|问题|需求|要求|请|确认事项|待办|TODO|不过|但是|然而")) | not)
      | .id]
   ' 2>/dev/null || echo '[]')"
-  mech_count="$(printf '%s' "$mech_json" | jq -r 'length' 2>/dev/null || echo 0)"
-  case "$mech_count" in ''|*[!0-9]*) mech_count=0 ;; esac
+  mech_count="$(as_uint "$(printf '%s' "$mech_json" | jq -r 'length' 2>/dev/null || echo 0)")"
   if [ "$mech_count" != "0" ]; then
     layer0_token="$(cat "$BASE/.token" 2>/dev/null || true)"
     layer0_by="$(tr -d '[:space:]' < "$BASE/identity" 2>/dev/null || echo "unknown")"
@@ -296,7 +464,10 @@ if [ -n "$out" ]; then
     fi
   fi
 fi
-case "$msg_count" in ''|*[!0-9]*) msg_count=0 ;; esac
+msg_count="$(as_uint "$msg_count")"
+
+# relay-tail 的 stderr 也属于本地投递链证据：每次 tick 只抓新增字节。
+capture_tail_stderr
 
 # wake payload 只带元数据（id/from/kind/in_reply_to + payload 前 120 字预览），
 # 全文 worker 从 spool/wake.jsonl 按 id 取。
@@ -347,38 +518,59 @@ fi
     # chat/result/status 是对话/终态/信息类消息，不进 pending——否则 result 这类
     # 不需要 worker 的消息会在 30 分钟后误触发 status/cancelled（2026-10-13 实测命中）。
     # 2026-10-14 修正（升级实测）：① POST /messages 必须带唯一 id（缺则 400）；
-    # ② status 的 to 必须是原任务的 recipient（task.to），写 sender 会 409；
+    # ② status 是接收方发给原任务 sender（task.from）；写 recipient 等于发给自己，会被 guard 403；
     # ③ 群任务（to=grp_*）无 1:1 握手，跳过 status 但仍记 pending。
-    printf '%s' "$out" | jq -c '.tasks[]? | select(.kind=="task") | {id, from, to}' 2>/dev/null | while read -r tline; do
+    printf '%s' "$out" | jq -c '.tasks[]? | select(.kind=="task") | {id, from, to, root_id: (.root_id // .thread // "")}' 2>/dev/null | while read -r tline; do
       tid="$(printf '%s' "$tline" | jq -r '.id // ""' 2>/dev/null || true)"
       tfrom="$(printf '%s' "$tline" | jq -r '.from // ""' 2>/dev/null || true)"
       tto="$(printf '%s' "$tline" | jq -r '.to // ""' 2>/dev/null || true)"
+      troot="$(printf '%s' "$tline" | jq -r '.root_id // ""' 2>/dev/null || true)"
       [ -z "$tid" ] && continue
       [ -z "$tto" ] && tto="$ME_IDENTITY"  # 收到的 1:1 任务 recipient 恒为自己
+      pending_to="$tto"
       case "$tto" in
         grp_*) : ;;  # 群任务无 1:1 握手，跳过 status
         *)
+          # status 是任务接收方(B)发给发送方(A)：to 必须是 task.from，不是
+          # task.to（写 recipient 等于发给自己，会被 guard 403 拒绝）。
+          status_to="$tfrom"
+          [ -z "$status_to" ] && status_to="$tto"
+          pending_to="$status_to"
           start_mid="${ME_IDENTITY}-started-$(date +%s%N)-${tid:0:12}"
-          start_body="$(jq -cn --arg mid "$start_mid" --arg rid "$tid" --arg rto "$tto" \
+          start_body="$(jq -cn --arg mid "$start_mid" --arg rid "$tid" --arg rto "$status_to" \
             '{id:$mid, kind:"status", status:"started", to:$rto, in_reply_to:$rid,
               payload:"已接单，worker 启动中"}' 2>/dev/null || true)"
           if [ -n "$start_body" ]; then
-            curl -sS --max-time 8 -X POST "$RELAY_URL/messages" \
+            start_resp="$(curl -sS --max-time 8 -X POST "$RELAY_URL/messages" \
               -H "Authorization: Bearer $st_token2" \
               -H 'Content-Type: application/json' \
               -H 'User-Agent: RelayClient/1.0' \
-              -d "$start_body" >/dev/null 2>&1 || true
+              -d "$start_body" 2>/dev/null || true)"
+            if printf '%s' "$start_resp" | jq -e '.ok == true' >/dev/null 2>&1; then
+              log_event info "status.started_sent" "已接单状态已发送" \
+                "$(jq -cn --arg id "$tid" --arg to "$status_to" '{task_id:$id,to:$to}' 2>/dev/null || echo '{}')" "$tid" "$troot"
+            else
+              log_event error "status.send_failed" "status/started 发送失败" \
+                "$(jq -cn --arg id "$tid" --arg resp "$start_resp" '{task_id:$id,response:$resp}' 2>/dev/null || echo '{}')" "$tid" "$troot"
+            fi
           fi
           ;;
       esac
-      # 记 pending，用于超时检查（带 to，供超时时定向 cancelled）
-      jq -cn --arg id "$tid" --arg from "$tfrom" --arg to "$tto" --argjson ts "$now_ts" \
-        '{id:$id, from:$from, to:$to, wake_ts:$ts}' >> "$tmp_pending2" 2>/dev/null || true
+      # 记 pending，用于超时检查（带 status 目标，供超时时定向 cancelled）
+      jq -cn --arg id "$tid" --arg from "$tfrom" --arg to "$pending_to" --arg thread "$troot" --argjson ts "$now_ts" \
+        '{id:$id, from:$from, to:$to, thread:$thread, wake_ts:$ts}' >> "$tmp_pending2" 2>/dev/null || true
     done
     mv "$tmp_pending2" "$WORKER_PENDING"
     unset st_token2
     log "worker_started_notify" "$(printf '%s' "$out" | jq -c '{count:(.tasks|length)}' 2>/dev/null || echo '{}')"
   fi
 reason="$(IFS='；'; echo "${reasons[*]}")"
-wake "$reason" "$final_payload"
+wake_ids="$(printf '%s' "$out" | jq -c '[.tasks[]?.id]' 2>/dev/null || echo '[]')"
+wake_first="$(printf '%s' "$wake_ids" | jq -r '.[0] // ""' 2>/dev/null || true)"
+log_event info "wake.requested" "请求唤醒 worker" \
+  "$(jq -cn --arg reason "$reason" --argjson ids "$wake_ids" '{reason:$reason,task_ids:$ids}' 2>/dev/null || echo '{}')" "$wake_first" ""
+if ! wake "$reason" "$final_payload"; then
+  log_event error "wake.failed" "wake 调用失败" \
+    "$(jq -cn --arg reason "$reason" '{reason:$reason}' 2>/dev/null || echo '{}')"
+fi
 exit 0

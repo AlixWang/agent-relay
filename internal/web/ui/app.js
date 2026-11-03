@@ -10,6 +10,7 @@ import { initMuse, refreshMuse, stopMuse } from './js/muse.js';
 import { initThreads, refreshThreads } from './js/threads.js';
 import { initPrompts } from './js/prompts.js';
 import { initAudit, refreshAudit } from './js/audit.js';
+import { initLogs, enterLogs, stopLogs } from './js/logs.js';
 import { initTokens, refreshTokens } from './js/tokens.js';
 import { initSystem, refreshSystem } from './js/system.js';
 import { commandApp, refreshCommand, stopCommand } from './js/command.js';
@@ -36,6 +37,7 @@ onRoute('muse', refreshMuse, stopMuse);
 onRoute('threads', refreshThreads);
 onRoute('command', refreshCommand, stopCommand);
 onRoute('audit', refreshAudit);
+onRoute('logs', enterLogs, stopLogs);
 onRoute('tokens', refreshTokens);
 onRoute('system', refreshSystem);
 
@@ -50,6 +52,7 @@ initMuse();
 initThreads();
 initPrompts();
 initAudit();
+initLogs();
 initTokens();
 initSystem();
 

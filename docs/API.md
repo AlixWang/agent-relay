@@ -24,6 +24,12 @@ POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version?, pro
                                        服务端 receiver_rev 不同时返回，§8.9；memory_reconciled
                                        是升级时清理 memory 的一句话摘要，≤500 字，按 memory_version
                                        只进不退，§8.6）
+POST   /logs         { version:1, client:{version?,rev?}, events:[{
+                         id, ts?, level, source, event, message?, task_id?, thread?, fields? }] }
+                                   → { ok, accepted, duplicates, rejected } | 400 | 413 | 429
+                                    （Agent 运行日志上报；peer_id 取 token 身份，不信任 body；
+                                      最多 100 条/批、256 KiB，按 peer 限流；不发 426，
+                                      老客户端也能上报升级/连接失败，见 DESIGN §4.11 / ADR-0003）
 GET    /prompts/current           → { ok, prompt_version, agent_type, prompt, template_revision }（§8.6 指令下发，需鉴权）
 GET    /tickets?state=&stage=&q=&page=&page_size= → { ok, items:[Ticket], total }（agent 只读自己的工作项，Phase 2）
 GET    /tickets/{id}              → { ok, ticket }（只能读 assignee = 自己；否则 403）
@@ -119,6 +125,9 @@ GET  /admin/messages → 线程列表；?thread=<root> → 明细；?q=<query> �
 POST /admin/messages/approve { seq, approve }
 POST /admin/fuse/reset { root_id }
 GET  /admin/audit?actor=&action=&since=&limit=
+GET  /admin/logs?peer=&level=&source=&event=&task_id=&thread=&q=&range=&page=&page_size=&facets=1
+                                   → { ok, entries, total, page, page_size, facets?, stats? }（Agent 运行日志，admin）
+GET  /admin/logs/export?<same filters> → NDJSON（最多 10000 行）
 POST /admin/prompts { agent_type, peer_id?, invite_code?|create_invite } → { code, prompt }
 GET  /admin/rooms?archived=1 → 含已解散（软删除）的房间
 POST /admin/rooms/{id}/dissolve → 解散群聊（软删除）：先发系统通知，再归档；幂等

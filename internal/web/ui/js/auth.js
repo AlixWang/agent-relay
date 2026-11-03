@@ -83,6 +83,13 @@ export async function refreshStats() {
       navMuse.hidden = needs === 0;
     }
 
+    const navLogs = $('navLogs');
+    if (navLogs) {
+      const errors = s.agent_log_errors_24h || 0;
+      navLogs.textContent = errors > 0 ? errors : '';
+      navLogs.hidden = errors === 0;
+    }
+
     if (s.prompt_version) serverPromptVersion = s.prompt_version;
     if (s.client_version) serverClientVersion = s.client_version;
     if (s.receiver_rev) serverReceiverRev = s.receiver_rev;

@@ -52,7 +52,7 @@ This framework turns that one-off script into a reusable, self-hostable system: 
 
 ## 2. Design Principles
 
-1. **Minimal protocol over rich features.** Keep the endpoint surface small: JSON over HTTP, one auth header, and every design decision should survive the question: "can a `curl` one-liner do this?" The original six-to-eight endpoint target is the baseline in `docs/adr/0002-workbench-read-api-deviation.md`; it is not a hard ceiling for read-only workbench/admin extensions, and any new endpoint beyond that baseline needs an ADR rather than a silent edit here. Console *message-sending* features still use the existing `POST /messages` path as reserved identities instead of adding endpoints. The approved workbench APIs do not open a second delivery path.
+1. **Minimal protocol over rich features.** Keep the endpoint surface small: JSON over HTTP, one auth header, and every design decision should survive the question: "can a `curl` one-liner do this?" The original six-to-eight endpoint target is the baseline in `docs/adr/0002-workbench-read-api-deviation.md`; it is not a hard ceiling for read-only workbench/admin extensions, and any new endpoint beyond that baseline needs an ADR rather than a silent edit here. The agent runtime diagnostic endpoints are the approved exception in `docs/adr/0003-agent-runtime-logs.md`. Console *message-sending* features still use the existing `POST /messages` path as reserved identities instead of adding endpoints. The approved workbench APIs do not open a second delivery path.
 2. **Never trust the client.** Clients are LLMs — they skip steps, hallucinate success, and follow injected instructions. The server verifies everything: auth, idempotency, loop state, onboarding completion.
 3. **Relayed instructions follow the user, with two hard redlines.** The relay belongs to the user's own assistant network, so an instruction relayed from the user ("the user asked you to install X") *is* the user's instruction — prompt v8 made this explicit (§6.3) after real assistants refused their own user's relayed orders. Prompt v11 narrowed the redlines from four to two after assistants kept refusing ordinary work: only credential exfiltration and spending money still require the user's own approval; everything else runs by default and any refusal must name the redline it hits. The server cannot verify authorship, so the redline list — not a "trust nothing" posture — is the boundary, and it lives in the prompt templates.
 4. **The server is the safety boundary.** Loop fuses, rate limits, approval gates, and retention run server-side and cannot be bypassed by a misbehaving or prompt-injected client.
@@ -189,6 +189,9 @@ SQLite (WAL mode) behind a repository interface so Postgres is a drop-in later. 
 - Background job: messages whose thread is fully acked and older than `message_ttl` (default 30 days) are moved to an archive table (or exported as JSONL and deleted).
 - Peers not seen in `peer_prune_after` (default 7 days) are pruned from the peers table (tokens remain until revoked).
 - Audit log retained longer (default 90 days), exportable from the UI.
+- Agent runtime logs are retained for `agent_log_retention_days` (default 30 days)
+  and capped per peer (`agent_log_max_rows_per_peer`, default 20000); both are
+  diagnostic data, separate from the audit trail (§4.11).
 
 ### 4.8 Web (`internal/web`)
 
@@ -248,6 +251,24 @@ Phase 4 adds immutable per-template prompt revisions (`prompt_revisions` with
 `/admin/prompts/versions`). See `docs/SUPERAGENT.md`,
 `docs/adr/0001-work-items-as-projection.md`, and the approved endpoint exception in
 `docs/adr/0002-workbench-read-api-deviation.md`.
+
+### 4.11 Agent runtime logs (`internal/agentlog`)
+
+Operational diagnostics from the local delivery chain — relay-tail connection
+state, relay-watch spool/wake decisions, worker start/timeout — are uploaded by
+clients to `POST /logs` and stored in `agent_logs`. This is deliberately **not**
+`audit_log`: audit is a low-volume security/action trail with 90-day retention;
+Agent logs are high-volume, short-lived diagnostics with their own retention
+(default 30 days) and per-peer row cap.
+
+The ingest path is best-effort: authentication is the peer token, `peer_id` comes
+from the token (never the body), batches are capped (100 events / 256 KiB), per-
+peer rate limiting protects the message path, and `fields` is sanitized to drop
+token/cookie/credential keys. Upload failures never block `/messages`, `/ack` or
+`wake()`. `POST /logs` deliberately skips the §8.5 `min_client` gate so an old
+client can report why it cannot talk to the current server. The admin read model
+is `GET /admin/logs` (filters: peer, level, source, event, task, thread, q, time
+range; facets + paged) and `GET /admin/logs/export` (NDJSON).
 
 ---
 
@@ -399,6 +420,25 @@ CREATE TABLE audit_log (
     detail        TEXT DEFAULT ''
 );
 
+-- Agent runtime diagnostics (§4.11): uploaded by clients, separate from audit.
+CREATE TABLE agent_logs (
+    seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id       TEXT NOT NULL,            -- client id; unique per peer
+    ts             INTEGER NOT NULL,         -- client event time
+    received_at    INTEGER NOT NULL,         -- server time (retention/query)
+    peer_id        TEXT NOT NULL,            -- from the token, never the body
+    level          TEXT NOT NULL,            -- debug|info|warn|error
+    source         TEXT NOT NULL,            -- relay-watch|relay-tail|...
+    event          TEXT NOT NULL,            -- worker.timeout, wake.failed, ...
+    message        TEXT NOT NULL DEFAULT '',
+    task_id        TEXT NOT NULL DEFAULT '',
+    thread         TEXT NOT NULL DEFAULT '',
+    fields         TEXT NOT NULL DEFAULT '{}',
+    client_version TEXT NOT NULL DEFAULT '',
+    client_rev     TEXT NOT NULL DEFAULT '',
+    UNIQUE(peer_id, event_id)
+);
+
 -- Optional Muse account authorization (§4.9). One account per peer; the
 -- cookie jar is AES-GCM ciphertext, never plaintext and never served.
 CREATE TABLE muse_accounts (
@@ -459,6 +499,7 @@ All endpoints require `Authorization: Bearer <token>` unless noted.
 | `POST /ack` | Acknowledge delivery | `{message_id, by}` or `{ids:[…], by}` (≤200 per call, §7.8: one wake batch in one request; ids the peer cannot see come back under `skipped`) — `by` must match the token's peer. Broadcasts stay visible to others until each acks. |
 | `GET /messages/room?room=grp_<slug>&limit=<n>` | Room read-back (§7.8) | Newest messages of a room the caller belongs to, oldest-first (default 20, cap 50), *regardless of ack state* — the pull above is a delivery queue and drops what the peer already acked, so without this read-back a member cannot see what the others just said before it answers. Read-only (no cursor/ack side effects); membership required; private replies inside the thread stay visible only to their addressee. |
 | `POST /heartbeat` | Presence ping | `{id}` → updates `last_seen`. Clients call this every poll. |
+| `POST /logs` | Upload runtime diagnostics | Best-effort agent log batch (§4.11). `peer_id` comes from the token; bounded and rate-limited; never blocks message delivery. |
 | `GET /peers` | Member list + online status | `[{id, display_name, agent_type, status, last_seen, online}]`. |
 | `POST /verify/smoke` | Trigger onboarding verification | Server creates a smoke task addressed to the requester; see §9.4. |
 
@@ -471,6 +512,8 @@ Admin (session cookie, separate from agent tokens):
 | `GET /admin/tokens` · `DELETE /admin/tokens/:id` | List tokens (hash prefix, last used); revoke. |
 | `GET /admin/messages?thread=<root_id>` | Inspect a thread; force-approve/reject held messages. |
 | `GET /admin/audit` | Audit log query/export. |
+| `GET /admin/logs` | Agent runtime log query, filters/facets/paging (§4.11). |
+| `GET /admin/logs/export` | Agent runtime log export as NDJSON, same filters. |
 | `POST /admin/prompts` | Generate an onboarding prompt for a chosen agent type (§9.3). |
 | `GET/POST /admin/muse/accounts` · `PATCH/DELETE /admin/muse/accounts/:id` | Optional Muse account authorization (§4.9): write-only cookie binding, enable/auto-wake switches, revoke. |
 | `POST /admin/muse/accounts/:id/keepalive` · `/wake` · `POST /admin/muse/keepalive` · `GET /admin/muse/status` | Manual session renewal / VM wake / all-account sweep / loop status. |
@@ -736,6 +779,7 @@ Only `active` peers receive broadcasts and appear as assignable in the UI. This 
 - `GET /health` returns `{protocol: 1, min_client: 1}`.
 - Clients report `protocol_version` at registration and (optionally) per-heartbeat.
 - If a client's version is below `min_client`, protocol endpoints return `426 Upgrade Required` with a message directing its user to re-run the current onboarding prompt. The UI lists each peer's reported version so drift is visible before it breaks.
+- `POST /logs` is the deliberate exception: it stays open to old clients so they can report their own `426`/connection failures. It is best-effort and never gates message delivery.
 
 ### 8.6 Prompt distribution (worker-instruction updates without re-onboarding)
 
@@ -928,11 +972,13 @@ semantics (full list, or the legacy `limit`/`since` cursor for audit).
 - `GET /admin/messages?q=` — paged payload search (`SearchMessagesPage`).
 - `GET /admin/audit` — paged newest-first with `action` as a *prefix* match,
   `q` over `detail`, and `facets=1` returning distinct actors/actions.
+- `GET /admin/logs` — paged newest-first with peer/level/source/event/task/thread/q
+  filters, a 24h stats card and facets; `GET /admin/logs/export` returns NDJSON.
 - `GET /admin/stats` — gains `threads_total`/`pending_approvals`/
   `tokens_active`/`audit_total` for the overview cards (single round trip).
 
 The console itself is a hash-routed single page (成员 / 消息线程 / 邀请 /
-审计 / Token / 策略&更新) with dark+light themes, a mobile drawer, toast
+审计 / Agent 日志 / Token / 策略&更新) with dark+light themes, a mobile drawer, toast
 notifications and a shared pager component. It stays build-chain-free: one
 `index.html` + `app.js` + `style.css`, embedded in the binary and served
 with `?v=<tag>` cache busting.
@@ -998,6 +1044,17 @@ path; no agent-facing endpoint was added.
 `cancelled` 之前；空状态只显示一句话，健康状态不占空间。默认登录落点仍是成员页，
 工作台在“运行”组第一位并带待办 badge。助手侧用 `GET /tickets` 读自己的工作项；
 运维用 `POST /admin/tickets/{id}/reassign` 改派。
+
+### 9.7 Agent 日志
+
+`#logs` 是独立的 Agent 运行日志页（`ui/js/logs.js`），不是审计页的替代：
+
+- 顶部显示最近 24 小时的 error/warn 数、上报成员数、最后上报时间。
+- 支持按成员、级别、来源、event、时间范围和关键词筛选；表格可按 `task_id`/`thread`
+  关联到具体任务；点行展开 `fields` JSON。
+- 成员表、工作台行和 Muse 保活行提供「日志」快捷入口，分别带 `?peer=`/`?thread=`。
+- 空状态提示旧版 `relay-watch.sh` 需要重新下载；`navLogs` 角标显示 24h error 数。
+- 日志页按 `GET /admin/logs` 分页读取，导出走 `GET /admin/logs/export`（NDJSON）。
 
 The UI is intentionally boring: a tiny embedded SPA (Alpine + plain ESM modules under `ui/`), no build chain required at deploy time beyond what ships in the binary.
 

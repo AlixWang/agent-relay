@@ -109,6 +109,7 @@ export async function refreshWork() {
         </td>
         <td class="td-actions">
           <button class="btn btn-ghost btn-xs" data-view-work="${esc(t.thread_root)}">${icon('eye', 'xs')}查看线程</button>
+          <button class="btn btn-ghost btn-xs" data-view-logs="${esc(t.thread_root)}">${icon('terminal', 'xs')}日志</button>
         </td>
       </tr>`;
     }).join('');
@@ -121,6 +122,11 @@ export async function refreshWork() {
     });
     tbody.querySelectorAll('button[data-view-work]').forEach((btn) => {
       btn.onclick = () => viewThread(btn.dataset.viewWork);
+    });
+    tbody.querySelectorAll('button[data-view-logs]').forEach((btn) => {
+      btn.onclick = () => {
+        location.hash = '#logs?thread=' + encodeURIComponent(btn.dataset.viewLogs);
+      };
     });
     renderPager($('workPager'), {
       total: r.total || 0,

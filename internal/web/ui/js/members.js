@@ -101,6 +101,9 @@ const museAction = (p) => {
   return '';
 };
 
+const logAction = (p) =>
+  `<button class="btn-icon" data-act="logs" data-id="${esc(p.id)}" data-tip="查看 Agent 日志" aria-label="查看 Agent 日志">${icon('terminal')}</button>`;
+
 const capsBadges = (c) => {
   if (!c || typeof c !== 'object') return '<span class="muted xs">—</span>';
   const keys = Object.keys(c).filter((k) => c[k]);
@@ -264,6 +267,7 @@ export async function refreshPeers() {
         <td class="td-actions">
           <div class="row-btns tight">
             ${museAction(p)}
+            ${logAction(p)}
             ${p.status === 'suspended'
               ? `<button class="btn-icon ok" data-act="activate" data-id="${esc(p.id)}" data-tip="激活解封" aria-label="激活解封">${icon('play')}</button>`
               : `<button class="btn-icon warn" data-act="suspend" data-id="${esc(p.id)}" data-tip="暂停服务" aria-label="暂停服务">${icon('pause')}</button>`}
@@ -293,6 +297,10 @@ export async function refreshPeers() {
           await wakeMuseAccount(btn.dataset.account);
           refreshPeers();
           refreshStats();
+          return;
+        }
+        if (act === 'logs') {
+          location.hash = '#logs?peer=' + encodeURIComponent(id);
           return;
         }
         if (act === 'del') {

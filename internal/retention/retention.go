@@ -13,9 +13,11 @@ import (
 
 // Policy configures retention windows.
 type Policy struct {
-	MessageTTLDays     int
-	PeerPruneAfterDays int
-	AuditRetentionDays int
+	MessageTTLDays         int
+	PeerPruneAfterDays     int
+	AuditRetentionDays     int
+	AgentLogRetentionDays  int
+	AgentLogMaxRowsPerPeer int
 	// PermissionTTLSecs overrides the queue default (600s) for how long a
 	// pending permission request stays decidable. <=0 keeps the default.
 	PermissionTTLSecs int64
@@ -66,6 +68,21 @@ func (r *Runner) RunOnce(now int64) (map[string]int64, error) {
 			return stats, err
 		}
 		stats["audit_pruned"] = n
+	}
+	if r.policy.AgentLogRetentionDays > 0 {
+		cutoff := now - int64(r.policy.AgentLogRetentionDays)*86400
+		n, err := r.st.PruneAgentLogs(cutoff)
+		if err != nil {
+			return stats, err
+		}
+		stats["agent_logs_pruned"] = n
+	}
+	if r.policy.AgentLogMaxRowsPerPeer > 0 {
+		n, err := r.st.TrimAllAgentLogs(r.policy.AgentLogMaxRowsPerPeer)
+		if err != nil {
+			return stats, err
+		}
+		stats["agent_logs_trimmed"] = n
 	}
 	// Decided/expired permission rows older than the message TTL are
 	// dropped; pending rows are never pruned here (expiry is enforced at

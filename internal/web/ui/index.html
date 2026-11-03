@@ -131,6 +131,7 @@
       <a href="#prompts" data-route="prompts" class="sb-link"><svg class="icon"><use href="#i-user-plus"/></svg><span>邀请 &amp; Prompt</span></a>
       <div class="sb-group">安全</div>
       <a href="#audit" data-route="audit" class="sb-link"><svg class="icon"><use href="#i-scroll"/></svg><span>审计日志</span></a>
+      <a href="#logs" data-route="logs" class="sb-link"><svg class="icon"><use href="#i-terminal"/></svg><span>Agent 日志</span><em id="navLogs" class="sb-count warn" hidden></em></a>
       <a href="#tokens" data-route="tokens" class="sb-link"><svg class="icon"><use href="#i-key"/></svg><span>Token 管理</span></a>
       <div class="sb-group">系统</div>
       <a href="#system" data-route="system" class="sb-link"><svg class="icon"><use href="#i-server"/></svg><span>策略 &amp; 更新</span></a>
@@ -754,6 +755,45 @@
             </table>
           </div>
           <div class="pager" id="auditPager"></div>
+        </div>
+      </section>
+
+      <!-- ---------- Agent 日志 ---------- -->
+      <section id="page-logs" class="page" hidden>
+        <div class="panel">
+          <div class="panel-bar">
+            <div class="bar-left">
+              <select id="logPeer" aria-label="成员"><option value="">全部成员</option></select>
+              <select id="logLevel" aria-label="级别">
+                <option value="">全部级别</option>
+                <option value="error">error</option>
+                <option value="warn">warn</option>
+                <option value="info">info</option>
+                <option value="debug">debug</option>
+              </select>
+              <select id="logSource" aria-label="来源"><option value="">全部来源</option></select>
+              <select id="logRange" aria-label="时间范围">
+                <option value="1h">最近 1 小时</option>
+                <option value="24h" selected>最近 24 小时</option>
+                <option value="7d">最近 7 天</option>
+                <option value="30d">最近 30 天</option>
+              </select>
+              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="logEvent" type="search" placeholder="event 前缀"></label>
+              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="logQ" type="search" placeholder="搜索 event / message / task"></label>
+            </div>
+            <div class="bar-right">
+              <div class="chips" id="logStats"></div>
+              <button class="btn btn-ghost btn-sm" id="exportLogs"><svg class="icon"><use href="#i-download"/></svg>导出 NDJSON</button>
+              <button class="btn btn-outline btn-sm" id="refreshLogs"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="logTable">
+              <thead><tr><th>时间</th><th>级别</th><th>成员</th><th>source</th><th>event</th><th>message</th><th>task / thread</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pager" id="logPager"></div>
         </div>
       </section>
 

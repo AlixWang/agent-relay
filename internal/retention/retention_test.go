@@ -241,3 +241,53 @@ func TestOpenTicketPinsMessages(t *testing.T) {
 		t.Fatalf("closed ticket not archived/pruned: %+v", stats)
 	}
 }
+
+func TestPruneAgentLogs(t *testing.T) {
+	st := openTest(t)
+	now := int64(100 * 86400)
+	_, _, err := st.InsertAgentLogs([]*store.AgentLog{
+		{EventID: "old", Ts: now - 2*86400, ReceivedAt: now - 2*86400, PeerID: "alice", Level: "error", Source: "relay-watch", Event: "worker.timeout"},
+		{EventID: "new", Ts: now, ReceivedAt: now, PeerID: "alice", Level: "info", Source: "relay-watch", Event: "wake.requested"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(st, Policy{AgentLogRetentionDays: 1, DataDir: t.TempDir()})
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if stats["agent_logs_pruned"] != 1 {
+		t.Fatalf("pruned=%d want 1", stats["agent_logs_pruned"])
+	}
+	_, total, err := st.ListAgentLogsPage(store.AgentLogFilter{PeerID: "alice"}, 10, 0)
+	if err != nil || total != 1 {
+		t.Fatalf("remaining total=%d err=%v", total, err)
+	}
+}
+
+func TestTrimAgentLogsPerPeerCap(t *testing.T) {
+	st := openTest(t)
+	now := int64(1000)
+	for i := 0; i < 3; i++ {
+		_, _, err := st.InsertAgentLogs([]*store.AgentLog{{
+			EventID: "cap-" + string(rune('a'+i)), Ts: now, ReceivedAt: now,
+			PeerID: "alice", Level: "info", Source: "relay-watch", Event: "wake.requested",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := New(st, Policy{AgentLogMaxRowsPerPeer: 2, DataDir: t.TempDir()})
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if stats["agent_logs_trimmed"] != 1 {
+		t.Fatalf("trimmed=%d want 1", stats["agent_logs_trimmed"])
+	}
+	_, total, err := st.ListAgentLogsPage(store.AgentLogFilter{PeerID: "alice"}, 10, 0)
+	if err != nil || total != 2 {
+		t.Fatalf("remaining=%d err=%v", total, err)
+	}
+}

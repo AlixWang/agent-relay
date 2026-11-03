@@ -9,6 +9,7 @@ export const routeMeta = {
   command: { title: '指挥台', desc: '多助手群聊协同、定向指令调度与收件箱' },
   prompts: { title: '邀请 & Prompt', desc: '助手入驻凭据签发与版本指令生成' },
   audit:   { title: '审计日志', desc: '管理事件、状态流转与安全审计追踪' },
+  logs:    { title: 'Agent 日志', desc: '接收端、看门狗与唤醒链运行日志' },
   tokens:  { title: 'Token 管理', desc: '凭证轮换、前缀核验与实时吊销' },
   system:  { title: '策略 & 更新', desc: '运行策略参数、服务规格与自动升级' },
 };

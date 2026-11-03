@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AlixWang/agent-relay/internal/agentlog"
 	"github.com/AlixWang/agent-relay/internal/auth"
 	"github.com/AlixWang/agent-relay/internal/config"
 	"github.com/AlixWang/agent-relay/internal/effects"
@@ -44,17 +45,18 @@ func ReceiverRev() string { return receiverRev }
 
 // Server bundles all dependencies for HTTP handlers.
 type Server struct {
-	cfg      *config.Config
-	st       store.Store
-	auth     *auth.Service
-	guard    *guard.Guard
-	queue    *queue.Service
-	presence *presence.Service
-	verify   *verify.Service
-	stream   *stream.Hub
-	muse     *muse.Service
-	work     *work.Service
-	effects  *effects.Worker
+	cfg       *config.Config
+	st        store.Store
+	auth      *auth.Service
+	guard     *guard.Guard
+	queue     *queue.Service
+	presence  *presence.Service
+	verify    *verify.Service
+	stream    *stream.Hub
+	muse      *muse.Service
+	work      *work.Service
+	effects   *effects.Worker
+	agentLogs *agentlog.Ingestor
 
 	adminHash []byte
 	mu        sync.Mutex
@@ -69,6 +71,7 @@ func New(cfg *config.Config, st store.Store, au *auth.Service, q *queue.Service,
 	return &Server{
 		cfg: cfg, st: st, auth: au, queue: q,
 		presence: p, verify: v,
+		agentLogs:  agentlog.New(st, cfg.AgentLogRatePerMinute, cfg.AgentLogMaxRowsPerPeer),
 		serverAddr: serverAddr,
 	}
 }
@@ -126,6 +129,7 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /messages/stream", s.handleStream)
 	mux.HandleFunc("POST /ack", s.handleAck)
 	mux.HandleFunc("POST /heartbeat", s.handleHeartbeat)
+	mux.HandleFunc("POST /logs", s.handleAgentLogs)
 	mux.HandleFunc("GET /peers", s.handlePeers)
 	mux.HandleFunc("GET /tickets", s.handleMyTickets)
 	mux.HandleFunc("GET /tickets/{id}", s.handleMyTicket)
@@ -151,6 +155,8 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("POST /admin/messages/approve", s.requireAdmin(s.handleAdminApprove))
 	mux.HandleFunc("POST /admin/fuse/reset", s.requireAdmin(s.handleAdminFuseReset))
 	mux.HandleFunc("GET /admin/audit", s.requireAdmin(s.handleAdminAudit))
+	mux.HandleFunc("GET /admin/logs", s.requireAdmin(s.handleAdminLogs))
+	mux.HandleFunc("GET /admin/logs/export", s.requireAdmin(s.handleAdminLogsExport))
 	mux.HandleFunc("POST /admin/prompts", s.requireAdmin(s.handleAdminPrompts))
 	mux.HandleFunc("GET /admin/prompts/versions", s.requireAdmin(s.handleAdminPromptVersions))
 	mux.HandleFunc("GET /admin/prompts/diff", s.requireAdmin(s.handleAdminPromptDiff))
@@ -1652,6 +1658,12 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			body["attention_tickets"] = c.Attention
 		}
 	}
+	// Agent runtime log badge (§4.11): recent errors across reporting peers.
+	if st, err := s.st.AgentLogStats(now-86400, now); err == nil {
+		body["agent_log_errors_24h"] = st.Errors
+		body["agent_log_warnings_24h"] = st.Warnings
+		body["agent_log_peers_24h"] = st.Peers
+	}
 	// Muse nav badge (§4.9): authorizations needing a fresh cookie.
 	if s.muse != nil {
 		if accounts, err := s.muse.List(); err == nil {
@@ -1683,9 +1695,12 @@ func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"ok": true,
 		"retention": map[string]any{
-			"message_ttl_days":      s.cfg.MessageTTLDays,
-			"peer_prune_after_days": s.cfg.PeerPruneAfterDays,
-			"audit_retention_days":  s.cfg.AuditRetentionDays,
+			"message_ttl_days":            s.cfg.MessageTTLDays,
+			"peer_prune_after_days":       s.cfg.PeerPruneAfterDays,
+			"audit_retention_days":        s.cfg.AuditRetentionDays,
+			"agent_log_retention_days":    s.cfg.AgentLogRetentionDays,
+			"agent_log_rate_per_minute":   s.cfg.AgentLogRatePerMinute,
+			"agent_log_max_rows_per_peer": s.cfg.AgentLogMaxRowsPerPeer,
 		},
 		"guard": map[string]any{
 			"fuse_max_messages": s.cfg.FuseMaxMessages,

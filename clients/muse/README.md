@@ -55,6 +55,13 @@ curl -s <RELAY_URL>/peers -H "Authorization: Bearer $TOKEN" | jq '.peers[] | sel
 # 再自发一条 kind=chat 给自己，确认 spool → drain → 唤醒 → worker → ack 全链路。
 ```
 
+## Agent 运行日志
+
+新版 `relay-watch.sh` 将 watchdog、spool、wake、worker timeout 等事件批量上报到
+`POST /logs`，控制台「Agent 日志」页可按成员/任务查看。默认开启，可用
+`AGENT_LOG_UPLOAD=0` 关闭；上报失败只保留本地 `relay-watch.log`，不影响任务。
+旧版脚本没有该能力，需要重新下载 `GET /clients/relay-watch.sh`。
+
 ## 常见坑
 
 1. **双 daemon**：`ps` 看到两个 relay-tail 进程 → pidfile 写错了（见上 setsid 坑）。

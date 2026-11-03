@@ -96,7 +96,7 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 	for _, key := range []string{
 		"loginPage", "loginForm", "loginbtn", "username", "pw", "loginErr", "app",
 		"sidebar", "menuBtn", "themeBtn", "logoutbtn", "pageTitle", "pageDesc",
-		"page-work", "page-members", "page-threads", "page-command", "page-prompts", "page-audit", "page-tokens", "page-system",
+		"page-work", "page-members", "page-threads", "page-command", "page-prompts", "page-audit", "page-logs", "page-tokens", "page-system",
 		"threadDrawer", "rotateDlg", "confirmDlg", "toasts",
 	} {
 		if !ids[key] {
@@ -117,6 +117,7 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 		"/js/threads.js",
 		"/js/prompts.js",
 		"/js/audit.js",
+		"/js/logs.js",
 		"/js/tokens.js",
 		"/js/system.js",
 		"/js/command.js",
@@ -175,6 +176,11 @@ func TestWatchScriptEmbedded(t *testing.T) {
 	if !strings.Contains(s, "relay-watch") || !strings.Contains(s, "spool") {
 		t.Fatal("embedded watch script looks wrong")
 	}
+	for _, must := range []string{"AGENT_LOG_FILE", "flush_agent_logs", `"$RELAY_URL/logs"`, "wake.requested", "watchdog.binary_missing", "worker.timeout"} {
+		if !strings.Contains(s, must) {
+			t.Fatalf("embedded watch script missing log reporting %q", must)
+		}
+	}
 	// Must stay in sync with the repo copy.
 	raw, err := os.ReadFile("../../clients/muse/relay-watch.sh")
 	if err != nil {
@@ -189,7 +195,7 @@ func TestWatchHermesScriptEmbedded(t *testing.T) {
 	s := WatchHermesScript()
 	// The Hermes edition must keep the shared thin-layer shape and carry its
 	// own wake implementation (one-shot worker + single-flight lock).
-	for _, must := range []string{"spool", "wake_running", "hermes", "wake.lock"} {
+	for _, must := range []string{"spool", "wake_running", "hermes", "wake.lock", "AGENT_LOG_FILE", "flush_agent_logs", `"$RELAY_URL/logs"`} {
 		if !strings.Contains(s, must) {
 			t.Fatalf("embedded hermes watch script missing %q", must)
 		}

@@ -110,6 +110,7 @@ const rowActions = (a) => {
   return `<div class="row-btns tight">
     <button class="btn-icon" data-act="keepalive" data-id="${esc(a.id)}" data-tip="立即保活" aria-label="立即保活">${icon('refresh')}</button>
     <button class="btn-icon" data-act="wake" data-id="${esc(a.id)}" data-tip="唤醒 Muse 沙盒" aria-label="唤醒 Muse 沙盒">${icon('zap')}</button>
+    <button class="btn-icon" data-act="logs" data-id="${esc(a.id)}" data-peer="${esc(a.peer_id)}" data-tip="查看 Agent 日志" aria-label="查看 Agent 日志">${icon('terminal')}</button>
     <button class="btn-icon${reauthTone}" data-act="reauth" data-id="${esc(a.id)}" data-tip="重新授权 / 更新 Cookie" aria-label="重新授权">${icon('key')}</button>
     <button class="btn-icon${a.enabled ? '' : ' ok'}" data-act="toggle" data-id="${esc(a.id)}" data-tip="${a.enabled ? '停用后台保活' : '启用后台保活'}" aria-label="${a.enabled ? '停用后台保活' : '启用后台保活'}">${a.enabled ? icon('pause') : icon('play')}</button>
     <button class="btn-icon danger" data-act="delete" data-id="${esc(a.id)}" data-tip="删除授权" aria-label="删除授权">${icon('trash')}</button>
@@ -229,6 +230,9 @@ function renderMuse() {
       const a = museState.accounts.find((x) => x.id === btn.dataset.id);
       if (!a) return;
       switch (btn.dataset.act) {
+        case 'logs':
+          location.hash = '#logs?peer=' + encodeURIComponent(btn.dataset.peer || '');
+          break;
         case 'keepalive':
           await keepaliveAccount(a);
           break;

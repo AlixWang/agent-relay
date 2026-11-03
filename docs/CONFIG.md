@@ -27,6 +27,9 @@
 | `message_ttl_days` | int | `30` | 全 ack 且超期的消息归档为 `archive/YYYY-MM.jsonl` 后删除 |
 | `peer_prune_after_days` | int | `7` | 超期未见的 peer 行删除（token 保留，可随时回来） |
 | `audit_retention_days` | int | `90` | 审计日志保留 |
+| `agent_log_retention_days` | int | `30` | Agent 运行日志保留天数（`POST /logs`，独立于审计日志；0=不按天清理） |
+| `agent_log_rate_per_minute` | int | `60` | 单 peer 每分钟最多上报多少条 Agent 日志事件（超出 `429 + Retry-After`） |
+| `agent_log_max_rows_per_peer` | int | `20000` | 单 peer 保留的 Agent 日志最大行数，超出按最旧删除（0=不限） |
 | `offline_webhook_url` | string | `""` | peer 由在线转离线时 POST `{"kind","key","peer_id","offline_secs","ts"}`，并带 `X-Agent-Relay-Effect-Kind/Key` 头；由持久化 effects 队列重试，接收方按 kind+key 幂等（Phase 3） |
 | `max_body_bytes` | int | `1048576` | 请求体上限 1 MiB |
 | `stream_keepalive_secs` | int | `20` | SSE 保活间隔秒（0=用 20；上限 120，§4.4b） |

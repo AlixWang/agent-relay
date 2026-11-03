@@ -177,6 +177,26 @@ CREATE TABLE IF NOT EXISTS audit_log (
     action        TEXT NOT NULL,
     detail        TEXT DEFAULT ''
 );
+-- Agent runtime diagnostics (DESIGN §4.11): structured logs uploaded by
+-- clients. Deliberately separate from audit_log: these are high-volume,
+-- short-lived operational records, not security/action audit history.
+CREATE TABLE IF NOT EXISTS agent_logs (
+    seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id       TEXT NOT NULL,
+    ts             INTEGER NOT NULL,
+    received_at    INTEGER NOT NULL,
+    peer_id        TEXT NOT NULL,
+    level          TEXT NOT NULL,
+    source         TEXT NOT NULL,
+    event          TEXT NOT NULL,
+    message        TEXT NOT NULL DEFAULT '',
+    task_id        TEXT NOT NULL DEFAULT '',
+    thread         TEXT NOT NULL DEFAULT '',
+    fields         TEXT NOT NULL DEFAULT '{}',
+    client_version TEXT NOT NULL DEFAULT '',
+    client_rev     TEXT NOT NULL DEFAULT '',
+    UNIQUE(peer_id, event_id)
+);
 CREATE TABLE IF NOT EXISTS thread_fuses (
     root_id       TEXT PRIMARY KEY,
     cleared_seq   INTEGER DEFAULT 0,
@@ -273,3 +293,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_recipient_seq ON messages(recipient, seq
 CREATE INDEX IF NOT EXISTS idx_messages_root ON messages(root_id, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender, id);
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+CREATE INDEX IF NOT EXISTS idx_agent_logs_received ON agent_logs(received_at);
+CREATE INDEX IF NOT EXISTS idx_agent_logs_peer_received ON agent_logs(peer_id, received_at);
+CREATE INDEX IF NOT EXISTS idx_agent_logs_level_received ON agent_logs(level, received_at);
+CREATE INDEX IF NOT EXISTS idx_agent_logs_event_received ON agent_logs(event, received_at);

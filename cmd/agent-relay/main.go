@@ -310,11 +310,13 @@ func museLoop(ctx context.Context, m *muse.Service, cfg *config.Config) {
 
 func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config) {
 	r := retention.New(st, retention.Policy{
-		MessageTTLDays:     cfg.MessageTTLDays,
-		PeerPruneAfterDays: cfg.PeerPruneAfterDays,
-		AuditRetentionDays: cfg.AuditRetentionDays,
-		PermissionTTLSecs:  cfg.PermissionTTLSecs,
-		DataDir:            cfg.DataDir,
+		MessageTTLDays:         cfg.MessageTTLDays,
+		PeerPruneAfterDays:     cfg.PeerPruneAfterDays,
+		AuditRetentionDays:     cfg.AuditRetentionDays,
+		AgentLogRetentionDays:  cfg.AgentLogRetentionDays,
+		AgentLogMaxRowsPerPeer: cfg.AgentLogMaxRowsPerPeer,
+		PermissionTTLSecs:      cfg.PermissionTTLSecs,
+		DataDir:                cfg.DataDir,
 	})
 	t := time.NewTicker(6 * time.Hour)
 	defer t.Stop()

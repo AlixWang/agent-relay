@@ -135,6 +135,7 @@ export async function refreshSystem() {
         <dt>${icon('timer', 'xs')} 消息保留时长 (TTL)</dt><dd>${r.message_ttl_days} 天</dd>
         <dt>${icon('trash', 'xs')} 离线成员剪枝</dt><dd>${r.peer_prune_after_days} 天</dd>
         <dt>${icon('scroll', 'xs')} 审计日志保留</dt><dd>${r.audit_retention_days} 天</dd>
+        <dt>${icon('terminal', 'xs')} Agent 日志保留</dt><dd>${r.agent_log_retention_days ?? 30} 天 · ${r.agent_log_rate_per_minute ?? 60} 条/分钟/成员 · 每成员最多 ${r.agent_log_max_rows_per_peer ?? 20000} 行</dd>
         <dt>${icon('alert', 'xs')} 会话熔断阈值</dt><dd>${g.fuse_max_messages} 条 / ${Math.floor((g.fuse_max_age_secs || 0) / 3600)} 小时</dd>
         <dt>${icon('activity', 'xs')} 发送限流速率</dt><dd>${g.rate_per_minute} 次 / 分钟</dd>
         <dt>${icon('radio', 'xs')} 在线判定超时</dt><dd>${p.online_timeout_secs} 秒</dd>
