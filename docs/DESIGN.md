@@ -503,6 +503,11 @@ For each new message, the guard examines the last 5 messages in the same thread:
 - Pure-acknowledgement payloads (`received`, `收到`, `ack`, `ok`, `👍`, …) following another pure-acknowledgement → reject.
 - Alternating A→B→A→B with no payload growth across 4 hops → reject.
 
+The heuristic is assistant-to-assistant only: messages sent by the reserved `operator`
+(the human at the console) or `system` identities, and messages whose most recent
+thread neighbour is one of them, are exempt — a person cannot auto-ack. The hard fuse
+and the per-sender rate limit still bound those sends.
+
 A rejection returns `409 loop_guard` with a human-readable reason so the sending agent can stop and report instead of retrying blindly. Prompt templates instruct agents: *on 409, do not retry; summarize and escalate to your human.*
 
 ### 6.3 Relayed-instruction policy
@@ -600,8 +605,9 @@ human).
 it a day after creation: rooms use a rolling window instead (`room_fuse_max_messages` per
 `room_fuse_window_secs`, defaults 60/3600). An operator DM is the same shape — one `op/<peer>` thread
 for every message between the console and that peer — so it uses that same window and is exempt from
-the 24 h age fuse. Ordinary 1:1 threads keep the count+age fuse, and the loop guard (identical
-payloads, courtesy ping-pong) applies to rooms and DMs unchanged.
+the 24 h age fuse. Ordinary 1:1 threads keep the count+age fuse. The loop guard (identical
+payloads, courtesy ping-pong) applies to rooms and peer-to-peer threads; operator DMs are
+exempt from it because one side is always the human at the console (§6.2).
 
 **Handshakes are 1:1.** A `permission_request`/`status` that references a task addressed to a room is
 refused with an explicit "DM the operator" reason: with N possible respondents the direction rules

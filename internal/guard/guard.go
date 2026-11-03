@@ -362,8 +362,20 @@ func isAckOnly(payload string) bool {
 }
 
 func (g *Guard) loopCheck(rootID string, env *Envelope) *Rejection {
+	// The heuristic exists for assistant-to-assistant courtesy loops. The
+	// reserved operator identity is the human at the console and system is
+	// the relay itself, so neither can acknowledge forever. Exempt messages
+	// they sent — and messages whose most recent thread neighbour is one of
+	// them — from the whole heuristic (duplicate/ack/alternating); the hard
+	// fuse and rate limiter still bound every send.
+	if !isPeerIdentity(env.From) {
+		return nil
+	}
 	last, err := g.st.LastNInThread(rootID, 5)
 	if err != nil || len(last) == 0 {
+		return nil
+	}
+	if !isPeerIdentity(last[len(last)-1].Sender) {
 		return nil
 	}
 	norm := normalize(env.Payload)

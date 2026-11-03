@@ -114,6 +114,24 @@ func TestLoopGuardAckOnly(t *testing.T) {
 	}
 }
 
+// Operator DMs are human↔assistant conversations, not LLM courtesy loops:
+// short messages must pass in both directions. Peer↔peer ack chains still trip
+// (TestLoopGuardAckOnly).
+func TestLoopGuardExemptsOperatorDM(t *testing.T) {
+	st := openTestStore(t)
+	g := New(st, testLimits())
+	now := time.Now().Unix()
+
+	// The assistant's short ack opens the DM thread op/alice.
+	sendOK(t, g, st, &Envelope{ID: "a1", To: auth.OperatorID, From: "alice", Kind: "result", Payload: "收到"}, now)
+	// A short human message in that thread must not read as a courtesy ack.
+	sendOK(t, g, st, &Envelope{ID: "o1", To: "alice", From: auth.OperatorID, Kind: "task", Payload: "你好"}, now+1)
+	// The assistant replying briefly to the human must pass too.
+	if _, err := g.Check(&Envelope{ID: "a2", To: auth.OperatorID, From: "alice", Kind: "result", Payload: "收到"}, now+2); err != nil {
+		t.Fatalf("assistant reply after operator DM hit loop guard: %v", err)
+	}
+}
+
 func TestRateLimit(t *testing.T) {
 	st := openTestStore(t)
 	g := New(st, Limits{FuseMaxMessages: 1000, FuseMaxAgeSecs: 3600, RatePerMinute: 12})
