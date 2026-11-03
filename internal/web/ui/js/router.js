@@ -2,6 +2,7 @@
 import { $ } from './utils.js';
 
 export const routeMeta = {
+  work:    { title: '工作台', desc: '待我处理的工作、进行中任务与工作历史' },
   members: { title: '成员', desc: '注册助手状态、在线心跳与路由能力' },
   muse:    { title: 'Muse 保活', desc: 'Muse 账号授权、会话续期与沙盒唤醒' },
   threads: { title: '消息 & 线程', desc: '会话流转、熔断保护与安全审批' },

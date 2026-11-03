@@ -45,9 +45,19 @@ Web 控制台不只是看板：`指挥台` 页可以直接给助手下指令，�
   群里发一条名单通知。回复整个群用 `to=grp_<slug>`，只回操作者用 `to=operator`。
 - **收件箱**：助手发给 `operator` 的汇报按线程汇总，带未读标记，可一键标记已读。
 - **一手证据**：群线程里每条消息显示谁已读（`acked_by`），成员列表标出还没读到群聊守则
-  （prompt < v12）的成员，避免把群指令当私聊任务。
-- 全部复用 `POST /messages` 与既有投递/熔断/SSE 路径：**没有新增 agent 端点**；群聊用窗口熔断
+  （低于 room-aware revision，当前 v16）的成员，避免把群指令当私聊任务。
+- 全部复用 `POST /messages` 与既有投递/熔断/SSE 路径：**群聊没有新增 agent 端点**；群聊用窗口熔断
   （默认 60 条/小时），不会被一对一那样的整线程熔断锁死。
+
+## 工作台（工作项 / 待我处理）
+
+控制台的 `工作台` 页把直接任务消息投影成工作项（Ticket）：`待审批`、`待答复`、`待验收`、
+`已阻塞`、`已失败`、`执行者离线` 排在前面，`进行中`、`等待触发`、`排队中`、`已完成` 在后。
+助手可用 `GET /tickets` 只读自己的工作项；运维可用 `/admin/tickets/{id}/reassign` 改派。
+`lease_secs` 到期会结束当前 assignment（工作项转 `person/offline`），必须重新改派才能续；
+status 支持 `waiting/ready/failed/dropped`，其中 `dropped` 是终态，不会被后续 `started` 重开。
+详见 `docs/SUPERAGENT.md`。工作项派生自 `messages`，重启可完整重建，open 工作项的
+消息不会被 retention 归档。
 
 ## Muse 保活 & 账号授权（可选）
 
@@ -77,6 +87,7 @@ JSON over HTTP，每请求带 `Authorization: Bearer <per-identity token>`。
 | `POST /ack` | `{message_id, by}` — 每身份独立 ack |
 | `POST /heartbeat` | `{id}` — 每次轮询捎带 |
 | `GET /peers` | 成员 + 在线状态 |
+| `GET /tickets` | 只读自己的工作项（Ticket）列表；`GET /tickets/{id}` 单条 |
 | `POST /verify/smoke` | 服务端下发冒烟任务，闭环验证后转 `active` |
 
 完整字段、状态码（409/429/426 含义与客户端动作）见 `docs/API.md`。
@@ -91,17 +102,19 @@ internal/
   auth/               per-identity token + invite 注册
   guard/              熔断/循环启发式/限流/审批门/幂等
   queue/              路由（direct/broadcast/thread-reply）+ seq 同步 + smoke 下发
+  work/               工作项层（tickets/message_tickets/assignments/subscriptions）+ stage/attention
+  effects/            持久化副作用队列（webhook 重试 + health）
   presence/           heartbeat + 在线窗口 + 离线跃迁/webhook
   muse/               可选 Muse 账号授权 + /api/session 续期 + /api/hatch/vm/wake
   verify/             pending→verifying→active/failed 状态机
   prompts/            四套 onboarding 模板（muse/hermes/claw/generic）
   gateway/            HTTP 路由 + 鉴权绑定 + 版本协商 + admin API
   retention/          TTL 归档/剪枝/审计保留
-  web/ui/             嵌入式运维控制台（成员/Muse 保活/邀请/线程/审计，无构建链）
+  web/ui/             嵌入式运维控制台（工作台/成员/Muse 保活/邀请/线程/审计，无构建链）
 configs/              config.toml.example
 deploy/               install.sh（一键安装）+ systemd unit
 clients/              relay-poll.sh（零 token 轮询）+ task-relay-watch.sh（hook 包装）+ e2e.sh
-docs/                 DESIGN / API / CONFIG / DEPLOY / MIGRATION / POSTGRES / ROADMAP
+docs/                 DESIGN / API / CONFIG / DEPLOY / MIGRATION / POSTGRES / ROADMAP / SUPERAGENT + adr/
 migrations/           001_init.sql（人类可读，执行体在 store/schema.sql）
 prototype/            Python v2 原型（回滚备份，不再演进）
 ```

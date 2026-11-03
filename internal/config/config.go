@@ -46,6 +46,11 @@ type Config struct {
 	FuseMaxMessages   int `toml:"fuse_max_messages"`
 	FuseMaxAgeSecs    int `toml:"fuse_max_age_secs"`
 	RatePerMinute     int `toml:"rate_per_minute"`
+	// Deterministic task admission (docs/SUPERAGENT.md Phase 3). Defaults
+	// preserve the historical behaviour: peers may delegate tasks, and a
+	// peer-created task is not automatically held for the operator.
+	AllowPeerTasks               bool `toml:"allow_peer_tasks"`
+	RequireTaskApprovalFromPeers bool `toml:"require_task_approval_from_peers"`
 	// Permission handshake (§6.5): per-thread caps for execution-time
 	// remote approval. Zero disables the corresponding cap.
 	MaxOpenPermissions   int   `toml:"max_open_permissions"`
@@ -91,35 +96,37 @@ type Config struct {
 // Default returns the documented defaults (DESIGN §6.1, §10.2).
 func Default() *Config {
 	return &Config{
-		ListenAddr:           "auto",
-		Port:                 18789,
-		DataDir:              "/var/lib/agent-relay",
-		Public:               false,
-		Protocol:             1,
-		MinClient:            1,
-		OnlineTimeoutSecs:    300,
-		VerifyTimeoutSecs:    600,
-		FuseMaxMessages:      500,
-		FuseMaxAgeSecs:       24 * 3600,
-		RatePerMinute:        60,
-		MaxOpenPermissions:   10,
-		ProgressThrottleSecs: 10,
-		PermissionTTLSecs:    600,
-		MessageTTLDays:       30,
-		PeerPruneAfterDays:   7,
-		AuditRetentionDays:   90,
-		MaxBodyBytes:         1 << 20,
-		StreamKeepaliveSecs:  20,
-		StreamMaxPerPeer:     3,
-		ProfileRefreshDays:   7,
-		MaxRoomMembers:       16,
-		RoomFuseMaxMessages:  60,
-		RoomFuseWindowSecs:   3600,
-		MuseKeepaliveSecs:    900,
-		MuseWakeCooldownSecs: 300,
-		MuseHTTPTimeoutSecs:  12,
-		MuseAutoWake:         true,
-		MuseBaseURL:          "https://muse.ai",
+		ListenAddr:                   "auto",
+		Port:                         18789,
+		DataDir:                      "/var/lib/agent-relay",
+		Public:                       false,
+		Protocol:                     1,
+		MinClient:                    1,
+		OnlineTimeoutSecs:            300,
+		VerifyTimeoutSecs:            600,
+		FuseMaxMessages:              500,
+		FuseMaxAgeSecs:               24 * 3600,
+		RatePerMinute:                60,
+		AllowPeerTasks:               true,
+		RequireTaskApprovalFromPeers: false,
+		MaxOpenPermissions:           10,
+		ProgressThrottleSecs:         10,
+		PermissionTTLSecs:            600,
+		MessageTTLDays:               30,
+		PeerPruneAfterDays:           7,
+		AuditRetentionDays:           90,
+		MaxBodyBytes:                 1 << 20,
+		StreamKeepaliveSecs:          20,
+		StreamMaxPerPeer:             3,
+		ProfileRefreshDays:           7,
+		MaxRoomMembers:               16,
+		RoomFuseMaxMessages:          60,
+		RoomFuseWindowSecs:           3600,
+		MuseKeepaliveSecs:            900,
+		MuseWakeCooldownSecs:         300,
+		MuseHTTPTimeoutSecs:          12,
+		MuseAutoWake:                 true,
+		MuseBaseURL:                  "https://muse.ai",
 	}
 }
 
@@ -145,7 +152,8 @@ func Load(path string) (*Config, error) {
 		"admin_password_hash": true, "protocol": true, "min_client": true,
 		"online_timeout_secs": true, "verify_timeout_secs": true,
 		"fuse_max_messages": true, "fuse_max_age_secs": true,
-		"rate_per_minute": true, "max_open_permissions": true,
+		"rate_per_minute": true, "allow_peer_tasks": true,
+		"require_task_approval_from_peers": true, "max_open_permissions": true,
 		"progress_throttle_secs": true, "permission_ttl_secs": true, "message_ttl_days": true,
 		"peer_prune_after_days": true, "audit_retention_days": true,
 		"offline_webhook_url": true, "max_body_bytes": true,

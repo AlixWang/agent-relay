@@ -5,8 +5,11 @@ package prompts
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"text/template"
 )
 
@@ -75,18 +78,7 @@ func Render(agentType string, d Data) (string, error) {
 		d.PeerID = "(invite-bound identity, or a name you choose matching ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$)"
 	}
 
-	var src string
-	switch agentType {
-	case "muse":
-		src = museTmpl
-	case "hermes":
-		src = hermesTmpl
-	case "claw":
-		src = clawTmpl
-	default:
-		src = genericTmpl
-	}
-	t, err := template.New("prompt").Parse(src)
+	t, err := template.New("prompt").Parse(TemplateSource(agentType))
 	if err != nil {
 		return "", fmt.Errorf("parse prompt template: %w", err)
 	}
@@ -110,7 +102,7 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 16
+const PromptVersion = 17
 
 // RoomAwarePromptVersion is the revision that first documents rooms and the
 // operator identity (§7.8 muse/claw/generic, §6.7 hermes), and that requires the
@@ -204,6 +196,11 @@ var ChangeLog = []ChangeEntry{
 		Summary: "§4 接入步骤补充看门狗落地说明（muse）：5 秒轻量调度只跑 shell 做序号对比，是否唤醒 worker 由脚本内 wake() 决定；附 Hatch hook 参考配置（poll_interval_secs=5），禁止把\"查中继\"本身做成定时唤醒的 worker/agent 任务。",
 		Actions: "按 §4 落地说明检查自己的看门狗调度：确认 5 秒 tick 只跑脚本、不直接唤醒 worker；Hatch 上核对 hook 配置（interval 5s、source HATCH_HOOK_RUNTIME 用真 wake/silent/log 原语）。",
 	},
+	{
+		Version: 17,
+		Summary: "工作项状态词表补齐 §6.5/§5.5：started/progress/resumed 进行中，waiting 暂缓，ready 待验收，blocked 卡住，failed 失败，dropped 放弃（终态，不再重开）。",
+		Actions: "读本类型 §6.5/§5.5 的状态词表；执行中按真实语义回 status：等外部条件发 waiting，待验收发 ready，失败发 failed，主动放弃发 dropped；dropped 后不可再发 started/resumed 重开同一工作项。",
+	},
 }
 
 // ChangesSince returns the ChangeLog entries newer than v (ascending).
@@ -220,3 +217,74 @@ func ChangesSince(v int) []ChangeEntry {
 
 // Types returns the supported agent types for the UI picker.
 func Types() []string { return []string{"muse", "hermes", "claw", "generic"} }
+
+// TemplateSource returns the embedded template text for one agent type.
+// It is the immutable content behind TemplateRevision.
+func TemplateSource(agentType string) string {
+	switch agentType {
+	case "muse":
+		return museTmpl
+	case "hermes":
+		return hermesTmpl
+	case "claw":
+		return clawTmpl
+	default:
+		return genericTmpl
+	}
+}
+
+// TemplateRevision is a stable short hash of one template. Unlike the global
+// PromptVersion, a change to muse.tmpl does not change the hermes revision, so
+// the server can eventually nudge only the affected peers.
+func TemplateRevision(agentType string) string {
+	sum := sha256.Sum256([]byte(TemplateSource(agentType)))
+	return hex.EncodeToString(sum[:6])
+}
+
+// TemplateRevisions returns the current revision of every supported type.
+func TemplateRevisions() map[string]string {
+	out := map[string]string{}
+	for _, typ := range Types() {
+		out[typ] = TemplateRevision(typ)
+	}
+	return out
+}
+
+// LineDiff returns a simple line-level diff between two prompt revisions.
+// It is intentionally dependency-free: the admin API only needs a readable
+// added/removed view, not a patch format.
+func LineDiff(from, to string) (added, removed []string) {
+	a := strings.Split(from, "\n")
+	b := strings.Split(to, "\n")
+	dp := make([][]int, len(a)+1)
+	for i := range dp {
+		dp[i] = make([]int, len(b)+1)
+	}
+	for i := len(a) - 1; i >= 0; i-- {
+		for j := len(b) - 1; j >= 0; j-- {
+			if a[i] == b[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
+	}
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i] == b[j] {
+			i++
+			j++
+		} else if dp[i+1][j] >= dp[i][j+1] {
+			removed = append(removed, a[i])
+			i++
+		} else {
+			added = append(added, b[j])
+			j++
+		}
+	}
+	removed = append(removed, a[i:]...)
+	added = append(added, b[j:]...)
+	return added, removed
+}

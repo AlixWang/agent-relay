@@ -39,6 +39,12 @@ verify_timeout_secs = 600
 fuse_max_messages = 500
 fuse_max_age_secs = 86400
 rate_per_minute = 60
+# Deterministic task admission (Phase 3): peers may delegate tasks to other
+# peers; set require_task_approval_from_peers=true to hold peer→peer tasks for
+# the operator's approval. Peer→operator/system and operator/system tasks are
+# never gated.
+allow_peer_tasks = true
+require_task_approval_from_peers = false
 
 # Permission handshake (DESIGN §6.5): execution-time remote approval.
 max_open_permissions = 10

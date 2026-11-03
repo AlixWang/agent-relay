@@ -13,12 +13,14 @@ func LimitsFromConfig(cfg *config.Config) Limits {
 		return Limits{}
 	}
 	return Limits{
-		FuseMaxMessages:      cfg.FuseMaxMessages,
-		FuseMaxAgeSecs:       int64(cfg.FuseMaxAgeSecs),
-		RatePerMinute:        cfg.RatePerMinute,
-		MaxOpenPermissions:   cfg.MaxOpenPermissions,
-		ProgressThrottleSecs: cfg.ProgressThrottleSecs,
-		RoomFuseMaxMessages:  cfg.RoomFuseMaxMessages,
-		RoomFuseWindowSecs:   int64(cfg.RoomFuseWindowSecs),
+		FuseMaxMessages:              cfg.FuseMaxMessages,
+		FuseMaxAgeSecs:               int64(cfg.FuseMaxAgeSecs),
+		RatePerMinute:                cfg.RatePerMinute,
+		DisallowPeerTasks:            !cfg.AllowPeerTasks,
+		RequireTaskApprovalFromPeers: cfg.RequireTaskApprovalFromPeers,
+		MaxOpenPermissions:           cfg.MaxOpenPermissions,
+		ProgressThrottleSecs:         cfg.ProgressThrottleSecs,
+		RoomFuseMaxMessages:          cfg.RoomFuseMaxMessages,
+		RoomFuseWindowSecs:           int64(cfg.RoomFuseWindowSecs),
 	}
 }

@@ -17,16 +17,19 @@ import (
 
 	"github.com/AlixWang/agent-relay/internal/auth"
 	"github.com/AlixWang/agent-relay/internal/config"
+	"github.com/AlixWang/agent-relay/internal/effects"
 	"github.com/AlixWang/agent-relay/internal/gateway"
 	"github.com/AlixWang/agent-relay/internal/guard"
 	"github.com/AlixWang/agent-relay/internal/muse"
 	"github.com/AlixWang/agent-relay/internal/presence"
+	"github.com/AlixWang/agent-relay/internal/prompts"
 	"github.com/AlixWang/agent-relay/internal/queue"
 	"github.com/AlixWang/agent-relay/internal/retention"
 	"github.com/AlixWang/agent-relay/internal/store"
 	"github.com/AlixWang/agent-relay/internal/stream"
 	"github.com/AlixWang/agent-relay/internal/verify"
 	"github.com/AlixWang/agent-relay/internal/web"
+	"github.com/AlixWang/agent-relay/internal/work"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -79,6 +82,11 @@ func main() {
 	}
 	defer st.Close()
 
+	onlineSecs := int64(cfg.OnlineTimeoutSecs)
+	if onlineSecs <= 0 {
+		onlineSecs = 300
+	}
+	workSvc := work.New(st, onlineSecs)
 	au := auth.New(st, 3600)
 	permTTL := cfg.PermissionTTLSecs
 	if permTTL <= 0 {
@@ -90,6 +98,13 @@ func main() {
 	}
 	queue.SetDefaultPermissionTTL(permTTLMax)
 	g := guard.New(st, guard.LimitsFromConfig(cfg))
+	_ = st.UpsertPolicyVersion(g.PolicyVersion(), g.PolicyRules(), time.Now().Unix())
+	workSvc.SetPolicyVersion(g.PolicyVersion())
+	fx := effects.New(st)
+	fx.RegisterWebhook()
+	if err := prompts.RecordTemplateRevisions(st, time.Now().Unix()); err != nil {
+		log.Printf("WARN: prompt revisions: %v", err)
+	}
 	q := queue.New(st, g)
 	p := presence.New(st, int64(cfg.OnlineTimeoutSecs), cfg.OfflineWebhookURL)
 	v := verify.New(st, int64(cfg.VerifyTimeoutSecs))
@@ -130,6 +145,8 @@ func main() {
 
 	gw := gateway.New(cfg, st, au, q, p, v, serverAddr)
 	gw.SetGuard(g)
+	gw.SetWork(workSvc)
+	gw.SetEffects(fx)
 	// SSE fan-out (DESIGN §4.4b): in-memory wake-ups, DB stays authoritative.
 	gw.SetStream(stream.New(cfg.StreamMaxPerPeer, 500))
 	gw.SetMuse(museSvc)
@@ -166,6 +183,8 @@ func main() {
 	// Background loops.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	workSvc.Start(ctx)
+	fx.Start(ctx)
 	go presenceLoop(ctx, p)
 	go verifyLoop(ctx, v)
 	go retentionLoop(ctx, st, cfg)

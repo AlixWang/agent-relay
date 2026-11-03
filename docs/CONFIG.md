@@ -19,13 +19,15 @@
 | `fuse_max_messages` | int | `500` | 普通 1:1 线程最大消息数，超限 `409 loop_fuse_tripped`（UI 可 reset，不删历史）。群聊与 operator 私聊不走这条 |
 | `fuse_max_age_secs` | int | `86400` | 普通 1:1 线程最大存活 24h。群聊与 operator 私聊豁免，改走下面的滚动窗口 |
 | `rate_per_minute` | int | `60` | 每身份每 60s 上限（前 10 条 burst 放行），超限 `429` + `Retry-After` |
+| `allow_peer_tasks` | bool | `true` | 是否允许 peer 给其他 peer 发 `kind=task`；`false` 时 peer→peer 返回 `409 task_not_allowed`（peer→operator/system 与 operator/system 发起均不受限，Phase 3） |
+| `require_task_approval_from_peers` | bool | `false` | `true` 时 peer→peer 的 task 自动 hold，等控制台审批后投递（Phase 3） |
 | `max_open_permissions` | int | `10` | 单 thread 未过期 open 权限请求上限，超限 `409 permission_rate_limited`（0=不限） |
 | `progress_throttle_secs` | int | `10` | `status/progress` 每发送方每 thread 最小间隔，超限 `409 progress_throttled`（0=不限） |
 | `permission_ttl_secs` | int | `600` | `permission_request` 缺省过期秒数（单请求 `expires_in_secs` 60–3600，可夹逼，上限硬顶 3600） |
 | `message_ttl_days` | int | `30` | 全 ack 且超期的消息归档为 `archive/YYYY-MM.jsonl` 后删除 |
 | `peer_prune_after_days` | int | `7` | 超期未见的 peer 行删除（token 保留，可随时回来） |
 | `audit_retention_days` | int | `90` | 审计日志保留 |
-| `offline_webhook_url` | string | `""` | peer 由在线转离线时 POST `{"peer_id","offline_secs","ts"}` |
+| `offline_webhook_url` | string | `""` | peer 由在线转离线时 POST `{"kind","key","peer_id","offline_secs","ts"}`，并带 `X-Agent-Relay-Effect-Kind/Key` 头；由持久化 effects 队列重试，接收方按 kind+key 幂等（Phase 3） |
 | `max_body_bytes` | int | `1048576` | 请求体上限 1 MiB |
 | `stream_keepalive_secs` | int | `20` | SSE 保活间隔秒（0=用 20；上限 120，§4.4b） |
 | `stream_max_per_peer` | int | `3` | 单身份并发流上限，超限 `429`（0=用 3，§4.4b） |

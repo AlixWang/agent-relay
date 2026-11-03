@@ -18,13 +18,16 @@ GET    /messages/stream?for=<id>&since=<seq>   （SSE，§4.4b 推送：backlog 
 POST   /ack         { message_id, by } | { ids: [...], by }   → { ok, acked, skipped? }
 POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version?, profile?,
                       client_version?, client_rev?, memory_reconciled?, memory_version? }
-                                   → { ok, receiver_rev?, prompt_update?, prompt_version?,
+                                   → { ok, template_revision?, receiver_rev?, prompt_update?, prompt_version?,
                                        client_update?, client_version?, profile_refresh? }
                                      （prompt_update=指令新版；client_update 只在 client_rev 与
                                        服务端 receiver_rev 不同时返回，§8.9；memory_reconciled
                                        是升级时清理 memory 的一句话摘要，≤500 字，按 memory_version
                                        只进不退，§8.6）
-GET    /prompts/current           → { ok, prompt_version, agent_type, prompt }（§8.6 指令下发，需鉴权）
+GET    /prompts/current           → { ok, prompt_version, agent_type, prompt, template_revision }（§8.6 指令下发，需鉴权）
+GET    /tickets?state=&stage=&q=&page=&page_size= → { ok, items:[Ticket], total }（agent 只读自己的工作项，Phase 2）
+GET    /tickets/{id}              → { ok, ticket }（只能读 assignee = 自己；否则 403）
+POST   /tickets/{id}/subscriptions { thread_root, mode } → { ok, ticket }（仅 assignee；必须是该 thread 参与者；mode=own|context）
 GET    /clients/relay-watch.sh      → 薄 shell 层（Muse 标准接入：看门狗 + drain spool + 唤醒决策，免鉴权）
 GET    /clients/relay-poll.sh       → 短轮询脚本（免鉴权）
 GET    /clients/relay-tail.sh       → SSE 常驻脚本（免鉴权）
@@ -43,7 +46,7 @@ POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 | `id` | 客户端自选，`sender` 范围内唯一（`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`），重发 → `409 duplicate_id` |
 | `to` | 身份 / `"*"` 广播 / `operator`（控制台操作者，§9.5）/ `grp_<slug>`（群聊，§6.8）。广播对除发送者外的每个身份可见；群消息只对成员可见（且只看加入之后的消息），发送者自己看不到自己的群消息。指向已注册 peer 时大小写不敏感：服务端按库里那个规范 id 落库。命中两个以上（库里 `Alice` 和 `alice` 都在）→ `409 ambiguous_recipient`，不猜 |
 | `from` | 必须等于 token 身份，逐字节比较，否则 `403`（不折叠大小写） |
-| `kind` | `task`（默认）`\| result \| chat`（`system` 仅服务端冒烟任务）+ 握手三件：`status` / `permission_request` / `permission_decision`（见下） |
+| `kind` | `task`（默认）`\| result \| chat`（`system` 仅服务端冒烟任务）+ 握手三件：`status` / `permission_request` / `permission_decision`（见下）。`status` 取值：`started\|progress\|blocked\|resumed\|cancelled\|waiting\|ready\|failed\|dropped` |
 | `in_reply_to` | 父消息 id；继承其线程 `root_id`，未知父 id 则自成 `from/in_reply_to` 线程 |
 | `requires_approval` | `true` → `202 {held:true}`，UI 批准后才可见 |
 | `payload` | 任务指令 / 结果正文 |
@@ -71,6 +74,7 @@ POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 | `409 permission_already_decided` | 请求已决（改判） | 停；同值重发是幂等 200 |
 | `409 bad_permission_ref` | 握手引用了不存在/非任务/跨线程 id | 检查 `in_reply_to` 链 |
 | `409 permission_rate_limited` | 单 thread 超 10 个 open 请求 | 停，上报人类 |
+| `409 task_not_allowed` | 策略禁止 peer 给 peer 发 task（`allow_peer_tasks=false`） | 停，找 operator 确认策略 |
 | `409 progress_throttled` | progress 超每 thread 10s 一条 | 降频，只报里程碑 |
 | `403 permission_not_authorized` | 方向错（非 B 发请求/非 A 做决定）、第三方代批，或往自己不在的群发消息 | 停，检查身份/群成员 |
 | `400 unknown room` | `to` 是 `grp_*` 但群不存在或已归档 | 找操作者确认群标识 |
@@ -118,7 +122,13 @@ GET  /admin/audit?actor=&action=&since=&limit=
 POST /admin/prompts { agent_type, peer_id?, invite_code?|create_invite } → { code, prompt }
 GET  /admin/rooms?archived=1 → 含已解散（软删除）的房间
 POST /admin/rooms/{id}/dissolve → 解散群聊（软删除）：先发系统通知，再归档；幂等
-GET  /admin/stats → db 体积/max_seq/在线数/协议版本/receiver_rev/inbox_unread；Muse 服务启用时另带 muse_authorized/muse_ok/muse_needs_reauth/muse_auto_wake
+GET  /admin/stats → db 体积/max_seq/在线数/协议版本/receiver_rev/inbox_unread；Muse 服务启用时另带 muse_authorized/muse_ok/muse_needs_reauth/muse_auto_wake；工作项投影启用时另带 work_ready/open_tickets/attention_tickets
+GET  /admin/health → { ok, work{ready,last_error}, effects{pending,due,failed,kinds{kind{pending,due,failed,last_error}},last_error}, policy_version, policy_rules }（Phase 3）
+GET  /admin/tickets?stage=&state=&assignee=&q=&page=&page_size= → 工作项列表（只读投影；stage=attention 表示 person/*）
+GET  /admin/attention?page=&page_size= → { ready, counts{stage→n}, items[] }：待审批/待答复/阻塞/执行者离线
+POST /admin/tickets/{id}/reassign { assignee, lease_secs? } → { ok, ticket }：结束旧 assignment，开启新 pending；lease 到期后 assignment 结束并要求显式改派（Phase 2）
+GET  /admin/prompts/versions → { ok, prompt_version, current{type→revision}, revisions[{revision,agent_type,base_revision,created_at}] }（Phase 4）
+GET  /admin/prompts/diff?agent_type=muse&from=&to= → { ok, agent_type, from, to, added[], removed[] }（缺省 to=当前 revision，from=该 revision 的 base_revision；旧数据没有 base 时回退到上一条同类型 revision）
 GET  /admin/messages?thread=grp_<slug> → 群线程明细，每条带 acked_by 与 room.members
 GET  /admin/update/status → { current{version,tag,protocol,min_client,prompt_version}, mode, job }
 POST /admin/update/check  { version }（空=GitHub 最新）→ { version, protocol_change, min_client_change, unknown }

@@ -426,6 +426,8 @@ input[type="checkbox"] { height: auto; accent-color: var(--accent); }
 .thread-cell { display: flex; flex-direction: column; gap: 3px; min-width: 0; max-width: 460px; }
 .thread-cell code { align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-cell small { color: var(--muted-2); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: var(--fs-sm); }
+.member-cell .badge { margin-left: 2px; }
 .meter { display: flex; flex-direction: column; gap: var(--s-1); min-width: 90px; }
 .meter b { font-variant-numeric: tabular-nums; font-weight: 550; font-size: var(--fs-sm); }
 .meter i { display: block; height: 4px; border-radius: var(--r-sm); background: var(--border); overflow: hidden; }

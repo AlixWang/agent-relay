@@ -4,6 +4,7 @@ import Alpine from '/vendor/alpine.esm.js';
 import { initTheme } from './js/utils.js';
 import { initNavigation, setRoute, onRoute } from './js/router.js';
 import { initAuth, refreshStats, showLogin } from './js/auth.js';
+import { initWork, refreshWork, stopWork } from './js/work.js';
 import { initMembers, refreshPeers } from './js/members.js';
 import { initMuse, refreshMuse, stopMuse } from './js/muse.js';
 import { initThreads, refreshThreads } from './js/threads.js';
@@ -17,6 +18,7 @@ import { commandApp, refreshCommand, stopCommand } from './js/command.js';
 Alpine.data('commandApp', commandApp);
 
 // Wire route handlers
+onRoute('work', refreshWork, stopWork);
 onRoute('members', refreshPeers);
 onRoute('muse', refreshMuse, stopMuse);
 onRoute('threads', refreshThreads);
@@ -29,6 +31,7 @@ onRoute('system', refreshSystem);
 initTheme();
 initNavigation();
 initAuth();
+initWork();
 initMembers();
 initMuse();
 initThreads();

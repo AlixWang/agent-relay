@@ -408,10 +408,10 @@ func TestConsoleAndRoomDocumented(t *testing.T) {
 			}
 		}
 	}
-	// The console warns about members below this revision, so it must always
-	// name the revision that actually ships the rules.
-	if RoomAwarePromptVersion != PromptVersion {
-		t.Fatalf("RoomAwarePromptVersion %d != PromptVersion %d", RoomAwarePromptVersion, PromptVersion)
+	// The console warns about members below this revision. It is the first
+	// revision that shipped the rules, not necessarily the latest prompt bump.
+	if RoomAwarePromptVersion <= 0 || RoomAwarePromptVersion > PromptVersion {
+		t.Fatalf("RoomAwarePromptVersion %d out of range (PromptVersion %d)", RoomAwarePromptVersion, PromptVersion)
 	}
 }
 
@@ -523,5 +523,33 @@ func TestHermesWakeLayerIsHermesOnly(t *testing.T) {
 		if strings.Contains(out, "relay-tail-supervisor") || strings.Contains(out, "relay-watch-hermes") {
 			t.Fatalf("%s must not hand out the hermes wake layer", typ)
 		}
+	}
+}
+
+func TestTemplateRevisions(t *testing.T) {
+	revs := TemplateRevisions()
+	for _, typ := range Types() {
+		if revs[typ] == "" {
+			t.Fatalf("missing revision for %s", typ)
+		}
+		if got := TemplateRevision(typ); got != revs[typ] {
+			t.Fatalf("revision unstable for %s: %s vs %s", typ, got, revs[typ])
+		}
+	}
+	if revs["muse"] == revs["hermes"] {
+		t.Fatal("muse and hermes templates must have distinct revisions")
+	}
+	if TemplateSource("muse") == "" {
+		t.Fatal("empty template source")
+	}
+}
+
+func TestLineDiff(t *testing.T) {
+	added, removed := LineDiff("a\nb\nc", "a\nB\nc\nd")
+	if len(added) != 2 || added[0] != "B" || added[1] != "d" {
+		t.Fatalf("added: %+v", added)
+	}
+	if len(removed) != 1 || removed[0] != "b" {
+		t.Fatalf("removed: %+v", removed)
 	}
 }

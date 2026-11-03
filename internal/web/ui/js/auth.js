@@ -62,6 +62,13 @@ export async function refreshStats() {
     const stTokens = $('stTokens');
     if (stTokens) stTokens.textContent = s.tokens_active || 0;
 
+    const navWork = $('navWork');
+    if (navWork) {
+      const attention = s.attention_tickets || 0;
+      navWork.textContent = attention > 0 ? attention : '';
+      navWork.hidden = attention === 0;
+    }
+
     const navInbox = $('navInbox');
     if (navInbox) {
       const inbox = s.inbox_unread || 0;

@@ -76,6 +76,13 @@ func (r *Runner) RunOnce(now int64) (map[string]int64, error) {
 			return stats, err
 		}
 		stats["permissions_pruned"] = n
+		// Ended tickets keep their projection row only until the same TTL;
+		// open tickets never reach this path (their messages are pinned).
+		if n, err := r.st.PruneTickets(now - int64(r.policy.MessageTTLDays)*86400); err != nil {
+			return stats, err
+		} else {
+			stats["tickets_pruned"] = n
+		}
 	}
 	return stats, nil
 }
@@ -138,6 +145,28 @@ func (r *Runner) archiveOldMessages(cutoff, now int64) (archived, deleted, skipp
 				toArchive = append(toArchive, m)
 			}
 		}
+	}
+	if len(toArchive) == 0 {
+		return 0, 0, skipped, nil
+	}
+	// An open ticket pins its whole evidence chain: deleting its task or a
+	// status message would make the work item impossible to rebuild.
+	allSeqs := make([]int64, 0, len(toArchive))
+	for _, m := range toArchive {
+		allSeqs = append(allSeqs, m.Seq)
+	}
+	pinned, err := r.st.OpenTicketMessageSeqs(allSeqs)
+	if err != nil {
+		return 0, 0, skipped, err
+	}
+	if len(pinned) > 0 {
+		kept := toArchive[:0]
+		for _, m := range toArchive {
+			if !pinned[m.Seq] {
+				kept = append(kept, m)
+			}
+		}
+		toArchive = kept
 	}
 	if len(toArchive) == 0 {
 		return 0, 0, skipped, nil

@@ -2,12 +2,11 @@
 package presence
 
 import (
-	"bytes"
 	"encoding/json"
-	"net/http"
+	"fmt"
+	"log"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/AlixWang/agent-relay/internal/store"
 )
@@ -85,7 +84,6 @@ type Service struct {
 
 	mu        sync.Mutex
 	wasOnline map[string]bool
-	client    *http.Client
 }
 
 // New creates a presence Service.
@@ -98,7 +96,6 @@ func New(st store.Store, onlineTimeoutSecs int64, webhookURL string) *Service {
 		onlineTimeout: onlineTimeoutSecs,
 		webhookURL:    webhookURL,
 		wasOnline:     map[string]bool{},
-		client:        &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -213,7 +210,11 @@ func orEmptyJSON(s string) string {
 }
 
 // Sweep checks for online→offline transitions, audits them and optionally
-// POSTs the webhook. Run every 30s from main.
+// enqueues the webhook. Run every 30s from main.
+//
+// The audit row and the durable effect are committed in one transaction. The
+// in-memory baseline is only flipped after that commit succeeds, so a database
+// failure is retried on the next sweep instead of losing the alert.
 func (s *Service) Sweep(now int64) {
 	peers, err := s.st.ListPeers()
 	if err != nil {
@@ -229,16 +230,25 @@ func (s *Service) Sweep(now int64) {
 			s.mu.Unlock()
 			continue
 		}
-		s.wasOnline[p.ID] = online
+		if !prev || online {
+			s.wasOnline[p.ID] = online
+			s.mu.Unlock()
+			continue
+		}
 		s.mu.Unlock()
-		if prev && !online {
-			offlineSecs := now - p.LastSeen
-			_ = s.st.AppendAudit("system", "peer.offline",
-				"peer="+p.ID+formatSecs(offlineSecs), now)
-			if s.OnOffline != nil {
-				s.OnOffline(p.ID, offlineSecs)
-			}
-			s.fireWebhook(p.ID, offlineSecs, now)
+
+		offlineSecs := now - p.LastSeen
+		kind, key, payload := s.webhookEffect(p.ID, offlineSecs, now)
+		if err := s.st.RecordAuditAndEffect("system", "peer.offline",
+			"peer="+p.ID+formatSecs(offlineSecs), kind, key, payload, now); err != nil {
+			log.Printf("presence: offline transition for %s not persisted: %v", p.ID, err)
+			continue
+		}
+		s.mu.Lock()
+		s.wasOnline[p.ID] = false
+		s.mu.Unlock()
+		if s.OnOffline != nil {
+			s.OnOffline(p.ID, offlineSecs)
 		}
 	}
 }
@@ -247,21 +257,21 @@ func formatSecs(s int64) string {
 	return " offline_secs=" + strconv.FormatInt(s, 10)
 }
 
-func (s *Service) fireWebhook(peerID string, offlineSecs, now int64) {
+// webhookEffect builds the durable-effect triple for an offline transition.
+// The key is stable across retries; the body carries it too so a receiver can
+// deduplicate an at-least-once POST without reading custom headers.
+func (s *Service) webhookEffect(peerID string, offlineSecs, now int64) (kind, key, payload string) {
 	if s.webhookURL == "" {
-		return
+		return "", "", ""
 	}
+	kind = "webhook.offline"
+	key = fmt.Sprintf("offline:%s:%d", peerID, now)
 	body, _ := json.Marshal(map[string]any{
+		"kind": kind, "key": key,
 		"peer_id": peerID, "offline_secs": offlineSecs, "ts": now,
 	})
-	req, err := http.NewRequest("POST", s.webhookURL, bytes.NewReader(body))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return
-	}
-	resp.Body.Close()
+	envelope, _ := json.Marshal(map[string]string{
+		"kind": kind, "key": key, "url": s.webhookURL, "body": string(body),
+	})
+	return kind, key, string(envelope)
 }

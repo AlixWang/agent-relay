@@ -4,6 +4,7 @@
 package guard
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"sync"
@@ -38,6 +39,10 @@ type Limits struct {
 	FuseMaxMessages int
 	FuseMaxAgeSecs  int64
 	RatePerMinute   int
+	// Deterministic task admission (Phase 3). DisallowPeerTasks is the
+	// zero-value-safe form: false (the default) keeps historical allow.
+	DisallowPeerTasks            bool
+	RequireTaskApprovalFromPeers bool
 	// MaxOpenPermissions caps unexpired open permission_requests per
 	// thread (approval-fatigue guard). <=0 disables the cap.
 	MaxOpenPermissions int
@@ -69,15 +74,40 @@ type Verdict struct {
 
 // Guard holds rate-limiter state.
 type Guard struct {
-	st     store.Store
-	limits Limits
-	mu     sync.Mutex
-	hits   map[string][]int64 // sender → unix-second timestamps
+	st            store.Store
+	limits        Limits
+	mu            sync.Mutex
+	hits          map[string][]int64 // sender → unix-second timestamps
+	policyVersion string
 }
 
 // New creates a Guard over st.
 func New(st store.Store, lim Limits) *Guard {
-	return &Guard{st: st, limits: lim, hits: map[string][]int64{}}
+	return &Guard{
+		st:            st,
+		limits:        lim,
+		hits:          map[string][]int64{},
+		policyVersion: policyVersion(lim),
+	}
+}
+
+// PolicyVersion is the deterministic identity of the task admission policy.
+// Tickets/mandates record it so a later policy change can be audited.
+func (g *Guard) PolicyVersion() string { return g.policyVersion }
+
+// PolicyRules is the human-readable snapshot stored in policy_versions. It is
+// the single canonical rendering: policyVersion hashes exactly this string, so
+// the rules an operator reads and the version they audit can never drift.
+func (g *Guard) PolicyRules() string { return policyRules(g.limits) }
+
+func policyRules(lim Limits) string {
+	return fmt.Sprintf("allow_peer_tasks=%t;require_task_approval_from_peers=%t;rate_per_minute=%d",
+		!lim.DisallowPeerTasks, lim.RequireTaskApprovalFromPeers, lim.RatePerMinute)
+}
+
+func policyVersion(lim Limits) string {
+	sum := sha256.Sum256([]byte(policyRules(lim)))
+	return fmt.Sprintf("%x", sum[:6])
 }
 
 // Check validates an envelope. It resolves RootID and reports Held for
@@ -92,6 +122,18 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 	case "result", "chat", "system", "status", "permission_request", "permission_decision":
 	default:
 		return nil, &Rejection{Code: "bad_message", Reason: "kind must be task|result|chat|status|permission_request|permission_decision"}
+	}
+
+	// Deterministic task admission (Phase 3): the policy gates peer → peer
+	// delegation only. operator/system are never gated, and a peer delegating
+	// to the operator or a room is ordinary work, not peer-task delegation.
+	if env.Kind == "task" && isPeerIdentity(env.From) && isPeerTaskTarget(env.To) {
+		if g.limits.DisallowPeerTasks {
+			return nil, &Rejection{Code: "task_not_allowed", Reason: "peer-created peer tasks are disabled by policy"}
+		}
+		if g.limits.RequireTaskApprovalFromPeers {
+			env.RequiresApproval = true
+		}
 	}
 
 	// Idempotency: UNIQUE(sender,id) — duplicate returns 409 without duplicating.
@@ -239,6 +281,22 @@ func threadRootOf(m *store.Message) string {
 	return m.Sender + "/" + m.ID
 }
 
+// isPeerIdentity reports whether id is a registered-peer-shaped identity
+// rather than one of the reserved routing identities.
+func isPeerIdentity(id string) bool {
+	switch id {
+	case "", auth.OperatorID, auth.SystemID, "*":
+		return false
+	}
+	return !strings.HasPrefix(id, "grp_")
+}
+
+// isPeerTaskTarget reports whether a task is delegation to another peer. It
+// deliberately treats an unregistered direct recipient as a peer target: the
+// Ticket projection keeps that work item and shows the assignee offline, so
+// the policy must cover it too.
+func isPeerTaskTarget(to string) bool { return isPeerIdentity(to) }
+
 // rateCheck implements a sliding-window limiter: RatePerMinute sends per
 // 60s with a burst of 10. Returns (retryAfterSecs, limited).
 func (g *Guard) rateCheck(sender string, now int64) (int, bool) {
@@ -359,6 +417,7 @@ func isHandshakeKind(kind string) bool {
 // validHandshakeStatuses is the status value vocabulary for kind=status.
 var validHandshakeStatuses = map[string]bool{
 	"started": true, "progress": true, "blocked": true, "resumed": true, "cancelled": true,
+	"waiting": true, "ready": true, "failed": true, "dropped": true,
 }
 
 // taskOf finds the task message a handshake refers to. For status and
@@ -413,7 +472,7 @@ func (g *Guard) checkHandshake(env *Envelope, rootID string, now int64) error {
 	switch env.Kind {
 	case "status":
 		if !validHandshakeStatuses[env.Status] {
-			return &Rejection{Code: "bad_message", Reason: "status must be started|progress|blocked|resumed|cancelled"}
+			return &Rejection{Code: "bad_message", Reason: "status must be started|progress|blocked|resumed|cancelled|waiting|ready|failed|dropped"}
 		}
 		if env.Status == "cancelled" {
 			// Either side may cancel: the task sender or its recipient.

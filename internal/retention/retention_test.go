@@ -202,3 +202,42 @@ func mkPerm(id, thread, status string, created, expires int64) *store.Permission
 	return &store.PermissionRequest{RequestID: id, Thread: thread, Requester: "b", Approver: "a",
 		Status: status, CreatedAt: created, ExpiresAt: expires}
 }
+
+func TestOpenTicketPinsMessages(t *testing.T) {
+	st := openTest(t)
+	dir := t.TempDir()
+	r := New(st, Policy{MessageTTLDays: 30, DataDir: dir})
+	now := int64(100 * 86400)
+	old := now - 31*86400
+	for _, id := range []string{"a", "b"} {
+		_ = st.CreatePeer(&store.Peer{ID: id, Status: "active", CreatedAt: old})
+		_ = st.TouchPeer(id, now)
+	}
+	seq, _ := st.InsertMessage(&store.Message{ID: "t1", Sender: "a", Recipient: "b",
+		RootID: "a/t1", Kind: "task", Payload: "old task", CreatedAt: old})
+	_ = st.Ack(seq, "b", old+1)
+	_ = st.CreateTicket(&store.Ticket{ID: seq, ThreadRoot: "a/t1", Requester: "a", Assignee: "b",
+		State: "open", Stage: "working", CreatedAt: old, UpdatedAt: old, LastSeq: seq})
+	_ = st.SetMessageTicket(seq, seq)
+
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["messages_archived"] != 0 {
+		t.Fatalf("open ticket pinned message archived: %+v", stats)
+	}
+	if got, _ := st.GetBySenderID("a", "t1"); got == nil {
+		t.Fatal("open ticket task message deleted")
+	}
+	// Closing the ticket releases both the pin and the projection row.
+	_ = st.UpdateTicket(&store.Ticket{ID: seq, ThreadRoot: "a/t1", Requester: "a", Assignee: "b",
+		State: "done", Stage: "done", CreatedAt: old, UpdatedAt: old, LastSeq: seq})
+	stats, err = r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["messages_archived"] != 1 || stats["tickets_pruned"] != 1 {
+		t.Fatalf("closed ticket not archived/pruned: %+v", stats)
+	}
+}

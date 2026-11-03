@@ -19,6 +19,7 @@ import (
 
 	"github.com/AlixWang/agent-relay/internal/auth"
 	"github.com/AlixWang/agent-relay/internal/config"
+	"github.com/AlixWang/agent-relay/internal/effects"
 	"github.com/AlixWang/agent-relay/internal/guard"
 	"github.com/AlixWang/agent-relay/internal/muse"
 	"github.com/AlixWang/agent-relay/internal/presence"
@@ -28,6 +29,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/stream"
 	"github.com/AlixWang/agent-relay/internal/verify"
 	"github.com/AlixWang/agent-relay/internal/web"
+	"github.com/AlixWang/agent-relay/internal/work"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -51,6 +53,8 @@ type Server struct {
 	verify   *verify.Service
 	stream   *stream.Hub
 	muse     *muse.Service
+	work     *work.Service
+	effects  *effects.Worker
 
 	adminHash []byte
 	mu        sync.Mutex
@@ -78,6 +82,13 @@ func (s *Server) SetStream(h *stream.Hub) { s.stream = h }
 // §4.9). Nil keeps the feature off: the admin routes answer 503 and peers get
 // no Muse summary.
 func (s *Server) SetMuse(m *muse.Service) { s.muse = m }
+
+// SetWork wires the read-only work-item projection (docs/SUPERAGENT.md).
+// Nil keeps the work routes at 503; core message paths are unaffected.
+func (s *Server) SetWork(w *work.Service) { s.work = w }
+
+// SetEffects wires the durable side-effect worker's health view.
+func (s *Server) SetEffects(fx *effects.Worker) { s.effects = fx }
 
 // notifyStream wakes held SSE subscribers after a newly visible message.
 // The DB stays the source of truth: subscribers re-query VisibleTo, so a
@@ -116,6 +127,9 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("POST /ack", s.handleAck)
 	mux.HandleFunc("POST /heartbeat", s.handleHeartbeat)
 	mux.HandleFunc("GET /peers", s.handlePeers)
+	mux.HandleFunc("GET /tickets", s.handleMyTickets)
+	mux.HandleFunc("GET /tickets/{id}", s.handleMyTicket)
+	mux.HandleFunc("POST /tickets/{id}/subscriptions", s.handleMyTicketSubscription)
 	mux.HandleFunc("POST /verify/smoke", s.handleSmoke)
 	// Prompt distribution (§8.6): peers pull worker-instruction updates
 	// here when heartbeat signals prompt_update. Authed, per-identity.
@@ -138,8 +152,14 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("POST /admin/fuse/reset", s.requireAdmin(s.handleAdminFuseReset))
 	mux.HandleFunc("GET /admin/audit", s.requireAdmin(s.handleAdminAudit))
 	mux.HandleFunc("POST /admin/prompts", s.requireAdmin(s.handleAdminPrompts))
+	mux.HandleFunc("GET /admin/prompts/versions", s.requireAdmin(s.handleAdminPromptVersions))
+	mux.HandleFunc("GET /admin/prompts/diff", s.requireAdmin(s.handleAdminPromptDiff))
 	mux.HandleFunc("GET /admin/stats", s.requireAdmin(s.handleAdminStats))
 	mux.HandleFunc("GET /admin/config", s.requireAdmin(s.handleAdminConfig))
+	mux.HandleFunc("GET /admin/health", s.requireAdmin(s.handleAdminHealth))
+	mux.HandleFunc("GET /admin/tickets", s.requireAdmin(s.handleAdminTickets))
+	mux.HandleFunc("GET /admin/attention", s.requireAdmin(s.handleAdminAttention))
+	mux.HandleFunc("POST /admin/tickets/{id}/reassign", s.requireAdmin(s.handleAdminReassign))
 
 	// Muse account authorization + keepalive (§4.9). Optional: all handlers
 	// answer 503 when no service is wired, so the routes stay discoverable.
@@ -777,6 +797,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{"ok": true}
+	if p2 != nil {
+		resp["template_revision"] = prompts.TemplateRevision(p2.AgentType)
+	}
 	if p2 != nil && p2.PromptVersion < prompts.PromptVersion {
 		resp["prompt_update"] = true
 		resp["prompt_version"] = prompts.PromptVersion
@@ -868,7 +891,8 @@ func (s *Server) handlePromptCurrent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"ok": true, "prompt_version": prompts.PromptVersion,
 		"agent_type": peer.AgentType, "prompt": prompt,
-		"changes": prompts.ChangesSince(peer.PromptVersion),
+		"template_revision": prompts.TemplateRevision(peer.AgentType),
+		"changes":           prompts.ChangesSince(peer.PromptVersion),
 	})
 }
 
@@ -1620,6 +1644,13 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		body["pending_approvals"] = c.PendingApprovals
 		body["tokens_active"] = c.TokensActive
 		body["audit_total"] = c.AuditTotal
+	}
+	if s.work != nil {
+		body["work_ready"] = s.work.Ready()
+		if c, err := s.work.Counts(); err == nil {
+			body["open_tickets"] = c.Open
+			body["attention_tickets"] = c.Attention
+		}
 	}
 	// Muse nav badge (§4.9): authorizations needing a fresh cookie.
 	if s.muse != nil {

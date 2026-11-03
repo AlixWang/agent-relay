@@ -52,7 +52,7 @@ This framework turns that one-off script into a reusable, self-hostable system: 
 
 ## 2. Design Principles
 
-1. **Minimal protocol over rich features.** Six to eight endpoints, JSON over HTTP, one auth header. Every design decision should survive the question: "can a `curl` one-liner do this?" Console features are no exception: the operator and rooms (§6.8, §9.5) ride the existing `POST /messages` path as reserved identities instead of adding endpoints.
+1. **Minimal protocol over rich features.** Keep the endpoint surface small: JSON over HTTP, one auth header, and every design decision should survive the question: "can a `curl` one-liner do this?" The original six-to-eight endpoint target is the baseline in `docs/adr/0002-workbench-read-api-deviation.md`; it is not a hard ceiling for read-only workbench/admin extensions, and any new endpoint beyond that baseline needs an ADR rather than a silent edit here. Console *message-sending* features still use the existing `POST /messages` path as reserved identities instead of adding endpoints. The approved workbench APIs do not open a second delivery path.
 2. **Never trust the client.** Clients are LLMs — they skip steps, hallucinate success, and follow injected instructions. The server verifies everything: auth, idempotency, loop state, onboarding completion.
 3. **Relayed instructions follow the user, with two hard redlines.** The relay belongs to the user's own assistant network, so an instruction relayed from the user ("the user asked you to install X") *is* the user's instruction — prompt v8 made this explicit (§6.3) after real assistants refused their own user's relayed orders. Prompt v11 narrowed the redlines from four to two after assistants kept refusing ordinary work: only credential exfiltration and spending money still require the user's own approval; everything else runs by default and any refusal must name the redline it hits. The server cannot verify authorship, so the redline list — not a "trust nothing" posture — is the boundary, and it lives in the prompt templates.
 4. **The server is the safety boundary.** Loop fuses, rate limits, approval gates, and retention run server-side and cannot be bypassed by a misbehaving or prompt-injected client.
@@ -227,6 +227,28 @@ needs two things the relay cannot infer: a valid Muse session cookie and the
   keepalive owner; running muse2api's keepalive on the same account will rotate
   cookies against this service.
 
+### 4.10 Work item layer (`internal/work`)
+
+A read-only view over the immutable message log. A direct `kind=task` message
+opens a **Ticket** (工作项); its follow-up `status` / `result` /
+`permission_*` messages advance it. `tickets` and `message_tickets` are derived
+tables, rebuilt on startup and advanced by a 2-second pass; `messages` remains
+the only write model. The console uses it for the “工作台” page and attention
+queue, including a presence-derived `person/offline` overlay.
+
+Phase 2 adds `ticket_assignments` (pending/running/ended, with a real lease
+deadline and ended_reason), `ticket_subscriptions` (own/context; delivery only
+for an existing thread participant), agent `GET /tickets`, admin reassignment,
+and the status values `waiting|ready|failed|dropped` (`dropped` is terminal).
+Phase 3 adds `policy_versions`/`mandates`, a deterministic task admission gate
+(`allow_peer_tasks` for peer→peer tasks only, `require_task_approval_from_peers`)
+and the `effects` outbox (offline webhook retries + per-kind `/admin/health`).
+Phase 4 adds immutable per-template prompt revisions (`prompt_revisions` with
+`base_revision`, `template_revision` in `/prompts/current`,
+`/admin/prompts/versions`). See `docs/SUPERAGENT.md`,
+`docs/adr/0001-work-items-as-projection.md`, and the approved endpoint exception in
+`docs/adr/0002-workbench-read-api-deviation.md`.
+
 ---
 
 ## 5. Data Model & Protocol Spec
@@ -292,6 +314,81 @@ CREATE TABLE acks (
     acked_at      INTEGER NOT NULL,
     PRIMARY KEY (message_seq, peer_id)
 );
+
+-- Work-item projection (docs/adr/0001-work-items-as-projection.md). Tickets
+-- are derived from direct kind=task messages; messages remain the only write
+-- model. ticket id = the opening task message's seq.
+CREATE TABLE tickets (
+    id             INTEGER PRIMARY KEY,
+    thread_root    TEXT NOT NULL DEFAULT '',
+    requester      TEXT NOT NULL,
+    assignee       TEXT NOT NULL,
+    state          TEXT NOT NULL DEFAULT 'open',     -- open | done | cancelled
+    stage          TEXT NOT NULL DEFAULT 'queued',
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    ended_at       INTEGER NOT NULL DEFAULT 0,
+    last_seq       INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE message_tickets (
+    message_seq INTEGER PRIMARY KEY REFERENCES messages(seq) ON DELETE CASCADE,
+    ticket_id   INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE
+);
+CREATE TABLE ticket_assignments (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id        INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    assignee         TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending', -- pending | running | ended
+    lease_expires_at INTEGER NOT NULL DEFAULT 0,
+    ended_reason     TEXT NOT NULL DEFAULT '',        -- reassigned | lease_expired | ticket_closed
+    created_at       INTEGER NOT NULL,
+    started_at       INTEGER NOT NULL DEFAULT 0,
+    ended_at         INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE ticket_subscriptions (
+    ticket_id   INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    thread_root TEXT NOT NULL,
+    mode        TEXT NOT NULL DEFAULT 'own', -- own | context
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (ticket_id, thread_root)
+);
+CREATE TABLE policy_versions (
+    version    TEXT PRIMARY KEY,
+    rules      TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE mandates (
+    ticket_id      INTEGER PRIMARY KEY REFERENCES tickets(id) ON DELETE CASCADE,
+    policy_version TEXT NOT NULL DEFAULT '',
+    scope          TEXT NOT NULL DEFAULT 'task',
+    requester      TEXT NOT NULL,
+    requester_kind TEXT NOT NULL DEFAULT 'peer',
+    created_at     INTEGER NOT NULL
+);
+CREATE TABLE effects (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    payload    TEXT NOT NULL DEFAULT '',
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    next_at    INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_error TEXT NOT NULL DEFAULT '',
+    UNIQUE(kind, key)
+);
+CREATE TABLE prompt_revisions (
+    revision      TEXT PRIMARY KEY,
+    agent_type    TEXT NOT NULL,
+    base_revision TEXT NOT NULL DEFAULT '',
+    content       TEXT NOT NULL,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX idx_tickets_stage ON tickets(stage, updated_at DESC);
+CREATE INDEX idx_tickets_assignee ON tickets(assignee, state, updated_at DESC);
+CREATE INDEX idx_message_tickets_ticket ON message_tickets(ticket_id, message_seq);
+CREATE INDEX idx_ticket_assignments_ticket ON ticket_assignments(ticket_id, status);
+CREATE INDEX idx_ticket_subscriptions_thread ON ticket_subscriptions(thread_root, ticket_id);
+CREATE INDEX idx_effects_due ON effects(next_at);
 
 -- Append-only audit trail
 CREATE TABLE audit_log (
@@ -452,7 +549,7 @@ in `internal/prompts/prompts_test.go` (`TestRelayedInstructionPolicy`).
 *executing*: B (the task recipient) hits its own runtime permission mid-task and needs A's user to
 approve, without the task silently stalling.
 
-- **New kinds on `POST /messages`** (no new routes): `status` (`started|progress|blocked|resumed|cancelled`,
+- **New kinds on `POST /messages`** (no new routes): `status` (`started|progress|blocked|resumed|cancelled|waiting|ready|failed|dropped`,
   sender must be the task recipient, except `cancelled` which either side may send),
   `permission_request` (`op/target/detail/expires_in_secs` + human-readable `payload`, B→A),
   `permission_decision` (`decision: allow|deny`, A→B, `in_reply_to` = request id).
@@ -887,6 +984,15 @@ path; no agent-facing endpoint was added.
   the console must work with no network beyond the relay itself. The shell pins to the viewport on
   this route, so the stream and the session list scroll — never the document.
 
+### 9.6 工作台（工作项与注意力队列）
+
+`GET /admin/tickets` 和 `GET /admin/attention` 提供工作项视图（§4.10）。
+工作台把 `person/approval`、`person/answer`、`person/review`、`person/blocked`、
+`person/failed`、`person/offline` 排在 `working`、`idle`、`queued`、`done`、
+`cancelled` 之前；空状态只显示一句话，健康状态不占空间。默认登录落点仍是成员页，
+工作台在“运行”组第一位并带待办 badge。助手侧用 `GET /tickets` 读自己的工作项；
+运维用 `POST /admin/tickets/{id}/reassign` 改派。
+
 The UI is intentionally boring: a tiny embedded SPA (Alpine + plain ESM modules under `ui/`), no build chain required at deploy time beyond what ships in the binary.
 
 ---
@@ -995,6 +1101,7 @@ The console JS that follows a job is verified by `make test-ui-js`
 ### 10.3 Observability
 
 - `/health` for liveness; `/peers` doubles as the presence dashboard.
+- `/admin/health` for work projection readiness, per-kind effects pending/due/failed counts and the deterministic policy version/rules.
 - Structured logs (one line per request, like relay v2) to stderr/journald.
 - Audit events for every state change that matters: `peer.registered`, `peer.verified`, `token.revoked`, `message.held`, `fuse.tripped`, `peer.offline`.
 - Optional offline webhook (generic POST) so the human hears about a dead assistant without watching the UI.
@@ -1049,7 +1156,7 @@ Rollback at any step is "restart the Python relay" — the assistants' local ide
 
 ## 13. Open Questions
 
-1. **Worker pool vs. personal inboxes.** Today's model is per-assistant inboxes plus broadcast. If we ever want "any free assistant picks up the next task," the queue needs atomic claims with leases — the single biggest protocol change on the horizon. Worth deciding before P2.
+1. **Worker pool vs. personal inboxes.** Today's model is per-assistant inboxes plus broadcast. If we ever want "any free assistant picks up the next task," the queue needs atomic claims with leases — the single biggest protocol change on the horizon. `docs/SUPERAGENT.md` proposes the shape: a Ticket survives across Assignments, so a lease is an Assignment, not a new message kind. Phase 1 only projects a single-assignee Ticket; Phase 2 adds `ticket_assignments` and reassign/lease without changing the Ticket identity.
 2. **Payload size.** Tasks today are text. File handoff (images, audio) currently goes through shared storage links. Should the protocol support attachments (object references) or stay text-only with links?
 3. **Hermes/Claw capability discovery.** The matrix in §9.1 is a starting guess. The registration `capabilities` payload should be defined empirically after the first non-Muse assistant onboards.
 4. **Human approval UX.** Server-held approval (implemented) vs. client-side confirmation prompts (prompt-enforced) — likely both, but the split of responsibilities needs one real incident to calibrate.
@@ -1085,6 +1192,8 @@ POST   /verify/smoke (as self)        → server issues smoke task; see §9.4
 | **Invite** | One-time code that exchanges for a personal token at registration. |
 | **Smoke task** | The server-issued verification message that proves onboarding works end-to-end. |
 | **Guard** | The server module enforcing fuse, loop, rate, and approval rules on every write. |
+| **Ticket / 工作项** | A read-only projection of one direct `kind=task` message and its follow-up `status`/`result`/`permission_*` messages. Ticket id is the opening task's `seq`; `messages` remains the source of truth (§4.10). |
+| **Stage / 阶段** | The derived state of a Ticket: `person/approval`, `person/answer`, `person/review`, `person/blocked`, `person/failed`, `person/offline`, `working`, `idle`, `queued`, `done`, `cancelled`. `person/*` means a human must act; `person/offline` is display-only. |
 
 ---
 

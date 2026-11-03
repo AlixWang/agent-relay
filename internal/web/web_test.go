@@ -96,7 +96,7 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 	for _, key := range []string{
 		"loginPage", "loginForm", "loginbtn", "username", "pw", "loginErr", "app",
 		"sidebar", "menuBtn", "themeBtn", "logoutbtn", "pageTitle", "pageDesc",
-		"page-members", "page-threads", "page-command", "page-prompts", "page-audit", "page-tokens", "page-system",
+		"page-work", "page-members", "page-threads", "page-command", "page-prompts", "page-audit", "page-tokens", "page-system",
 		"threadDrawer", "rotateDlg", "confirmDlg", "toasts",
 	} {
 		if !ids[key] {
@@ -112,6 +112,7 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 		"/js/utils.js",
 		"/js/router.js",
 		"/js/auth.js",
+		"/js/work.js",
 		"/js/members.js",
 		"/js/threads.js",
 		"/js/prompts.js",

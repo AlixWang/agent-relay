@@ -1,5 +1,5 @@
 -- agent-relay schema v1 (DESIGN §5.1 + §6.1 fuse watermarks + §8.4 verify
--- + §6.5 permission handshake + §8.6 prompt distribution).
+-- + §6.5 permission handshake + §8.6 prompt distribution + §4.10 work item layer/Phase 2-4).
 -- Human-readable reference; the binary executes internal/store/schema.sql,
 -- which must be kept identical to this file.
 
@@ -83,6 +83,86 @@ CREATE TABLE IF NOT EXISTS acks (
     peer_id       TEXT NOT NULL,
     acked_at      INTEGER NOT NULL,
     PRIMARY KEY (message_seq, peer_id)
+);
+-- Work-item projection (docs/adr/0001-work-items-as-projection.md). Tickets
+-- are derived from direct kind=task messages; messages remain the only write
+-- model. message_tickets maps every follow-up message to its nearest task
+-- ancestor, so a thread may carry several independent tickets.
+CREATE TABLE IF NOT EXISTS tickets (
+    id             INTEGER PRIMARY KEY,
+    thread_root    TEXT NOT NULL DEFAULT '',
+    requester      TEXT NOT NULL,
+    assignee       TEXT NOT NULL,
+    state          TEXT NOT NULL DEFAULT 'open',
+    stage          TEXT NOT NULL DEFAULT 'queued',
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    ended_at       INTEGER NOT NULL DEFAULT 0,
+    last_seq       INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS policy_versions (
+    version    TEXT PRIMARY KEY,
+    rules      TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mandates (
+    ticket_id      INTEGER PRIMARY KEY REFERENCES tickets(id) ON DELETE CASCADE,
+    policy_version TEXT NOT NULL DEFAULT '',
+    scope          TEXT NOT NULL DEFAULT 'task',
+    requester      TEXT NOT NULL,
+    requester_kind TEXT NOT NULL DEFAULT 'peer',
+    created_at     INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS message_tickets (
+    message_seq INTEGER PRIMARY KEY REFERENCES messages(seq) ON DELETE CASCADE,
+    ticket_id   INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_tickets_stage ON tickets(stage, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tickets_assignee ON tickets(assignee, state, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_message_tickets_ticket ON message_tickets(ticket_id, message_seq);
+CREATE TABLE IF NOT EXISTS ticket_assignments (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id        INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    assignee         TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending', -- pending | running | ended
+    lease_expires_at INTEGER NOT NULL DEFAULT 0,
+    ended_reason     TEXT NOT NULL DEFAULT '',        -- reassigned | lease_expired | ticket_closed
+    created_at       INTEGER NOT NULL,
+    started_at       INTEGER NOT NULL DEFAULT 0,
+    ended_at         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_assignments_ticket ON ticket_assignments(ticket_id, status);
+CREATE TABLE IF NOT EXISTS ticket_subscriptions (
+    ticket_id   INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    thread_root TEXT NOT NULL,
+    mode        TEXT NOT NULL DEFAULT 'own', -- own | context
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (ticket_id, thread_root)
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_subscriptions_thread ON ticket_subscriptions(thread_root, ticket_id);
+-- Durable side-effect queue (docs/SUPERAGENT.md Phase 3). A message or
+-- presence transition enqueues intent inside its transaction; the effects
+-- worker executes it after commit with backoff.
+CREATE TABLE IF NOT EXISTS effects (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    payload    TEXT NOT NULL DEFAULT '',
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    next_at    INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_error TEXT NOT NULL DEFAULT '',
+    UNIQUE(kind, key)
+);
+CREATE INDEX IF NOT EXISTS idx_effects_due ON effects(next_at);
+-- Immutable per-template prompt revisions (docs/SUPERAGENT.md Phase 4).
+-- A template change produces a new hash row; old rows are never edited.
+CREATE TABLE IF NOT EXISTS prompt_revisions (
+    revision      TEXT PRIMARY KEY,
+    agent_type    TEXT NOT NULL,
+    base_revision TEXT NOT NULL DEFAULT '',
+    content       TEXT NOT NULL,
+    created_at    INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audit_log (
     seq           INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -8,8 +8,10 @@
 **结论：** P2 之前不做 worker-pool。如需“空闲者领任务”，需原子 claim + lease，
 这是唯一值得引入真 MQ（NATS / Redis Streams `XREADGROUP/XACK`）的特性。
 触发条件：出现“多个同质 assistant 抢单”真实需求。
-届时协议需新增 `POST /claims {lease_secs}` + `POST /claims/ack`，`messages` 加
-`claimed_by/lease_expires` 列；store 接口已隔离，改动收敛在 queue/guard 内。
+`docs/SUPERAGENT.md` 给出了演进形状：Ticket 跨 Assignment 存活，lease 是 Assignment
+而不是新的消息 kind。Phase 1 先做单 assignee 只读投影；Phase 2 加
+`ticket_assignments`（pending/running/ended + lease）与 reassign，Ticket id 不变。
+届时不必给 `messages` 加 `claimed_by/lease_expires`；store 接口已隔离。
 
 ## 2. Payload size / 附件
 
@@ -33,6 +35,29 @@ UI 以 badge 展示；职务 hint 靠人类看 badge（不派 shell 任务给 sh
 UI 批准/拒绝）+ 客户端 prompt 级 sensitive 自查（四套模板 §7 已含 hygiene 原文）。
 **待校准：** 等一次真实敏感任务 incident 后，复盘 hold 粒度（是按线程还是按消息）
 与客户端确认提示词强度，届时更新 guard 阈值与模板。
+
+## 5. 工作项层（superagent-inspired）
+
+**状态：** Phase 1–4 均已实现（`docs/SUPERAGENT.md`、ADR-0001）：
+`tickets`/`message_tickets` 投影 + 控制台工作台（Phase 1）；
+`ticket_assignments`/`ticket_subscriptions` + agent `GET /tickets` + admin
+reassign + lease 到期回收 + `waiting|ready|failed|dropped`（dropped 终态）（Phase 2）；
+`policy_versions`/`mandates` + 确定性 task gate + `effects` outbox + per-kind `/admin/health`（Phase 3）；
+`prompt_revisions`（含 `base_revision`）+ `template_revision` + `/admin/prompts/versions` +
+`/admin/prompts/diff`（Phase 4）。
+消息表仍是唯一消息写模型；Ticket/Assignment 是运维投影。
+
+**后续增强（已完成基础上）：**
+
+- **Worker pool / claim**：`ticket_assignments` 已有 pending/running/ended、`lease_expires_at`
+  与过期回收（到期后等人工改派）；下一步是原子 claim + lease 续约。Ticket id 不变。
+- **订阅范围**：`ticket_subscriptions` 已有 own/context，下一步是“结束 Ticket 后
+  人工恢复”和面板上的 context 订阅操作；隐私约束不变。
+- **授权生命周期**：`mandates` 已记录 policy version/scope/requester，下一步是
+  resume 时的 revalidation 与 Policy 变更通知。
+- **Effects 扩展**：当前覆盖 offline webhook，并按 kind 暴露 pending/due/failed/last_error；
+  下一步接入通知类副作用与更完整的重试操作面板。
+- **Prompt**：已有模板 revision/hash、`base_revision` 与 diff 查询接口；编辑器级差异 UI 仍是后续。
 
 ## P2 polish 状态（本版已含）
 

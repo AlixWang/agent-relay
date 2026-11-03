@@ -1,6 +1,7 @@
 package presence
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/AlixWang/agent-relay/internal/effects"
 	"github.com/AlixWang/agent-relay/internal/store"
 )
 
@@ -66,9 +68,12 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 	}
 	var calls atomic.Int32
 	var lastBody []byte
+	var lastKind, lastKey string
 	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		lastBody, _ = io.ReadAll(r.Body)
+		lastKind = r.Header.Get("X-Agent-Relay-Effect-Kind")
+		lastKey = r.Header.Get("X-Agent-Relay-Effect-Key")
 		w.WriteHeader(200)
 	}))
 	defer hook.Close()
@@ -86,8 +91,13 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 	if calls.Load() != 0 || offCalls.Load() != 0 {
 		t.Fatal("baseline sweep must not fire")
 	}
-	// Cross the timeout: exactly one event + webhook + callback.
+	// Cross the timeout: exactly one event + queued webhook + callback.
 	s.Sweep(2301)
+	fx := effects.New(st)
+	fx.RegisterWebhook()
+	if err := fx.RunOnce(context.Background()); err != nil {
+		t.Fatalf("effects: %v", err)
+	}
 	if calls.Load() != 1 {
 		t.Fatalf("webhook calls: %d", calls.Load())
 	}
@@ -100,6 +110,10 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 	}
 	if body["peer_id"] != "a" || body["offline_secs"] != float64(301) {
 		t.Fatalf("webhook payload: %s", lastBody)
+	}
+	if body["kind"] != "webhook.offline" || body["key"] == "" ||
+		lastKind != "webhook.offline" || lastKey == "" {
+		t.Fatalf("webhook idempotency fields: body=%s headers=%q/%q", lastBody, lastKind, lastKey)
 	}
 	entries, _ := st.ListAudit("system", "peer.offline", 0, 10)
 	if len(entries) != 1 {
@@ -123,6 +137,9 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 		t.Fatal("spurious event on re-online")
 	}
 	s.Sweep(2900)
+	if err := fx.RunOnce(context.Background()); err != nil {
+		t.Fatalf("effects second: %v", err)
+	}
 	if calls.Load() != 2 {
 		t.Fatalf("second transition should fire: %d", calls.Load())
 	}

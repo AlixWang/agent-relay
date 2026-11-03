@@ -180,10 +180,18 @@ jq_ok "perm task" '.seq > 0' \
     -H 'Content-Type: application/json' \
     --data '{"id":"p-t1","to":"t-bob","from":"t-alice","payload":"list /tmp/x for me please with distinct wording entirely xxxxx"}'
 
+sleep 3
+jq_ok "work item queued" '.items | map(select(.thread_root == "t-alice/p-t1")) | (length == 1 and .[0].stage == "queued")' \
+  curl -s -b "$JAR" "$BASE/admin/tickets?q=p-t1"
+
 jq_ok "perm started" '.ok == true' \
   curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
     -H 'Content-Type: application/json' \
     --data '{"id":"p-s1","to":"t-alice","from":"t-bob","kind":"status","in_reply_to":"p-t1","status":"started","payload":"B started executing the listing task now in detail xxxxx"}'
+
+sleep 3
+jq_ok "work item working" '.items | map(select(.thread_root == "t-alice/p-t1")) | (length == 1 and .[0].stage == "working")' \
+  curl -s -b "$JAR" "$BASE/admin/tickets?q=p-t1"
 
 jq_ok "perm request" '.ok == true' \
   curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
@@ -192,6 +200,10 @@ jq_ok "perm request" '.ok == true' \
 
 jq_ok "perm fields surfaced" '.items | map(select(.kind=="permission_request"))[0].op == "shell.exec"' \
   curl -s "$BASE/messages?for=t-alice&since=0" "${AUTH_A[@]}"
+
+sleep 3
+jq_ok "work item awaits answer" '.items | map(select(.thread_root == "t-alice/p-t1")) | (length == 1 and .[0].stage == "person/answer" and .[0].attention == true)' \
+  curl -s -b "$JAR" "$BASE/admin/tickets?q=p-t1"
 
 jq_ok "perm allow" '.seq > 0' \
   curl -s -X POST "$BASE/messages" "${AUTH_A[@]}" \
@@ -216,10 +228,58 @@ jq_ok "perm result" '.ok == true' \
     -H 'Content-Type: application/json' \
     --data '{"id":"p-r1","to":"t-alice","from":"t-bob","kind":"result","in_reply_to":"p-t1","payload":"listing done a.txt b.txt with full output xxxxxxxxx"}'
 
+sleep 3
+jq_ok "work item done" '.items | map(select(.thread_root == "t-alice/p-t1")) | (length == 1 and .[0].stage == "done" and .[0].state == "done")' \
+  curl -s -b "$JAR" "$BASE/admin/tickets?q=p-t1"
+
 jq_ok "perm task acked" '.ok == true' \
   curl -s -X POST "$BASE/ack" "${AUTH_B[@]}" \
     -H 'Content-Type: application/json' \
     --data '{"message_id":"p-t1","by":"t-bob"}'
+
+# Phase 2/3/4 work-item surfaces: agent list, status vocabulary, health, prompt revisions.
+jq_ok "agent ticket done" '.items | map(select(.thread_root == "t-alice/p-t1")) | (length == 1 and .[0].state == "done")' \
+  curl -s -H "Authorization: Bearer $TOK_B" "$BASE/tickets?state=done&q=p-t1"
+jq_ok "admin health" '.ok == true and .policy_version != ""' \
+  curl -s -b "$JAR" "$BASE/admin/health"
+jq_ok "prompt template revisions" '.current.muse != null and .current.hermes != null' \
+  curl -s -b "$JAR" "$BASE/admin/prompts/versions"
+
+jq_ok "work status task" '.seq > 0' \
+  curl -s -X POST "$BASE/messages" "${AUTH_A[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"w-t1","to":"t-bob","from":"t-alice","payload":"work status vocabulary task with distinct wording xxxxx"}'
+sleep 3
+jq_ok "work status queued" '.items | map(select(.thread_root == "t-alice/w-t1")) | (length == 1 and .[0].stage == "queued")' \
+  curl -s -b "$JAR" "$BASE/admin/tickets?q=w-t1"
+jq_ok "work status waiting sent" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"w-s1","to":"t-alice","from":"t-bob","kind":"status","in_reply_to":"w-t1","status":"waiting","payload":"B is waiting for a dependency to become available xxxxx"}'
+sleep 3
+jq_ok "work status idle" '.items | map(select(.thread_root == "t-alice/w-t1")) | (length == 1 and .[0].stage == "idle")' \
+  curl -s -b "$JAR" "$BASE/admin/tickets?q=w-t1"
+jq_ok "work status ready sent" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"w-s2","to":"t-alice","from":"t-bob","kind":"status","in_reply_to":"w-t1","status":"ready","payload":"B has a reviewable result ready for the operator xxxxx"}'
+sleep 3
+jq_ok "work status review" '.items | map(select(.thread_root == "t-alice/w-t1")) | (length == 1 and .[0].stage == "person/review")' \
+  curl -s -b "$JAR" "$BASE/admin/tickets?q=w-t1"
+jq_ok "work status failed sent" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"w-s3","to":"t-alice","from":"t-bob","kind":"status","in_reply_to":"w-t1","status":"failed","payload":"B failed after reviewing the dependency constraint xxxxx"}'
+sleep 3
+jq_ok "work status failed" '.items | map(select(.thread_root == "t-alice/w-t1")) | (length == 1 and .[0].stage == "person/failed")' \
+  curl -s -b "$JAR" "$BASE/admin/tickets?q=w-t1"
+jq_ok "work status dropped sent" '.ok == true' \
+  curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"id":"w-s4","to":"t-alice","from":"t-bob","kind":"status","in_reply_to":"w-t1","status":"dropped","payload":"B determined this work is no longer needed and drops it xxxxx"}'
+sleep 3
+jq_ok "work status dropped" '.items | map(select(.thread_root == "t-alice/w-t1")) | (length == 1 and .[0].state == "done")' \
+  curl -s -b "$JAR" "$BASE/admin/tickets?q=w-t1"
 
 # SSE push (§4.4b): backlog replay + live delivery on the same view as poll.
 STREAM_OUT="$DATA/stream.out"

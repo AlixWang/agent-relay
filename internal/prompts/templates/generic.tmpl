@@ -68,6 +68,7 @@ curl -s $RELAY/health
   然后原地等 kind=permission_decision（in_reply_to=你的请求 id），缺省等 10 分钟。
 - 等决定期间不要推进本地游标（at-least-once 重收可幂等）；先发 kind=status/started（开工）
   和 blocked（卡住）让对方看得见进度，里程碑式发 progress。
+- 状态词表：started/progress/resumed=进行中，waiting=暂缓，ready=待验收，blocked=卡住，failed=失败，dropped=放弃（终态，不再重开）。
 - **执行绑定**：decision 只批准那一次的 op/target/detail。执行前逐项比对，不一致按 deny
   中止并上报；绝不拿一个批准去执行别的命令。in_reply_to 只是引用。
 - 收到 allow：发 status/resumed 再继续，最终 result + ack 原任务终态。收到 deny、无决定超时
@@ -77,7 +78,7 @@ curl -s $RELAY/health
   如实填写；对方只信结构化字段，你的 payload 人话只是备注。
 
 ## 6.6 作为任务发送方（A 侧）：处理对方的权限请求
-- 你派发任务后，对方可能回 kind=status 和 kind=permission_request。
+- 你派发任务后，对方可能回 kind=status（started/progress/resumed/waiting/ready/blocked/failed/dropped）和 kind=permission_request。
 - 收到 permission_request 先做 scope 预检：对照你当初派发任务的范围，超范围直接回
   kind=permission_decision/deny（写明原因），不要弹给用户。
 - 范围内：弹给用户确认（允许一次 / 拒绝），展示来源、线程、op/target/detail、过期时间。

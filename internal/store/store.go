@@ -194,6 +194,53 @@ type Store interface {
 	SearchMessages(query string, limit int) ([]*Message, error)
 	ApproveMessage(seq int64, approved bool) error
 	DeleteMessages(seqs []int64) error
+	// work-item projection (docs/adr/0001-work-items-as-projection.md)
+	CreateTicket(t *Ticket) error
+	UpdateTicket(t *Ticket) error
+	GetTicket(id int64) (*Ticket, error)
+	ListTickets(f TicketFilter, limit, offset int) ([]*Ticket, int, error)
+	TicketMessages(ticketID int64, limit int) ([]*Message, error)
+	MessageTicket(seq int64) (int64, error)
+	SetMessageTicket(seq, ticketID int64) error
+	MessagesAfter(afterSeq int64, limit int) ([]*Message, error)
+	ResetTickets() error
+	PruneOrphanTickets() (int64, error)
+	OpenTicketMessageSeqs(seqs []int64) (map[int64]bool, error)
+	OpenTicketIDs() ([]int64, error)
+	TicketHasOpenPermission(ticketID, now int64) (bool, error)
+	PruneTickets(olderThan int64) (int64, error)
+	TicketCounts(now, onlineSecs int64) (*TicketCounts, error)
+	TicketStageCounts(now, onlineSecs int64) (map[string]int, error)
+	TicketStats() (tickets, mappings int, err error)
+	GetAssignment(id int64) (*TicketAssignment, error)
+	LatestAssignment(ticketID int64) (*TicketAssignment, error)
+	ListAssignments(ticketID int64) ([]*TicketAssignment, error)
+	EnsureAssignment(cmd AssignmentCommand) (*TicketAssignment, error)
+	MarkAssignmentRunning(ticketID, now int64) error
+	EndAssignments(ticketID int64, reason string, now int64) error
+	ExpireAssignmentLeases(now int64) (int64, error)
+	ReassignTicket(cmd AssignmentCommand) (*TicketAssignment, error)
+	SubscribeTicket(ticketID int64, threadRoot, mode string, now int64) error
+	TicketSubscriptions(ticketID int64) ([]*TicketSubscription, error)
+	PeerInThread(rootID, peerID string) (bool, error)
+	UpsertPolicyVersion(version, rules string, now int64) error
+	GetPolicyVersion(version string) (*PolicyVersion, error)
+	CreateMandate(m *Mandate) error
+	GetMandate(ticketID int64) (*Mandate, error)
+	EnqueueEffect(kind, key, payload string, now int64) error
+	DueEffects(now int64, limit int) ([]*Effect, error)
+	CompleteEffect(id int64) error
+	FailEffect(id int64, msg string, nextAt int64) error
+	// EffectStats returns pending/due/failed totals plus a per-kind health
+	// map, including rows already due but not yet processed.
+	EffectStats(now int64) (*EffectHealth, error)
+	// RecordAuditAndEffect writes one audit row and one effect in a single
+	// transaction, for intents whose trigger lives outside SQLite.
+	RecordAuditAndEffect(actor, action, detail, kind, key, payload string, now int64) error
+	UpsertPromptRevision(revision, agentType, baseRevision, content string, now int64) error
+	ListPromptRevisions() ([]*PromptRevision, error)
+	GetPromptRevision(revision string) (*PromptRevision, error)
+	LatestPromptRevision(agentType string) (*PromptRevision, error)
 	// permission handshake (§6.5)
 	CreatePermissionRequest(pr *PermissionRequest) error
 	GetPermissionRequest(requestID string) (*PermissionRequest, error)
@@ -781,16 +828,32 @@ func (s *sqliteStore) GetByIDAnySender(id string) ([]*Message, error) {
 }
 
 // visibilityExpr is the single source of truth for "which messages can a peer
-// see" (DESIGN §4.4): direct, broadcast, or a room the peer belongs to. It
-// takes four peer-id parameters in order (direct, broadcast sender, room
-// sender, room member). VisibleTo and MessageVisibleTo share it verbatim so two
-// implementations of the delivery rule cannot drift; acking (AckIfVisible)
-// reuses MessageVisibleTo for the same reason.
+// see" (DESIGN §4.4): direct, broadcast, a room the peer belongs to, or a
+// ticket thread the peer is subscribed to as an executor. The subscription
+// branch only admits a peer who was already a participant in that thread
+// (sender or recipient of some message), so a ticket cannot expose a private
+// conversation to a third party.
+//
+// Parameter order (eight peer ids): direct recipient, broadcast sender,
+// room sender, room member, subscription sender filter, ticket assignee,
+// participant sender, participant recipient.
 const visibilityExpr = `((m.recipient = ?)
 		  OR (m.recipient = '*' AND m.sender != ?)
 		  OR (m.recipient LIKE 'grp_%' AND m.sender != ? AND EXISTS (
 		       SELECT 1 FROM room_members rm
-		       WHERE rm.room_id = m.recipient AND rm.peer_id = ? AND rm.start_seq < m.seq)))`
+		       WHERE rm.room_id = m.recipient AND rm.peer_id = ? AND rm.start_seq < m.seq))
+		  OR (m.sender != ? AND EXISTS (
+		       SELECT 1 FROM ticket_subscriptions ts
+		       JOIN tickets t ON t.id = ts.ticket_id
+		       WHERE ts.thread_root = m.root_id
+		         AND t.assignee = ?
+		         AND t.state = 'open'
+		         AND ts.mode IN ('own','context')
+		         AND EXISTS (
+		           SELECT 1 FROM messages pm
+		           WHERE pm.root_id = m.root_id
+		             AND (pm.sender = ? OR pm.recipient = ?))))
+		  )`
 
 // visibleSelect is the column list every message read shares.
 const visibleSelect = `SELECT m.seq,m.id,m.sender,m.recipient,m.kind,m.in_reply_to,m.root_id,
@@ -810,7 +873,10 @@ func (s *sqliteStore) VisibleTo(peerID string, since int64, limit int) ([]*Messa
 		  AND m.approval_state NOT IN ('pending','rejected')
 		  AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.message_seq = m.seq AND a.peer_id = ?)
 		  AND `+visibilityExpr+`
-		ORDER BY m.seq ASC LIMIT ?`, since, peerID, peerID, peerID, peerID, peerID, limit)
+		ORDER BY m.seq ASC LIMIT ?`, since,
+		peerID, // ack
+		peerID, peerID, peerID, peerID, peerID, peerID, peerID, peerID,
+		limit)
 	if err != nil {
 		return nil, err
 	}
@@ -834,7 +900,8 @@ func (s *sqliteStore) MessageVisibleTo(seq int64, peerID string) (bool, error) {
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages m
 		WHERE m.seq = ?
 		  AND m.approval_state NOT IN ('pending','rejected')
-		  AND `+visibilityExpr, seq, peerID, peerID, peerID, peerID).Scan(&n)
+		  AND `+visibilityExpr, seq,
+		peerID, peerID, peerID, peerID, peerID, peerID, peerID, peerID).Scan(&n)
 	return n > 0, err
 }
 
@@ -913,7 +980,9 @@ func (s *sqliteStore) LastNVisibleInThread(rootID, peerID string, n int) ([]*Mes
 		  AND m.approval_state NOT IN ('pending','rejected')
 		  AND (m.sender = ? OR `+visibilityExpr+`)
 		ORDER BY m.seq DESC LIMIT ?`,
-		rootID, peerID, peerID, peerID, peerID, peerID, n)
+		rootID, peerID,
+		peerID, peerID, peerID, peerID, peerID, peerID, peerID, peerID,
+		n)
 	if err != nil {
 		return nil, err
 	}
@@ -1029,6 +1098,9 @@ func (s *sqliteStore) DeleteMessages(seqs []int64) error {
 	defer tx.Rollback()
 	for _, seq := range seqs {
 		if _, err := tx.Exec(`DELETE FROM acks WHERE message_seq=?`, seq); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM message_tickets WHERE message_seq=?`, seq); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM messages WHERE seq=?`, seq); err != nil {

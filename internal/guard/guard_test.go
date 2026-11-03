@@ -1,9 +1,11 @@
 package guard
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/AlixWang/agent-relay/internal/auth"
 	"github.com/AlixWang/agent-relay/internal/store"
 )
 
@@ -339,5 +341,49 @@ func TestHandshakeSkipsLoopCheck(t *testing.T) {
 	if _, err := g.Check(&Envelope{ID: "s1", To: "muse-a", From: "muse-b", Kind: "status",
 		InReplyTo: "t1", Status: "started", Payload: "ok"}, now); err != nil {
 		t.Fatalf("short status hit loop guard: %v", err)
+	}
+}
+
+func TestTaskAdmissionPolicy(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().Unix()
+	g := New(st, Limits{FuseMaxMessages: 5, FuseMaxAgeSecs: 3600, RatePerMinute: 60, DisallowPeerTasks: true})
+	if _, err := g.Check(&Envelope{ID: "p1", To: "muse-b", From: "muse-a", Payload: "peer delegation here with enough words to pass"}, now); err == nil {
+		t.Fatal("peer task should be refused")
+	} else if r, ok := err.(*Rejection); !ok || r.Code != "task_not_allowed" {
+		t.Fatalf("wrong rejection: %v", err)
+	}
+	if _, err := g.Check(&Envelope{ID: "o1", To: "muse-b", From: auth.OperatorID, Payload: "operator task here with enough words to pass"}, now); err != nil {
+		t.Fatalf("operator task must pass: %v", err)
+	}
+	// The knob is peer→peer only: a peer sending work/report to the operator
+	// or system is not delegation and must remain allowed.
+	if _, err := g.Check(&Envelope{ID: "op1", To: auth.OperatorID, From: "muse-a", Kind: "task", Payload: "send this report to my operator"}, now); err != nil {
+		t.Fatalf("peer→operator task must pass: %v", err)
+	}
+	if _, err := g.Check(&Envelope{ID: "sys1", To: auth.SystemID, From: "muse-a", Kind: "task", Payload: "send this report to the system"}, now); err != nil {
+		t.Fatalf("peer→system task must pass: %v", err)
+	}
+
+	g2 := New(st, Limits{FuseMaxMessages: 5, FuseMaxAgeSecs: 3600, RatePerMinute: 60, RequireTaskApprovalFromPeers: true})
+	v, err := g2.Check(&Envelope{ID: "p2", To: "muse-b", From: "muse-a", Payload: "peer task held by policy with enough words to pass"}, now)
+	if err != nil || v == nil || !v.Held {
+		t.Fatalf("peer task should be held: v=%+v err=%v", v, err)
+	}
+}
+
+// The human-readable snapshot and the hashed version must cover the same
+// fields; otherwise a rate change silently alters behavior without changing
+// the audited policy version.
+func TestPolicyRulesMatchVersion(t *testing.T) {
+	base := Limits{FuseMaxMessages: 5, FuseMaxAgeSecs: 3600, RatePerMinute: 60}
+	g := New(openTestStore(t), base)
+	rules := g.PolicyRules()
+	if !strings.Contains(rules, "rate_per_minute=60") || !strings.Contains(rules, "allow_peer_tasks=true") {
+		t.Fatalf("policy rules incomplete: %s", rules)
+	}
+	other := New(openTestStore(t), Limits{FuseMaxMessages: 5, FuseMaxAgeSecs: 3600, RatePerMinute: 61})
+	if g.PolicyVersion() == other.PolicyVersion() {
+		t.Fatal("rate change must change policy version")
 	}
 }

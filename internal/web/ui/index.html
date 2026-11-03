@@ -122,6 +122,7 @@
     </div>
     <nav class="sb-nav" aria-label="主导航">
       <div class="sb-group">运行</div>
+      <a href="#work" data-route="work" class="sb-link"><svg class="icon"><use href="#i-inbox"/></svg><span>工作台</span><em id="navWork" class="sb-count warn" hidden></em></a>
       <a href="#members" data-route="members" class="sb-link"><svg class="icon"><use href="#i-users"/></svg><span>成员</span><em id="navOnline" class="sb-count"></em></a>
       <a href="#muse" data-route="muse" class="sb-link"><svg class="icon"><use href="#i-zap"/></svg><span>Muse 保活</span><em id="navMuse" class="sb-count warn" hidden></em></a>
       <a href="#threads" data-route="threads" class="sb-link"><svg class="icon"><use href="#i-message"/></svg><span>消息线程</span><em id="navPending" class="sb-count warn" hidden></em></a>
@@ -158,6 +159,38 @@
     </header>
 
     <main id="main">
+      <!-- ---------- 工作台 ---------- -->
+      <section id="page-work" class="page" hidden>
+        <div class="stats">
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-alert"/></svg>待我处理</span><b id="workAttention">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-activity"/></svg>进行中</span><b id="workWorking">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-inbox"/></svg>全部未结束</span><b id="workOpen">-</b></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-bar">
+            <div class="seg" id="workSeg" role="tablist">
+              <button data-v="attention" class="on">需处理 <em id="workFcAttention"></em></button>
+              <button data-v="working">进行中</button>
+              <button data-v="done">已完成</button>
+              <button data-v="all">全部</button>
+            </div>
+            <div class="bar-right">
+              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="workQ" type="search" placeholder="搜索工作项 / 成员 / 线程"></label>
+              <label class="switch" data-tip="每 10 秒自动刷新"><input type="checkbox" id="workAuto"><span></span>自动</label>
+              <button class="btn btn-outline btn-sm" id="workRefresh"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="workTable">
+              <thead><tr><th>工作项</th><th>请求者 → 执行者</th><th>阶段</th><th>最近活动</th><th class="th-right">操作</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pager" id="workPager"></div>
+        </div>
+      </section>
+
       <!-- ---------- 成员 ---------- -->
       <section id="page-members" class="page">
         <div class="stats">

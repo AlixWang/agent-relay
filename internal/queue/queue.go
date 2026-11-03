@@ -22,7 +22,7 @@ type SendRequest struct {
 	Payload          string `json:"payload"`
 	ProtocolVersion  int    `json:"protocol_version"`
 	// Execution handshake (§6.5):
-	Status        string `json:"status"`          // kind=status: started|progress|blocked|resumed|cancelled
+	Status        string `json:"status"`          // kind=status: started|progress|blocked|resumed|cancelled|waiting|ready|failed|dropped
 	Op            string `json:"op"`              // kind=permission_request
 	Target        string `json:"target"`          // kind=permission_request
 	Detail        string `json:"detail"`          // kind=permission_request
@@ -140,7 +140,7 @@ func (s *Service) Send(req *SendRequest, now int64) (int64, bool, string, error)
 		Kind:             kind,
 		InReplyTo:        req.InReplyTo,
 		RootID:           verdict.RootID,
-		RequiresApproval: req.RequiresApproval,
+		RequiresApproval: req.RequiresApproval || verdict.Held,
 		ApprovalState:    approvalState,
 		Payload:          req.Payload,
 		CreatedAt:        now,
