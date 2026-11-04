@@ -397,9 +397,12 @@
                   <div class="cmd-session-meta">
                     <div class="cmd-session-name">
                       <span x-text="p.id"></span>
-                      <span class="dot" :class="p.online ? 'on' : 'off'"></span>
+                      <span class="cmd-session-flags">
+                        <span class="badge warn xs" x-show="peerUnreadCount(p.id) > 0" x-text="peerUnreadCount(p.id)" title="未读回复"></span>
+                        <span class="dot" :class="p.online ? 'on' : 'off'"></span>
+                      </span>
                     </div>
-                    <div class="cmd-session-preview" x-text="p.display_name || p.agent_type || '在线助手'"></div>
+                    <div class="cmd-session-preview" :class="{ 'unread': peerUnreadCount(p.id) > 0 }" x-text="peerPreview(p)"></div>
                   </div>
                 </div>
               </template>

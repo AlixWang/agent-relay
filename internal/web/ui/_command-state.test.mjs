@@ -90,11 +90,14 @@ const INBOX_ITEMS = [
   { seq: 102, id: 'n2', from: 'alice', to: 'operator', kind: 'result', payload: '第二条', created_at: 1791555100, unread: true, thread: 'op/alice' },
   { seq: 101, id: 'n1', from: 'alice', to: 'operator', kind: 'chat', payload: '第一条', created_at: 1791555000, unread: true, thread: 'op/alice' },
 ];
-globalThis.fetch = async (url) => {
+const posts = [];
+globalThis.fetch = async (url, opts = {}) => {
   calls.push(url);
-  const body = url.startsWith('/admin/rooms') ? { ok: true, rooms: [ROOM] }
+  if (opts.method === 'POST') posts.push({ url, body: JSON.parse(opts.body || '{}') });
+  const body = url === '/admin/inbox/read' ? { ok: true, unread: 0, unread_by_peer: {} }
+    : url.startsWith('/admin/rooms') ? { ok: true, rooms: [ROOM] }
     : url.startsWith('/admin/messages?thread=op') ? OP_DM_THREAD
-    : url.startsWith('/admin/inbox') ? { ok: true, unread: 2, items: INBOX_ITEMS }
+    : url.startsWith('/admin/inbox') ? { ok: true, unread: 2, unread_by_peer: { alice: 2 }, items: INBOX_ITEMS }
       : url.startsWith('/admin/peers') ? { ok: true, peers: PEERS }
         : { ok: true };
   return { ok: true, status: 200, statusText: 'OK', json: async () => body };
@@ -320,5 +323,30 @@ assert(page.isExpanded(longMsg) === true, 'clicking 展开全文 must expand tha
 page.toggleMessage(longMsg);
 assert(page.isExpanded(longMsg) === false, 'clicking 收起 must collapse it again');
 assert(page.renderMessage('- fe: ok').includes('msg-li-label'), 'the command state must use the safe renderer');
+
+// 12. Unread replies show on the 助手私聊 list, not only in the system inbox.
+// Regression: every reply landed in 系统收件箱 and the DM row showed nothing.
+page.selectInbox();
+await page.loadSessions();
+page.peers = ['bob', 'alice', 'carol'].map((id) => ({ id, online: true, agent_type: 'muse' }));
+assert(page.peerUnread.alice === 2, 'per-peer unread must come from unread_by_peer, got ' + JSON.stringify(page.peerUnread));
+assert(page.peerUnreadCount('alice') === 2 && page.peerUnreadCount('bob') === 0, 'DM badge counts');
+assert(page.filteredPeers()[0].id === 'alice', 'an assistant with unread replies floats to the top, got ' + page.filteredPeers().map((p) => p.id));
+assert(page.filteredPeers().slice(1).map((p) => p.id).join(',') === 'bob,carol', 'the rest keep their order');
+assert(page.peerPreview(page.peers[1]) === '第二条', 'the DM row previews the latest unread reply, got ' + page.peerPreview(page.peers[1]));
+assert(page.peerPreview(page.peers[0]) === 'muse', 'a read DM row shows who the assistant is');
+
+// Opening the DM reads it: peer watermark to the newest reply shown.
+posts.length = 0;
+page.selectPeer({ id: 'alice', display_name: 'alice' });
+assert(page.peerUnreadCount('alice') === 0, 'the open DM shows no badge');
+await page.loadActiveMessages(false);
+await new Promise((r) => setTimeout(r, 10));
+const read = posts.find((p) => p.url === '/admin/inbox/read');
+assert(read && read.body.peer === 'alice' && read.body.seq === 242, 'opening a DM must mark that peer read up to its newest reply, got ' + JSON.stringify(posts));
+assert(!page.peerUnread.alice && page.inboxUnread === 0, 'counters follow the read response');
+posts.length = 0;
+await page.loadActiveMessages(true);
+assert(!posts.some((p) => p.url === '/admin/inbox/read'), 'nothing unread: polling must not re-post read markers');
 
 console.log('command state: all checks passed');

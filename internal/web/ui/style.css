@@ -757,6 +757,18 @@ main.full-bleed {
   text-overflow: ellipsis;
 }
 
+/* Unread badge + presence dot on the right of a DM row. */
+.cmd-session-flags {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.cmd-session-preview.unread {
+  color: var(--fg);
+}
+
 .cmd-empty-hint {
   padding: 10px 8px;
   font-size: var(--fs-xs);

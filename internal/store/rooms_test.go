@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func roomTestCreate(t *testing.T, st Store, id, name string, ts int64) {
 	t.Helper()
@@ -220,5 +223,22 @@ func TestSettingsAndOperatorInbox(t *testing.T) {
 	}
 	if n, _ := st.CountInboxSince(items[0].Seq); n != 0 {
 		t.Fatalf("unread after watermark: %d", n)
+	}
+
+	// Per-sender unread: global watermark AND the sender's own watermark.
+	by, err := st.InboxUnreadBySender(0, "rs:")
+	if err != nil || by["alice"] != 1 || by["bob"] != 1 || len(by) != 2 {
+		t.Fatalf("unread by sender: %+v err=%v", by, err)
+	}
+	if err := st.SetSetting("rs:alice", fmt.Sprint(items[1].Seq), 30); err != nil {
+		t.Fatal(err)
+	}
+	by, _ = st.InboxUnreadBySender(0, "rs:")
+	if _, ok := by["alice"]; ok || by["bob"] != 1 {
+		t.Fatalf("alice read via her DM, bob still unread: %+v", by)
+	}
+	by, _ = st.InboxUnreadBySender(items[0].Seq, "rs:")
+	if len(by) != 0 {
+		t.Fatalf("global watermark clears everyone: %+v", by)
 	}
 }

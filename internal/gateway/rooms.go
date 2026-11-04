@@ -27,6 +27,10 @@ import (
 // settingOperatorReadSeq is the console's inbox read watermark (§9.5).
 const settingOperatorReadSeq = "operator_read_seq"
 
+// settingOperatorPeerReadPrefix + <peer> is that peer's DM read watermark: the
+// console marks a DM read when it is opened, independent of the inbox.
+const settingOperatorPeerReadPrefix = "operator_read_seq:"
+
 // roomSendIDPrefix labels server-minted message ids from the console and from
 // server notices, so a row's origin is visible in exports and audits.
 const (
@@ -468,6 +472,12 @@ func dedupeIDs(ids []string) []string {
 // ---- operator inbox ----
 
 // handleAdminInbox handles GET /admin/inbox: replies addressed to the operator.
+//
+// Every such reply lives in its sender's DM thread (op/<peer>), so read state
+// is per peer: opening a DM in the console marks that peer read (POST
+// /admin/inbox/read {peer, seq}) and 全部已读 moves the global watermark. A
+// message is unread while its seq is above both. unread_by_peer drives the
+// badges in the console's 助手私聊 list; unread is their sum (the inbox badge).
 func (s *Server) handleAdminInbox(w http.ResponseWriter, r *http.Request) {
 	p := parsePage(r)
 	items, total, err := s.st.InboxMessages(p.Size, p.offset())
@@ -476,45 +486,83 @@ func (s *Server) handleAdminInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	watermark := s.operatorReadSeq()
+	peerMarks := map[string]int64{}
 	out := make([]map[string]any, 0, len(items))
 	for _, m := range items {
+		mark, ok := peerMarks[m.Sender]
+		if !ok {
+			mark = s.operatorPeerReadSeq(m.Sender)
+			peerMarks[m.Sender] = mark
+		}
 		out = append(out, map[string]any{
 			"seq": m.Seq, "id": m.ID, "from": m.Sender, "to": m.Recipient,
 			"kind": m.Kind, "in_reply_to": m.InReplyTo, "thread": m.RootID,
 			"payload": m.Payload, "created_at": m.CreatedAt,
 			"status": m.Status, "decision": m.Decision,
-			"unread": m.Seq > watermark,
+			"unread": m.Seq > watermark && m.Seq > mark,
 		})
 	}
-	unread, _ := s.st.CountInboxSince(watermark)
+	unread, byPeer := s.inboxUnread()
 	writeJSON(w, 200, withMeta(map[string]any{
 		"ok": true, "items": out, "read_seq": watermark, "unread": unread,
+		"unread_by_peer": byPeer,
 	}, p, total))
 }
 
-// handleAdminInboxRead handles POST /admin/inbox/read {seq}: move the read
+// handleAdminInboxRead handles POST /admin/inbox/read {seq, peer?}: move a read
 // watermark forward (never backwards, so a stale tab cannot unread messages).
+// Without peer it is 全部已读 (the global watermark); with peer it marks that
+// one assistant's DM read, which is what opening the DM in the console does.
 func (s *Server) handleAdminInboxRead(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Seq int64 `json:"seq"`
+		Seq  int64  `json:"seq"`
+		Peer string `json:"peer"`
 	}
 	if !s.readJSON(w, r, &req) {
 		return
 	}
-	cur := s.operatorReadSeq()
+	key, cur := settingOperatorReadSeq, s.operatorReadSeq()
+	if peer := strings.TrimSpace(req.Peer); peer != "" {
+		key, cur = settingOperatorPeerReadPrefix+peer, s.operatorPeerReadSeq(peer)
+	}
 	if req.Seq < cur {
 		req.Seq = cur
 	}
-	if err := s.st.SetSetting(settingOperatorReadSeq, strconv.FormatInt(req.Seq, 10), time.Now().Unix()); err != nil {
+	if err := s.st.SetSetting(key, strconv.FormatInt(req.Seq, 10), time.Now().Unix()); err != nil {
 		writeErr(w, 500, "read marker failed")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "read_seq": req.Seq})
+	unread, byPeer := s.inboxUnread()
+	writeJSON(w, 200, map[string]any{"ok": true, "read_seq": req.Seq, "unread": unread, "unread_by_peer": byPeer})
 }
 
-// operatorReadSeq returns the stored inbox watermark (0 when never read).
+// inboxUnread returns the operator's unread replies: the total (inbox and nav
+// badge) and the per-peer split (助手私聊 badges). Errors read as nothing
+// unread — a badge must never break the page.
+func (s *Server) inboxUnread() (int, map[string]int) {
+	byPeer, err := s.st.InboxUnreadBySender(s.operatorReadSeq(), settingOperatorPeerReadPrefix)
+	if err != nil || byPeer == nil {
+		return 0, map[string]int{}
+	}
+	total := 0
+	for _, n := range byPeer {
+		total += n
+	}
+	return total, byPeer
+}
+
+// operatorReadSeq returns the stored global inbox watermark (0 when never read).
 func (s *Server) operatorReadSeq() int64 {
-	v, err := s.st.GetSetting(settingOperatorReadSeq)
+	return s.settingSeq(settingOperatorReadSeq)
+}
+
+// operatorPeerReadSeq returns one peer's DM read watermark (0 when never read).
+func (s *Server) operatorPeerReadSeq(peer string) int64 {
+	return s.settingSeq(settingOperatorPeerReadPrefix + peer)
+}
+
+func (s *Server) settingSeq(key string) int64 {
+	v, err := s.st.GetSetting(key)
 	if err != nil || v == "" {
 		return 0
 	}

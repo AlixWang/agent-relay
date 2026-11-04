@@ -273,3 +273,29 @@ func (s *sqliteStore) CountInboxSince(seq int64) (int, error) {
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE recipient='operator' AND seq>?`, seq).Scan(&n)
 	return n, err
 }
+
+// InboxUnreadBySender counts unread operator-addressed messages per sender.
+// A message is unread when its seq is above BOTH the global watermark
+// (globalSeq, moved by 全部已读) and the sender's own watermark, stored as the
+// setting peerKeyPrefix+sender (moved by opening that peer's DM). Senders with
+// nothing unread are absent from the map.
+func (s *sqliteStore) InboxUnreadBySender(globalSeq int64, peerKeyPrefix string) (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT m.sender, COUNT(*) FROM messages m
+		WHERE m.recipient='operator' AND m.seq > MAX(?, COALESCE(
+			(SELECT CAST(st.value AS INTEGER) FROM settings st WHERE st.key = ? || m.sender), 0))
+		GROUP BY m.sender`, globalSeq, peerKeyPrefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var sender string
+		var n int
+		if err := rows.Scan(&sender, &n); err != nil {
+			return nil, err
+		}
+		out[sender] = n
+	}
+	return out, rows.Err()
+}

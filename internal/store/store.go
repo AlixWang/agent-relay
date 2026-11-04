@@ -294,6 +294,7 @@ type Store interface {
 	SetSetting(key, value string, ts int64) error
 	InboxMessages(limit, offset int) ([]*Message, int, error)
 	CountInboxSince(seq int64) (int, error)
+	InboxUnreadBySender(globalSeq int64, peerKeyPrefix string) (map[string]int, error)
 	// verify (§8.4)
 	SetSmoke(peerID, smokeID string, ts int64) error
 	GetSmoke(peerID string) (smokeID string, ts int64, err error)

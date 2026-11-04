@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -263,6 +264,59 @@ func TestOperatorInboxAndReadWatermark(t *testing.T) {
 	// The watermark only moves forward: a stale tab cannot unread messages.
 	if _, out := f.doCookie(t, "POST", "/admin/inbox/read", map[string]any{"seq": 0}, cookie); out["read_seq"].(float64) != seq {
 		t.Fatalf("read marker moved backwards: %+v", out)
+	}
+}
+
+// Opening one assistant's DM marks only that assistant read: the console shows
+// unread replies on the 助手私聊 list, not only in the system inbox.
+func TestOperatorInboxPerPeerUnread(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	f.registerPeer(t, "bob", "muse")
+	cookie := f.adminLogin(t)
+	for i, from := range []string{"alice", "alice", "bob"} {
+		if code, out := f.do(t, "POST", "/messages", map[string]any{
+			"id": fmt.Sprintf("pp%d", i), "to": "operator", "kind": "result", "payload": fmt.Sprintf("第 %d 项巡检完成：磁盘使用率 %d%%，证书 2027-03 到期，无告警", i, 40+i),
+		}, f.tok[from]); code != 200 || out["ok"] != true {
+			t.Fatalf("%s → operator: %d %+v", from, code, out)
+		}
+	}
+	_, inbox := f.doCookie(t, "GET", "/admin/inbox", nil, cookie)
+	by, _ := inbox["unread_by_peer"].(map[string]any)
+	if by["alice"] != float64(2) || by["bob"] != float64(1) || inbox["unread"] != float64(3) {
+		t.Fatalf("per-peer unread: %+v / %+v", by, inbox["unread"])
+	}
+	items, _ := inbox["items"].([]any)
+	var aliceMax float64
+	for _, it := range items {
+		m := it.(map[string]any)
+		if m["from"] == "alice" && m["seq"].(float64) > aliceMax {
+			aliceMax = m["seq"].(float64)
+		}
+	}
+
+	code, out := f.doCookie(t, "POST", "/admin/inbox/read", map[string]any{"peer": "alice", "seq": int64(aliceMax)}, cookie)
+	if code != 200 || out["unread"] != float64(1) {
+		t.Fatalf("peer read: %d %+v", code, out)
+	}
+	_, inbox = f.doCookie(t, "GET", "/admin/inbox", nil, cookie)
+	by, _ = inbox["unread_by_peer"].(map[string]any)
+	if _, ok := by["alice"]; ok || by["bob"] != float64(1) || inbox["unread"] != float64(1) {
+		t.Fatalf("after reading alice's DM: %+v / %+v", by, inbox["unread"])
+	}
+	for _, it := range inbox["items"].([]any) {
+		m := it.(map[string]any)
+		if want := m["from"] == "bob"; m["unread"] != want {
+			t.Fatalf("item unread flag must follow the peer watermark: %+v", m)
+		}
+	}
+	_, stats := f.doCookie(t, "GET", "/admin/stats", nil, cookie)
+	if stats["inbox_unread"] != float64(1) {
+		t.Fatalf("nav badge must follow per-peer reads: %+v", stats["inbox_unread"])
+	}
+	// The peer watermark never moves backwards either.
+	if _, out := f.doCookie(t, "POST", "/admin/inbox/read", map[string]any{"peer": "alice", "seq": 0}, cookie); out["read_seq"] != aliceMax {
+		t.Fatalf("peer marker moved backwards: %+v", out)
 	}
 }
 

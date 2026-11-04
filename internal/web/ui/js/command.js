@@ -49,6 +49,9 @@ function createCommandState() {
     searchQuery: '',
     inboxUnread: 0,
     inboxItems: [],
+    // Unread replies per assistant (GET /admin/inbox unread_by_peer): the
+    // badges on the 助手私聊 list. Opening a DM marks that peer read.
+    peerUnread: {},
     rooms: [],
     peers: [],
     
@@ -171,8 +174,7 @@ function createCommandState() {
           this.rooms = roomsRes.value.rooms;
         }
         if (inboxRes.status === 'fulfilled' && inboxRes.value) {
-          this.inboxUnread = inboxRes.value.unread || 0;
-          this.inboxItems = inboxRes.value.items || [];
+          this.applyInbox(inboxRes.value);
         }
       } catch (_) {}
 
@@ -191,8 +193,7 @@ function createCommandState() {
           this.rooms = roomsRes.value.rooms || [];
         }
         if (inboxRes.status === 'fulfilled' && inboxRes.value) {
-          this.inboxUnread = inboxRes.value.unread || 0;
-          this.inboxItems = inboxRes.value.items || [];
+          this.applyInbox(inboxRes.value);
         }
         if (peersRes.status === 'fulfilled' && peersRes.value) {
           this.peers = peersRes.value.peers || [];
@@ -210,6 +211,48 @@ function createCommandState() {
       } catch (err) {
         toast('加载指挥台会话失败：' + err.message, 'bad');
       }
+    },
+
+    // Inbox counters from GET /admin/inbox or POST /admin/inbox/read.
+    applyInbox(res, withItems = true) {
+      this.inboxUnread = res.unread || 0;
+      this.peerUnread = res.unread_by_peer || {};
+      if (withItems) this.inboxItems = res.items || [];
+    },
+
+    peerUnreadCount(peerId) {
+      // The open DM is being read right now; its badge would only flash
+      // until markPeerRead() lands.
+      if (this.activeTarget.type === 'peer' && this.activeTarget.id === peerId) return 0;
+      return (this.peerUnread && this.peerUnread[peerId]) || 0;
+    },
+
+    // Latest unread reply as the list preview, like any IM; otherwise who the
+    // assistant is.
+    peerPreview(p) {
+      if (this.peerUnreadCount(p.id) > 0) {
+        const last = (this.inboxItems || []).find((m) => m.from === p.id);
+        if (last && last.payload) return String(last.payload).replace(/\s+/g, ' ').slice(0, 80);
+      }
+      return p.display_name || p.agent_type || '在线助手';
+    },
+
+    // Viewing a DM reads it: move that peer's watermark to the newest reply
+    // shown. Skipped when the server already counts nothing unread.
+    async markPeerRead(peerId) {
+      if (!(this.peerUnread && this.peerUnread[peerId] > 0)) return;
+      const seq = this.messages
+        .filter((m) => m.from === peerId && m.to === 'operator')
+        .reduce((max, m) => Math.max(max, m.seq || 0), 0);
+      if (!seq) return;
+      try {
+        const res = await api('/admin/inbox/read', {
+          method: 'POST',
+          body: JSON.stringify({ peer: peerId, seq }),
+        });
+        this.applyInbox(res, false);
+        refreshStats();
+      } catch (_) {}
     },
 
     // Session Switchers
@@ -285,7 +328,7 @@ function createCommandState() {
       try {
         if (this.activeTarget.type === 'inbox') {
           const r = await api('/admin/inbox?page_size=50');
-          this.inboxUnread = r.unread || 0;
+          this.applyInbox(r, false);
           // Inbox pages newest-first; the stream reads top-down and rests at
           // the bottom, so render oldest-first like every other timeline.
           this.messages = (r.items || []).slice().reverse().map((m) => ({
@@ -332,6 +375,7 @@ function createCommandState() {
             acked_by: m.acked_by || [],
             approval_state: m.approval_state,
           }));
+          this.markPeerRead(this.activeTarget.id);
         } else if (this.activeTarget.type === 'broadcast') {
           // For broadcast, search messages sent to *
           const r = await api('/admin/messages?q=*&page_size=30');
@@ -468,6 +512,7 @@ function createCommandState() {
           body: JSON.stringify({ seq: maxSeq }),
         });
         this.inboxUnread = 0;
+        this.peerUnread = {};
         toast('收件箱已全部标记为已读', 'ok');
         this.loadSessions();
         refreshStats();
@@ -678,13 +723,21 @@ function createCommandState() {
       return 'warn';
     },
 
+    // Assistants with unread replies float to the top (stable otherwise), so a
+    // reply is seen where the conversation lives, not only in the inbox.
     filteredPeers() {
       const q = this.searchQuery.toLowerCase().trim();
-      const list = Array.isArray(this.peers) ? this.peers : [];
-      if (!q) return list;
-      return list.filter((p) =>
-        (p.id && p.id.toLowerCase().includes(q)) || (p.display_name && p.display_name.toLowerCase().includes(q))
-      );
+      let list = Array.isArray(this.peers) ? this.peers : [];
+      if (q) {
+        list = list.filter((p) =>
+          (p.id && p.id.toLowerCase().includes(q)) || (p.display_name && p.display_name.toLowerCase().includes(q))
+        );
+      }
+      const unread = this.peerUnread || {};
+      return list
+        .map((p, i) => ({ p, i, u: unread[p.id] > 0 ? 1 : 0 }))
+        .sort((a, b) => b.u - a.u || a.i - b.i)
+        .map((x) => x.p);
     },
 
     getMemberPeers() {

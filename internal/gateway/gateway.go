@@ -1642,9 +1642,8 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		"receiver_rev":   ReceiverRev(),
 	}
 	// Console nav badge (§9.5): replies waiting for the operator.
-	if unread, err := s.st.CountInboxSince(s.operatorReadSeq()); err == nil {
-		body["inbox_unread"] = unread
-	}
+	unread, _ := s.inboxUnread()
+	body["inbox_unread"] = unread
 	if c, err := s.st.AdminCounts(); err == nil {
 		body["threads_total"] = c.Threads
 		body["pending_approvals"] = c.PendingApprovals
