@@ -117,6 +117,7 @@ func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
 		"/js/audit.js",
 		"/js/logs.js",
 		"/js/tokens.js",
+		"/js/resources.js",
 		"/js/system.js",
 		"/js/command.js",
 		"/js/message.js",

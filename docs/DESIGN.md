@@ -35,7 +35,7 @@ This framework turns that one-off script into a reusable, self-hostable system: 
 
 ### 1.3 Non-goals
 
-- Not a replacement for A2A (enterprise agent-to-agent) or MCP (tool access). This sits below both: when an agent can only run shell commands, A2A's SDK requirement locks it out. This framework is for that tier.
+- Not a replacement for A2A (enterprise agent-to-agent) or MCP (tool access). This sits below both: when an agent can only run shell commands, A2A's SDK requirement locks it out. This framework is for that tier. The resource hub (§4.12) *distributes* MCP configs and skills to assistants; it never proxies MCP tool calls or executes skills.
 - Not a general-purpose MQ. It does queue semantics, but it is opinionated for LLM assistants, not a Kafka/RabbitMQ competitor.
 - Not a workflow engine. No DAG execution, no retries-with-backoff orchestration beyond basic redelivery.
 
@@ -270,6 +270,40 @@ client can report why it cannot talk to the current server. The admin read model
 is `GET /admin/logs` (filters: peer, level, source, event, task, thread, q, time
 range; facets + paged) and `GET /admin/logs/export` (NDJSON).
 
+### 4.12 Resource hub (`internal/resources`)
+
+One operator, many assistants, the same API keys / MCP servers / skills /
+prompt snippets configured by hand on each. The hub lets the operator
+**register a resource once, grant it per peer, and have assistants pull it**
+(ADR 0004, ADR 0005). The relay distributes config only.
+
+- **Kinds** (closed set): `secret` (external API key), `mcp` (neutral config,
+  may reference `${secret:NAME}`), `skill` (`SKILL.md` directory as tar.gz),
+  `prompt` (business prompt snippet; unrelated to `prompt_revisions`, §8.6).
+  Phase 1 ships `secret`; the others are rejected with 400 until they ship.
+- **Storage:** `resource_revisions` is append-only history; `resources` points
+  each `(kind,name)` at its live revision. Secret content is AES-GCM ciphertext
+  under `data_dir/secrets.key` (0600; separate from the Muse cookie key; back it
+  up with the database). The admin API is write-only for secret values.
+- **Grants:** default deny. `resource_grants` holds per-peer grants plus the
+  wildcard `*` (every peer, including ones registered later). No exclusions.
+  Deleting or pruning a peer drops its grants in the same transaction.
+- **Distribution:** `GET /resources/current` returns the caller's manifest:
+  secrets/skills by `fetch_url`, MCP/prompt inline with `${secret:}` left
+  unresolved, plus `manifest_rev` = SHA-256 over sorted `kind:name:hash` lines
+  (secret hashes are HMACs under the hub key). Heartbeat nudges with
+  `resources_update` + `resources_rev` whenever the digest differs from the
+  peer's receipt; the assistant confirms by sending `resources_rev` back
+  (`none` after syncing an empty manifest). Grant, revoke and rotation all
+  move the digest.
+- **Fetch:** `GET /resources/secrets/{name}` (and later `/resources/mcp/{name}`,
+  `/resources/skills/{name}`). Missing and not-granted are both 404. Responses
+  carrying plaintext are `Cache-Control: no-store` and write one `secret.fetch`
+  audit row per secret revealed (actor = peer).
+- **Revocation** removes a resource from the manifest but cannot reach copies
+  already on the assistant's host; the console says so and recommends
+  rotating the key upstream.
+
 ---
 
 ## 5. Data Model & Protocol Spec
@@ -463,6 +497,24 @@ CREATE TABLE muse_accounts (
     updated_at        INTEGER NOT NULL
 );
 
+-- Resource hub (§4.12). content is AES-GCM ciphertext for kind='secret'.
+CREATE TABLE resource_revisions (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    content BLOB NOT NULL,
+    content_hash TEXT NOT NULL,          -- secret: HMAC; otherwise sha256
+    created_at INTEGER NOT NULL, created_by TEXT NOT NULL
+);
+CREATE TABLE resources (                 -- live pointer per (kind,name)
+    kind TEXT NOT NULL, name TEXT NOT NULL, revision_id TEXT NOT NULL,
+    updated_at INTEGER NOT NULL, PRIMARY KEY (kind, name)
+);
+CREATE TABLE resource_grants (           -- peer_id '*' = every peer
+    kind TEXT NOT NULL, name TEXT NOT NULL, peer_id TEXT NOT NULL,
+    granted_at INTEGER NOT NULL, PRIMARY KEY (kind, name, peer_id)
+);
+-- peers.resources_rev / resources_updated_at: the manifest digest last applied.
+
 CREATE INDEX idx_messages_recipient_seq ON messages(recipient, seq);
 CREATE INDEX idx_messages_root ON messages(root_id, seq);
 ```
@@ -502,6 +554,8 @@ All endpoints require `Authorization: Bearer <token>` unless noted.
 | `POST /logs` | Upload runtime diagnostics | Best-effort agent log batch (§4.11). `peer_id` comes from the token; bounded and rate-limited; never blocks message delivery. |
 | `GET /peers` | Member list + online status | `[{id, display_name, agent_type, status, last_seen, online}]`. |
 | `POST /verify/smoke` | Trigger onboarding verification | Server creates a smoke task addressed to the requester; see §9.4. |
+| `GET /resources/current` | Resource hub manifest (§4.12, ADR 0004) | Only resources granted to the caller (directly or via `*`); `manifest_rev` digest. Heartbeat carries `resources_rev` both ways. |
+| `GET /resources/secrets/{name}` | Fetch one secret (ADR 0005) | `{name, value}`; 404 when missing or not granted; `no-store`; audited as `secret.fetch`. |
 
 Admin (session cookie, separate from agent tokens):
 
@@ -515,6 +569,8 @@ Admin (session cookie, separate from agent tokens):
 | `GET /admin/logs` | Agent runtime log query, filters/facets/paging (§4.11). |
 | `GET /admin/logs/export` | Agent runtime log export as NDJSON, same filters. |
 | `POST /admin/prompts` | Generate an onboarding prompt for a chosen agent type (§9.3). |
+| `GET /admin/resources?kind=` · `GET/PUT/DELETE /admin/resources/{kind}/{name}` | Resource hub (§4.12): list, history, create/overwrite (secret value write-only; empty value keeps it), delete. |
+| `POST /admin/resources/{kind}/{name}/grants` · `DELETE …/grants/{peer}` | Grant to a peer or `*`; revoke (secret revocation answers with a rotate-upstream warning). |
 | `GET/POST /admin/muse/accounts` · `PATCH/DELETE /admin/muse/accounts/:id` | Optional Muse account authorization (§4.9): write-only cookie binding, enable/auto-wake switches, revoke. |
 | `POST /admin/muse/accounts/:id/keepalive` · `/wake` · `POST /admin/muse/keepalive` · `GET /admin/muse/status` | Manual session renewal / VM wake / all-account sweep / loop status. |
 
@@ -1055,6 +1111,15 @@ path; no agent-facing endpoint was added.
 - 成员表、工作台行和 Muse 保活行提供「日志」快捷入口，分别带 `?peer=`/`?thread=`。
 - 空状态提示旧版 `relay-watch.sh` 需要重新下载；`navLogs` 角标显示 24h error 数。
 - 日志页按 `GET /admin/logs` 分页读取，导出走 `GET /admin/logs/export`（NDJSON）。
+
+### 9.8 资源中心
+
+`#resources`（`ui/js/resources.js`）登记与授权共享资源（§4.12）：
+
+- 四个 tab：密钥 / MCP / Skill / Prompt；未上线的类型显示「即将支持」。
+- 密钥只写不读：新建或覆盖时输入框在请求发出前清空；编辑时留空即保留原值。
+- 授权对话框：每个助手一个开关，外加「全部助手（含以后注册的）」开关；
+  通配打开后其余开关置灰。撤销与删除都提示「对方本地可能还有副本，建议到外部服务轮换」。
 
 The UI is intentionally boring: a tiny embedded SPA (Alpine + plain ESM modules under `ui/`), no build chain required at deploy time beyond what ships in the binary.
 

@@ -42,6 +42,10 @@ type Peer struct {
 	// AdminNote is an operator-only remark (e.g. login email) for the
 	// members console. Never exposed to agents (GET /peers strips it).
 	AdminNote string
+	// ResourcesRev is the resource-hub manifest digest the assistant last
+	// applied (§4.12, ADR 0004); "" = not reporting.
+	ResourcesRev       string
+	ResourcesUpdatedAt int64
 }
 
 type TokenRow struct {
@@ -289,6 +293,18 @@ type Store interface {
 	ListMuseAccounts() ([]*MuseAccount, error)
 	SaveMuseAccount(a *MuseAccount) error
 	DeleteMuseAccount(id string) error
+	// resource hub (§4.12, ADR 0004/0005): content is opaque here; secret
+	// encryption and hashing live in internal/resources.
+	PutResource(rev *ResourceRevision) error
+	GetResource(kind, name string) (*Resource, error)
+	ListResources(kind string) ([]*Resource, error)
+	ListGrantedResources(peerID string) ([]*Resource, error)
+	DeleteResource(kind, name string) (bool, error)
+	ListResourceRevisions(kind, name string) ([]*ResourceRevision, error)
+	GrantResource(kind, name, peerID string, ts int64) error
+	RevokeResource(kind, name, peerID string) (bool, error)
+	ListResourceGrants(kind, name string) ([]*ResourceGrant, error)
+	UpdatePeerResourcesRev(id, rev string, ts int64) error
 	// settings + operator inbox (§9.5)
 	GetSetting(key string) (string, error)
 	SetSetting(key, value string, ts int64) error
@@ -447,11 +463,13 @@ func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
-		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,'') FROM peers WHERE id=?`, id).
+		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,''),
+		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0) FROM peers WHERE id=?`, id).
 		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
-			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote)
+			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote,
+			&p.ResourcesRev, &p.ResourcesUpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -474,12 +492,14 @@ func (s *sqliteStore) FindPeerFold(id string) (*Peer, int, error) {
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
-		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,'')
+		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,''),
+		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0)
 		FROM peers WHERE id = ? COLLATE NOCASE ORDER BY id LIMIT 1`, id).
 		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
-			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote)
+			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote,
+			&p.ResourcesRev, &p.ResourcesUpdatedAt)
 	if err != nil {
 		return nil, n, err
 	}
@@ -491,7 +511,8 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
-		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,'') FROM peers ORDER BY id`)
+		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,''),
+		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0) FROM peers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -502,7 +523,8 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 		if err := rows.Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
-			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote); err != nil {
+			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote,
+			&p.ResourcesRev, &p.ResourcesUpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
@@ -574,6 +596,12 @@ func (s *sqliteStore) PrunePeers(olderThan int64) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	// A pruned peer's resource grants go with it: a later peer that
+	// re-registers under the same id must be granted afresh.
+	if _, err := tx.Exec(`DELETE FROM resource_grants WHERE peer_id IN
+		(SELECT id FROM peers WHERE last_seen>0 AND last_seen<?)`, olderThan); err != nil {
+		return 0, err
+	}
 	// A pruned peer's Muse authorization (cookie ciphertext) must not linger.
 	if _, err := tx.Exec(`DELETE FROM muse_accounts WHERE peer_id IN
 		(SELECT id FROM peers WHERE last_seen>0 AND last_seen<?)`, olderThan); err != nil {
@@ -604,6 +632,9 @@ func (s *sqliteStore) DeletePeer(id string, ts int64) (int64, error) {
 		return 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM muse_accounts WHERE peer_id=?`, id); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM resource_grants WHERE peer_id=?`, id); err != nil {
 		return 0, err
 	}
 	res, err = tx.Exec(`DELETE FROM peers WHERE id=?`, id)

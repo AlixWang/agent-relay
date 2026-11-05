@@ -24,6 +24,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/presence"
 	"github.com/AlixWang/agent-relay/internal/prompts"
 	"github.com/AlixWang/agent-relay/internal/queue"
+	"github.com/AlixWang/agent-relay/internal/resources"
 	"github.com/AlixWang/agent-relay/internal/retention"
 	"github.com/AlixWang/agent-relay/internal/store"
 	"github.com/AlixWang/agent-relay/internal/stream"
@@ -150,6 +151,13 @@ func main() {
 	// SSE fan-out (DESIGN §4.4b): in-memory wake-ups, DB stays authoritative.
 	gw.SetStream(stream.New(cfg.StreamMaxPerPeer, 500))
 	gw.SetMuse(museSvc)
+	// Resource hub (§4.12). A key failure disables only the hub: routes
+	// answer 503 and heartbeat stays silent about resources.
+	if resSvc, err := resources.New(st, cfg.DataDir); err != nil {
+		log.Printf("WARN: resource hub disabled: %v", err)
+	} else {
+		gw.SetResources(resSvc)
+	}
 	if cfg.AdminPasswordHash != "" {
 		gw.SetAdminHash([]byte(cfg.AdminPasswordHash))
 	} else {
