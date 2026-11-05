@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const mod = await import(pathToFileURL(path.join(here, 'js', 'resources.js')).href);
-const { resURL, grantURL, grantSummary, grantRows, filterResources, NAME_RE, ALL_PEERS, RES_KINDS } = mod;
+const { resURL, grantURL, grantSummary, grantRows, filterResources, NAME_RE, ALL_PEERS, RES_KINDS, kindLabel, secretRefsIn, buildPutBody, MCP_EXAMPLE } = mod;
 
 const assert = (cond, msg) => {
   if (!cond) {
@@ -41,5 +41,25 @@ for (const ok of ['K', 'OPENAI_API_KEY', 'a.b-c_1', 'x'.repeat(64)]) assert(NAME
 for (const bad of ['', '_x', '../x', 'a b', '${secret:x}', 'x'.repeat(65)]) assert(!NAME_RE.test(bad), 'name bad: ' + bad);
 
 assert(RES_KINDS.map((k) => k.kind).join() === 'secret,mcp,skill,prompt', 'four kinds, fixed order');
+
+assert(RES_KINDS.filter((k) => k.ready).map((k) => k.kind).join() === 'secret,mcp,prompt', 'P2 kinds ready, skill pending');
+assert(kindLabel('mcp') === 'MCP' && kindLabel('secret') === '密钥', 'kind labels');
+
+assert(secretRefsIn('${secret:B} ${secret:A} ${secret:B} ${secret:bad name}').join() === 'A,B', 'refs sorted, deduped, malformed ignored');
+assert(secretRefsIn(JSON.stringify(MCP_EXAMPLE)).join() === 'GITHUB_TOKEN', 'example references a secret');
+
+const throws = (fn, re, msg) => {
+  try { fn(); } catch (e) { assert(re.test(e.message), msg + ' (got: ' + e.message + ')'); return; }
+  assert(false, msg + ' (did not throw)');
+};
+throws(() => buildPutBody('secret', { value: '' }, false), /密钥值/, 'secret required on create');
+assert(buildPutBody('secret', { value: '' }, true).value === '', 'secret may be empty on edit');
+assert(buildPutBody('secret', { description: ' d ', value: 'v' }, false).description === 'd', 'description trimmed');
+throws(() => buildPutBody('mcp', { content: '{' }, false), /JSON/, 'mcp invalid json');
+throws(() => buildPutBody('mcp', { content: '[1]' }, false), /对象/, 'mcp must be object');
+const mb = buildPutBody('mcp', { content: JSON.stringify(MCP_EXAMPLE) }, false);
+assert(mb.content.transport === 'stdio' && !('value' in mb), 'mcp body carries parsed content only');
+throws(() => buildPutBody('prompt', { content: '  ' }, false), /Prompt/, 'prompt required');
+assert(buildPutBody('prompt', { content: '你好' }, false).content === '你好', 'prompt body');
 
 console.log('ok resources-state');

@@ -280,7 +280,13 @@ prompt snippets configured by hand on each. The hub lets the operator
 - **Kinds** (closed set): `secret` (external API key), `mcp` (neutral config,
   may reference `${secret:NAME}`), `skill` (`SKILL.md` directory as tar.gz),
   `prompt` (business prompt snippet; unrelated to `prompt_revisions`, §8.6).
-  Phase 1 ships `secret`; the others are rejected with 400 until they ship.
+  `secret`, `mcp` and `prompt` have shipped; `skill` is rejected with 400 until it does.
+- **MCP neutral format:** `{transport: "stdio"|"http", command, args[], env{},
+  url, headers{}}` — stdio takes command/args/env, http takes an absolute
+  http(s) url + headers. `${secret:NAME}` is allowed in `args`, `env` values,
+  `url` and `header` values (never in `command`); a malformed reference is a
+  400 at save time. Stored in canonical JSON, so reformatting does not move
+  the digest.
 - **Storage:** `resource_revisions` is append-only history; `resources` points
   each `(kind,name)` at its live revision. Secret content is AES-GCM ciphertext
   under `data_dir/secrets.key` (0600; separate from the Muse cookie key; back it
@@ -296,8 +302,11 @@ prompt snippets configured by hand on each. The hub lets the operator
   peer's receipt; the assistant confirms by sending `resources_rev` back
   (`none` after syncing an empty manifest). Grant, revoke and rotation all
   move the digest.
-- **Fetch:** `GET /resources/secrets/{name}` (and later `/resources/mcp/{name}`,
-  `/resources/skills/{name}`). Missing and not-granted are both 404. Responses
+- **Fetch:** `GET /resources/secrets/{name}`; `GET /resources/mcp/{name}`
+  returns the config with every reference resolved (all-or-nothing: a
+  reference the peer is not granted → 409 + `missing_secrets`); later
+  `/resources/skills/{name}`. Granting an MCP config whose secrets the peer
+  lacks succeeds but the admin response lists `missing_secrets`. Missing and not-granted are both 404. Responses
   carrying plaintext are `Cache-Control: no-store` and write one `secret.fetch`
   audit row per secret revealed (actor = peer).
 - **Revocation** removes a resource from the manifest but cannot reach copies
@@ -556,6 +565,7 @@ All endpoints require `Authorization: Bearer <token>` unless noted.
 | `POST /verify/smoke` | Trigger onboarding verification | Server creates a smoke task addressed to the requester; see §9.4. |
 | `GET /resources/current` | Resource hub manifest (§4.12, ADR 0004) | Only resources granted to the caller (directly or via `*`); `manifest_rev` digest. Heartbeat carries `resources_rev` both ways. |
 | `GET /resources/secrets/{name}` | Fetch one secret (ADR 0005) | `{name, value}`; 404 when missing or not granted; `no-store`; audited as `secret.fetch`. |
+| `GET /resources/mcp/{name}` | Fetch a resolved MCP config (ADR 0005) | `{name, config}` with `${secret:}` filled in; 409 + `missing_secrets` when a referenced secret is not granted; `no-store`; one `secret.fetch` row per secret revealed. |
 
 Admin (session cookie, separate from agent tokens):
 
@@ -1116,7 +1126,9 @@ path; no agent-facing endpoint was added.
 
 `#resources`（`ui/js/resources.js`）登记与授权共享资源（§4.12）：
 
-- 四个 tab：密钥 / MCP / Skill / Prompt；未上线的类型显示「即将支持」。
+- 四个 tab：密钥 / MCP / Skill / Prompt；Skill 尚未上线，显示「即将支持」。
+- MCP 用 JSON 编辑中立格式（新建时预填示例），列表显示依赖的密钥；授权 MCP 时若对方缺少
+  依赖密钥，toast 提示缺哪些（授权照样生效，拉取会 409）。Prompt 是纯文本。
 - 密钥只写不读：新建或覆盖时输入框在请求发出前清空；编辑时留空即保留原值。
 - 授权对话框：每个助手一个开关，外加「全部助手（含以后注册的）」开关；
   通配打开后其余开关置灰。撤销与删除都提示「对方本地可能还有副本，建议到外部服务轮换」。

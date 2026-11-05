@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -182,8 +183,8 @@ func TestResourceHubWildcardAndAuth(t *testing.T) {
 	if c, _ := f.doCookie(t, "PUT", "/admin/resources/secret/bad%20name", map[string]any{"value": "v"}, admin); c != 400 {
 		t.Fatalf("bad name: %d", c)
 	}
-	if c, _ := f.doCookie(t, "PUT", "/admin/resources/mcp/github", map[string]any{"value": "{}"}, admin); c != 400 {
-		t.Fatalf("mcp not yet supported should 400: %d", c)
+	if c, out := f.doCookie(t, "PUT", "/admin/resources/skill/review", map[string]any{"value": "x"}, admin); c != 400 || !strings.Contains(out["error"].(string), "unsupported") {
+		t.Fatalf("skill not yet supported should 400: %d %+v", c, out)
 	}
 	if c, _ := f.doCookie(t, "PUT", "/admin/resources/bogus/x", map[string]any{"value": "v"}, admin); c != 400 {
 		t.Fatalf("bogus kind: %d", c)
@@ -205,5 +206,80 @@ func TestResourceHubDisabledIs503(t *testing.T) {
 	}
 	if out := f.heartbeat(t, "alice", nil); out["resources_update"] != nil {
 		t.Fatalf("disabled hub nudged: %+v", out)
+	}
+}
+
+func TestResourceHubMCPAndPrompt(t *testing.T) {
+	f := newResourceFixture(t)
+	admin := f.adminLogin(t)
+	f.doCookie(t, "PUT", "/admin/resources/secret/GH", map[string]any{"value": "ghp_secret"}, admin)
+	cfg := map[string]any{
+		"transport": "stdio", "command": "npx",
+		"args": []string{"-y", "@modelcontextprotocol/server-github"},
+		"env":  map[string]string{"GITHUB_TOKEN": "${secret:GH}"},
+	}
+	if c, out := f.doCookie(t, "PUT", "/admin/resources/mcp/github", map[string]any{"description": "gh", "content": cfg}, admin); c != 200 {
+		t.Fatalf("put mcp: %d %+v", c, out)
+	}
+	// Invalid configs are 400 with a reason.
+	if c, out := f.doCookie(t, "PUT", "/admin/resources/mcp/bad", map[string]any{"content": map[string]any{"transport": "stdio"}}, admin); c != 400 || !strings.Contains(out["error"].(string), "command") {
+		t.Fatalf("invalid mcp: %d %+v", c, out)
+	}
+	// Grant MCP without its secret: allowed, but the response names what is missing.
+	c, out := f.doCookie(t, "POST", "/admin/resources/mcp/github/grants", map[string]any{"peer_id": "alice"}, admin)
+	if c != 200 || fmt.Sprint(out["missing_secrets"]) != "[GH]" {
+		t.Fatalf("grant hint: %d %+v", c, out)
+	}
+	// Fetch resolved config → 409 listing the missing secret, nothing leaked.
+	c, out = f.do(t, "GET", "/resources/mcp/github", nil, f.tok["alice"])
+	if c != 409 || fmt.Sprint(out["missing_secrets"]) != "[GH]" || strings.Contains(fmt.Sprint(out), "ghp_secret") {
+		t.Fatalf("missing dep: %d %+v", c, out)
+	}
+	// Manifest: template inline with refs unresolved + requires_secrets + fetch_url.
+	_, out = f.do(t, "GET", "/resources/current", nil, f.tok["alice"])
+	e := out["resources"].([]any)[0].(map[string]any)
+	content := e["content"].(map[string]any)
+	if e["kind"] != "mcp" || e["fetch_url"] != "/resources/mcp/github" || fmt.Sprint(e["requires_secrets"]) != "[GH]" ||
+		content["env"].(map[string]any)["GITHUB_TOKEN"] != "${secret:GH}" {
+		t.Fatalf("manifest mcp entry: %+v", e)
+	}
+	// Grant the secret: resolved, no-store, audited per secret.
+	f.doCookie(t, "POST", "/admin/resources/secret/GH/grants", map[string]any{"peer_id": "alice"}, admin)
+	req := httptest.NewRequest("GET", "/resources/mcp/github", nil)
+	req.Header.Set("Authorization", "Bearer "+f.tok["alice"])
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"GITHUB_TOKEN":"ghp_secret"`) {
+		t.Fatalf("resolved: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Header().Get("Cache-Control"), "no-store") {
+		t.Fatal("resolved mcp must be no-store")
+	}
+	audit, _ := f.srv.st.ListAudit("alice", "secret.fetch", 0, 10)
+	if len(audit) != 1 || !strings.Contains(audit[0].Detail, "via=mcp:github") {
+		t.Fatalf("mcp fetch audit: %+v", audit)
+	}
+	// Admin view returns the editable template (refs, never plaintext).
+	_, out = f.doCookie(t, "GET", "/admin/resources/mcp/github", nil, admin)
+	if strings.Contains(fmt.Sprint(out), "ghp_secret") || !strings.Contains(fmt.Sprint(out), "${secret:GH}") {
+		t.Fatalf("admin mcp view: %+v", out)
+	}
+	// bob has nothing: 404, not 409 (no existence leak).
+	if c, _ := f.do(t, "GET", "/resources/mcp/github", nil, f.tok["bob"]); c != 404 {
+		t.Fatalf("ungranted mcp: %d", c)
+	}
+
+	// Prompt: inline in manifest, string-only content.
+	if c, out := f.doCookie(t, "PUT", "/admin/resources/prompt/reviewer", map[string]any{"content": map[string]any{"x": 1}}, admin); c != 400 {
+		t.Fatalf("non-string prompt: %d %+v", c, out)
+	}
+	if c, out := f.doCookie(t, "PUT", "/admin/resources/prompt/reviewer", map[string]any{"content": "你是代码审查员。"}, admin); c != 200 {
+		t.Fatalf("put prompt: %d %+v", c, out)
+	}
+	f.doCookie(t, "POST", "/admin/resources/prompt/reviewer/grants", map[string]any{"peer_id": "*"}, admin)
+	_, out = f.do(t, "GET", "/resources/current", nil, f.tok["bob"])
+	list := out["resources"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["content"] != "你是代码审查员。" {
+		t.Fatalf("bob prompt manifest: %+v", out)
 	}
 }

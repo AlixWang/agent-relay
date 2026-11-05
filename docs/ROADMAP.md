@@ -67,7 +67,7 @@ reassign + lease 到期回收 + `waiting|ready|failed|dropped`（dropped 终态�
 - [x] **P1** 表结构、`secrets.key` 加密、secret 资源、按 peer / `*` 授权、
   `GET /resources/current`、`GET /resources/secrets/{name}`、heartbeat `resources_update` /
   `resources_rev` 回执、控制台「资源中心」密钥页
-- [ ] **P2** `mcp` / `prompt` 资源；MCP 中立格式校验；`GET /resources/mcp/{name}`
+- [x] **P2** `mcp` / `prompt` 资源；MCP 中立格式校验；`GET /resources/mcp/{name}`
   解析 `${secret:}`，缺授权 409；授权 MCP 时提示缺少的依赖密钥
 - [ ] **P3** `skill` 上传/校验/下载；接收端（relay-tail、relay-poll.sh、Hermes supervisor）
   转发 `resources_update` 并带 `.resources_rev`（`receiver_rev` 会变）；四个模板加

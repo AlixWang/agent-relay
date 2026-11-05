@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -34,6 +35,16 @@ func resourceError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, "resource not found")
 	case errors.Is(err, resources.ErrUnknownPeer):
 		writeErr(w, http.StatusNotFound, "unknown peer")
+	case errors.Is(err, resources.ErrMissingSecrets):
+		var m *resources.MissingSecretsError
+		missing := []string{}
+		if errors.As(err, &m) {
+			missing = m.Names
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"ok": false, "error": "mcp config references secrets you are not granted",
+			"missing_secrets": missing,
+		})
 	case errors.Is(err, resources.ErrUnsupportedKind):
 		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, resources.ErrInvalid):
@@ -103,6 +114,28 @@ func (s *Server) handleResourceSecret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "name": name, "value": v})
 }
 
+// handleResourceMCP returns the MCP config with ${secret:} resolved. It
+// reveals secrets, so it follows the secret-fetch rules (ADR 0005).
+func (s *Server) handleResourceMCP(w http.ResponseWriter, r *http.Request) {
+	peer, _ := s.authed(w, r)
+	if peer == nil || !s.checkVersion(w, peer) || !s.resourcesReady(w) {
+		return
+	}
+	name := r.PathValue("name")
+	cfg, revealed, err := s.resources.ResolveMCP(peer.ID, name)
+	if err != nil {
+		resourceError(w, err)
+		return
+	}
+	now, ip := time.Now().Unix(), s.clientIP(r)
+	for _, sec := range revealed {
+		_ = s.st.AppendAudit(peer.ID, "secret.fetch",
+			fmt.Sprintf("secret=%s via=mcp:%s ip=%s", sec, name, ip), now)
+	}
+	noStore(w)
+	writeJSON(w, 200, map[string]any{"ok": true, "name": name, "config": cfg})
+}
+
 // ---- admin routes ----
 
 func (s *Server) auditResource(action, detail string) {
@@ -157,9 +190,12 @@ func (s *Server) handleAdminResourcePut(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	kind, name := r.PathValue("kind"), r.PathValue("name")
+	// value: secret plaintext (write-only; "" keeps the stored value).
+	// content: mcp → neutral config object; prompt → text.
 	var req struct {
-		Description string `json:"description"`
-		Value       string `json:"value"`
+		Description string          `json:"description"`
+		Value       string          `json:"value"`
+		Content     json.RawMessage `json:"content"`
 	}
 	if !s.readJSON(w, r, &req) {
 		return
@@ -171,6 +207,15 @@ func (s *Server) handleAdminResourcePut(w http.ResponseWriter, r *http.Request) 
 	switch kind {
 	case resources.KindSecret:
 		v, err = s.resources.PutSecret(name, req.Description, req.Value)
+	case resources.KindMCP:
+		v, err = s.resources.PutMCP(name, req.Description, req.Content)
+	case resources.KindPrompt:
+		var text string
+		if json.Unmarshal(req.Content, &text) != nil {
+			err = fmt.Errorf("%w: prompt content must be a string", resources.ErrInvalid)
+		} else {
+			v, err = s.resources.PutPrompt(name, req.Description, text)
+		}
 	default:
 		err = resources.CheckKind(kind)
 		if err == nil {
@@ -223,7 +268,14 @@ func (s *Server) handleAdminResourceGrant(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.auditResource("resource.granted", fmt.Sprintf("kind=%s name=%s peer=%s", kind, name, peer))
-	writeJSON(w, 200, map[string]any{"ok": true})
+	out := map[string]any{"ok": true}
+	if kind == resources.KindMCP {
+		// Granted anyway; the console tells the operator what else to grant.
+		if missing, err := s.resources.MissingForGrant(name, peer); err == nil && len(missing) > 0 {
+			out["missing_secrets"] = missing
+		}
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) handleAdminResourceRevoke(w http.ResponseWriter, r *http.Request) {

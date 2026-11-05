@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -43,7 +44,18 @@ var (
 	ErrInvalid         = errors.New("invalid resource")
 	ErrUnknownPeer     = errors.New("unknown peer")
 	ErrUnsupportedKind = errors.New("unsupported resource kind")
+	// ErrMissingSecrets: an MCP config references secrets the peer is not
+	// granted (or that no longer exist). Wrapped by *MissingSecretsError.
+	ErrMissingSecrets = errors.New("mcp config references secrets not granted")
 )
+
+// MissingSecretsError lists the ${secret:NAME} references a peer cannot resolve.
+type MissingSecretsError struct{ Names []string }
+
+func (e *MissingSecretsError) Error() string {
+	return ErrMissingSecrets.Error() + ": " + strings.Join(e.Names, ", ")
+}
+func (e *MissingSecretsError) Unwrap() error { return ErrMissingSecrets }
 
 // Names appear in URL paths and in ${secret:NAME} references, so keep them to
 // a conservative, case-sensitive charset.
@@ -61,7 +73,7 @@ func knownKind(kind string) bool {
 }
 
 // enabledKind gates kinds whose validation/distribution has shipped.
-func enabledKind(kind string) bool { return kind == KindSecret }
+func enabledKind(kind string) bool { return kind != KindSkill && knownKind(kind) }
 
 // Service owns validation, secret encryption and manifest computation.
 type Service struct {
@@ -90,6 +102,11 @@ type View struct {
 	CreatedBy   string   `json:"created_by"`
 	UpdatedAt   int64    `json:"updated_at"`
 	Grants      []string `json:"grants"`
+	// Content is the editable body for mcp (neutral config object) and
+	// prompt (text). Never set for secrets.
+	Content any `json:"content,omitempty"`
+	// RequiresSecrets lists an MCP config's ${secret:NAME} references.
+	RequiresSecrets []string `json:"requires_secrets,omitempty"`
 }
 
 // CheckKind reports ErrInvalid for an unknown kind and ErrUnsupportedKind for
@@ -185,7 +202,155 @@ func toView(r *store.Resource, grants []*store.ResourceGrant) *View {
 	for _, g := range grants {
 		v.Grants = append(v.Grants, g.PeerID)
 	}
+	v.Content, v.RequiresSecrets = decodeContent(r.Kind, r.Content)
 	return v
+}
+
+// decodeContent turns stored mcp/prompt bytes into their wire form.
+func decodeContent(kind string, b []byte) (any, []string) {
+	switch kind {
+	case KindMCP:
+		var c MCPConfig
+		if json.Unmarshal(b, &c) != nil {
+			return nil, nil
+		}
+		_, refs, err := ParseMCP(b)
+		if err != nil {
+			refs = nil
+		}
+		return c, refs
+	case KindPrompt:
+		return string(b), nil
+	}
+	return nil, nil
+}
+
+// PutMCP creates or overwrites an MCP config (canonicalized before storing).
+func (s *Service) PutMCP(name, description string, raw []byte) (*View, error) {
+	canonical, _, err := ParseMCP(raw)
+	if err != nil {
+		return nil, err
+	}
+	return s.putPlain(KindMCP, name, description, canonical)
+}
+
+// PutPrompt creates or overwrites a prompt snippet.
+func (s *Service) PutPrompt(name, description, text string) (*View, error) {
+	if err := CheckPrompt(text); err != nil {
+		return nil, err
+	}
+	return s.putPlain(KindPrompt, name, description, []byte(text))
+}
+
+func (s *Service) putPlain(kind, name, description string, content []byte) (*View, error) {
+	if !ValidName(name) {
+		return nil, fmt.Errorf("%w: name must match %s", ErrInvalid, nameRe)
+	}
+	desc, err := cleanDesc(description)
+	if err != nil {
+		return nil, err
+	}
+	rev := &store.ResourceRevision{
+		ID: newRevisionID(), Kind: kind, Name: name, Description: desc,
+		Content: content, ContentHash: contentHash(content),
+		CreatedAt: s.now().Unix(), CreatedBy: actorOperator,
+	}
+	if err := s.st.PutResource(rev); err != nil {
+		return nil, err
+	}
+	return s.view(kind, name)
+}
+
+// ResolveMCP returns peerID's MCP config with every ${secret:NAME} filled
+// in, plus the secret names it revealed (for auditing). All-or-nothing: any
+// reference the peer cannot resolve yields *MissingSecretsError.
+func (s *Service) ResolveMCP(peerID, name string) (*MCPConfig, []string, error) {
+	granted, err := s.st.ListGrantedResources(peerID)
+	if err != nil {
+		return nil, nil, err
+	}
+	var cfgRes *store.Resource
+	secrets := map[string]*store.Resource{}
+	for _, r := range granted {
+		switch {
+		case r.Kind == KindMCP && r.Name == name:
+			cfgRes = r
+		case r.Kind == KindSecret:
+			secrets[r.Name] = r
+		}
+	}
+	if cfgRes == nil {
+		return nil, nil, ErrNotFound
+	}
+	_, refs, err := ParseMCP(cfgRes.Content)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resources: stored mcp %s invalid: %w", name, err)
+	}
+	var missing []string
+	vals := map[string]string{}
+	for _, ref := range refs {
+		r, ok := secrets[ref]
+		if !ok {
+			missing = append(missing, ref)
+			continue
+		}
+		plain, err := open(s.key, r.Content)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resources: decrypt %s: %w", ref, err)
+		}
+		vals[ref] = string(plain)
+	}
+	if len(missing) > 0 {
+		return nil, nil, &MissingSecretsError{Names: missing}
+	}
+	var c MCPConfig
+	if err := json.Unmarshal(cfgRes.Content, &c); err != nil {
+		return nil, nil, err
+	}
+	out := resolveMCP(c, vals)
+	return &out, refs, nil
+}
+
+// MissingForGrant reports which secrets an MCP config needs that peerID
+// (or, for AllPeers, the wildcard) would not get. Console hint only.
+func (s *Service) MissingForGrant(name, peerID string) ([]string, error) {
+	r, err := s.st.GetResource(KindMCP, name)
+	if err != nil || r == nil {
+		return nil, err
+	}
+	_, refs, err := ParseMCP(r.Content)
+	if err != nil {
+		return nil, err
+	}
+	have := map[string]bool{}
+	if peerID == AllPeers {
+		gs, err := s.st.ListResourceGrants(KindSecret, "")
+		if err != nil {
+			return nil, err
+		}
+		for _, g := range gs {
+			if g.PeerID == AllPeers {
+				have[g.Name] = true
+			}
+		}
+	} else {
+		rs, err := s.st.ListGrantedResources(peerID)
+		if err != nil {
+			return nil, err
+		}
+		for _, x := range rs {
+			if x.Kind == KindSecret {
+				have[x.Name] = true
+			}
+		}
+	}
+	var missing []string
+	for _, ref := range refs {
+		if !have[ref] {
+			missing = append(missing, ref)
+		}
+	}
+	return missing, nil
 }
 
 // Get returns one resource's admin view.
@@ -353,6 +518,13 @@ func (s *Service) Manifest(peerID string) (*Manifest, error) {
 		switch r.Kind {
 		case KindSecret:
 			e.FetchURL = "/resources/secrets/" + r.Name
+		case KindMCP:
+			// Inline template with ${secret:} unresolved; the resolved
+			// config is a separate, audited fetch (ADR 0005).
+			e.Content, e.RequiresSecrets = decodeContent(r.Kind, r.Content)
+			e.FetchURL = "/resources/mcp/" + r.Name
+		case KindPrompt:
+			e.Content, _ = decodeContent(r.Kind, r.Content)
 		}
 		m.Resources = append(m.Resources, e)
 	}

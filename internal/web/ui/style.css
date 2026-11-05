@@ -266,6 +266,7 @@ input:focus-visible, select:focus-visible { outline: none; border-color: var(--a
   font-size: var(--fs-sm); line-height: 1.5; min-height: 96px; resize: vertical;
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
+.modal textarea.mono { font-family: var(--mono); font-size: var(--fs-xs); }
 .modal textarea:hover { border-color: var(--muted-2); }
 .modal textarea:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .modal textarea::placeholder { color: var(--muted-2); }

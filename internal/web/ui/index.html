@@ -848,7 +848,7 @@
               <tbody></tbody>
             </table>
           </div>
-          <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg><span>密钥只写不读：登记后控制台不再显示明文，只能覆盖。助手用自己的 token 拉取，每次拉取都写入审计。</span></p>
+          <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg><span>密钥只写不读：登记后控制台不再显示明文，只能覆盖。MCP 配置用 <code>${secret:NAME}</code> 引用密钥，助手拉取解析后的配置时按密钥拉取同样审计。</span></p>
         </div>
       </section>
 
@@ -1009,11 +1009,12 @@
   <form method="dialog" id="resForm" autocomplete="off">
     <div class="modal-head">
       <svg class="icon" style="color: var(--muted)"><use href="#i-lock"/></svg>
-      <div><h2 id="resDlgTitle">新建密钥</h2><p class="muted xs">服务端 AES-GCM 加密存储，永不回显</p></div>
+      <div><h2 id="resDlgTitle">新建密钥</h2><p id="resDlgDesc" class="muted xs">服务端 AES-GCM 加密存储，永不回显</p></div>
     </div>
     <label class="field">名称<input id="resName" maxlength="64" placeholder="OPENAI_API_KEY" required autocomplete="off" spellcheck="false"></label>
     <label class="field">描述<input id="resDesc" maxlength="500" placeholder="用途、来源账号、轮换周期" autocomplete="off"></label>
-    <label class="field">密钥值<input id="resValue" type="password" autocomplete="new-password" spellcheck="false"></label>
+    <label class="field" id="resValueField">密钥值<input id="resValue" type="password" autocomplete="new-password" spellcheck="false"></label>
+    <label class="field" id="resContentField" hidden>内容<textarea id="resContent" rows="12" spellcheck="false"></textarea></label>
     <p id="resDlgErr" class="alert alert-bad" hidden></p>
     <div class="modal-foot">
       <button type="button" class="btn btn-ghost" data-close>取消</button>

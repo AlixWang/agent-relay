@@ -144,6 +144,7 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	// and ADR 0005 (fetch); secret responses are no-store and audited.
 	mux.HandleFunc("GET /resources/current", s.handleResourcesCurrent)
 	mux.HandleFunc("GET /resources/secrets/{name}", s.handleResourceSecret)
+	mux.HandleFunc("GET /resources/mcp/{name}", s.handleResourceMCP)
 
 	mux.HandleFunc("POST /admin/login", s.handleAdminLogin)
 	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)

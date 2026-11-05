@@ -236,11 +236,16 @@ func TestDeletePeerDropsGrants(t *testing.T) {
 }
 
 func TestUnsupportedKindsRejectedForNow(t *testing.T) {
-	if enabledKind(KindMCP) || enabledKind(KindSkill) || enabledKind(KindPrompt) {
-		t.Skip("kind enabled; this guard is obsolete")
+	if enabledKind(KindSkill) {
+		t.Skip("skill enabled; this guard is obsolete")
 	}
-	if err := CheckKind(KindMCP); !errors.Is(err, ErrUnsupportedKind) {
-		t.Fatalf("mcp: %v", err)
+	if err := CheckKind(KindSkill); !errors.Is(err, ErrUnsupportedKind) {
+		t.Fatalf("skill: %v", err)
+	}
+	for _, k := range []string{KindSecret, KindMCP, KindPrompt} {
+		if err := CheckKind(k); err != nil {
+			t.Fatalf("%s should be enabled: %v", k, err)
+		}
 	}
 	if err := CheckKind("bogus"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("bogus: %v", err)
