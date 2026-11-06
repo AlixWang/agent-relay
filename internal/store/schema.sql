@@ -98,6 +98,18 @@ CREATE TABLE IF NOT EXISTS acks (
     acked_at      INTEGER NOT NULL,
     PRIMARY KEY (message_seq, peer_id)
 );
+-- Per-(peer, scope) contiguous read watermark. This is the single source of
+-- truth for delivery position and read counts: a peer has read every message
+-- in the scope whose seq is <= watermark. `acks` stays as an audit trail and
+-- idempotency record, never as the delivery frontier. See DESIGN §5.4.
+CREATE TABLE IF NOT EXISTS peer_read_watermarks (
+    scope      TEXT NOT NULL,   -- thread:<root> | room:<grp> | dm:<a>|<b>
+    peer_id    TEXT NOT NULL,
+    seq        INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (scope, peer_id)
+);
+CREATE INDEX IF NOT EXISTS idx_read_watermarks_peer ON peer_read_watermarks(peer_id);
 -- Work-item projection (docs/adr/0001-work-items-as-projection.md). Tickets
 -- are derived from direct kind=task messages; messages remain the only write
 -- model. message_tickets maps every follow-up message to its nearest task
@@ -226,6 +238,11 @@ ALTER TABLE messages ADD COLUMN target TEXT DEFAULT '';
 ALTER TABLE messages ADD COLUMN detail TEXT DEFAULT '';
 ALTER TABLE messages ADD COLUMN decision TEXT DEFAULT '';
 ALTER TABLE messages ADD COLUMN expires_at INTEGER DEFAULT 0;
+ALTER TABLE messages ADD COLUMN scope TEXT DEFAULT '';
+-- Scope is an ALTER-only column above, so its index must come after the
+-- ALTER block. Creating it next to the CREATE TABLE breaks upgrades from
+-- databases that predate the column.
+CREATE INDEX IF NOT EXISTS idx_messages_scope_seq ON messages(scope, seq);
 -- Work-item columns added after the tables shipped; migrate() tolerates the
 -- duplicate-column error on boot. Keep the CREATE TABLE bodies above and
 -- migrations/001_init.sql's block in sync.

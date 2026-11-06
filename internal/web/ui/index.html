@@ -490,12 +490,12 @@
                         <span x-text="isExpanded(m) ? '收起' : '展开全文'"></span>
                         <svg class="icon xs" :class="isExpanded(m) ? 'rot-180' : ''"><use href="#i-chev-d"/></svg>
                       </button>
-                      <!-- Read receipts: the badge summarises, a click opens the names.
-                           Who counts: members who were already in the room when the
-                           message was sent (start_seq), minus the sender. A private
-                           reply (to=peer) is only the addressee's to read, so it says
-                           so instead of counting the whole room. -->
-                      <div class="cmd-msg-footer" x-show="activeTarget.type === 'room' && ackEligible(m).length > 0">
+                      <!-- Read receipts: the badge renders the server-computed
+                           read/total fields; a click opens acked_by names. The
+                           client-side ackEligible helper only controls which
+                           messages show a footer (private replies / operator DMs),
+                           never the badge numbers. -->
+                      <div class="cmd-msg-footer" x-show="activeTarget.type === 'room' && (Number.isFinite(m.total) ? m.total > 0 : ackEligible(m).length > 0)">
                         <span class="muted xs" x-show="!roomMessage(m)" x-text="'仅 @' + m.to"></span>
                         <!-- click.outside binds a document listener per rendered row; without the
                              guard, every OTHER row's listener closed the popover again in the same

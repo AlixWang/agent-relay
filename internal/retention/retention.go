@@ -139,7 +139,17 @@ func (r *Runner) archiveOldMessages(cutoff, now int64) (archived, deleted, skipp
 		}
 		if len(msgs) > scanCap {
 			skipped++
-			msgs = msgs[:scanCap]
+		}
+		// Pin the whole thread when its newest message is still inside the
+		// retention window. ThreadMessages returns the oldest page, so use
+		// LastNInThread for the newest row; taking msgs[len-1] only worked
+		// for threads shorter than the scan cap.
+		newest, err := r.st.LastNInThread(root, 1)
+		if err != nil {
+			return 0, 0, skipped, err
+		}
+		if len(newest) > 0 && newest[0].CreatedAt >= cutoff {
+			continue
 		}
 		for _, m := range msgs {
 			if m.CreatedAt > cutoff {

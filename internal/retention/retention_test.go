@@ -291,3 +291,31 @@ func TestTrimAgentLogsPerPeerCap(t *testing.T) {
 		t.Fatalf("remaining=%d err=%v", total, err)
 	}
 }
+
+// A thread with recent traffic is pinned: its older fully-acked messages must
+// not be archived while the assistant may still need the conversation.
+func TestActiveThreadIsPinned(t *testing.T) {
+	st := openTest(t)
+	dir := t.TempDir()
+	r := New(st, Policy{MessageTTLDays: 30, DataDir: dir})
+	now := int64(100 * 86400)
+	for _, id := range []string{"a", "b"} {
+		if err := st.CreatePeer(&store.Peer{ID: id, Status: "active", CreatedAt: now - 31*86400}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := now - 31*86400
+	seq1, _ := st.InsertMessage(&store.Message{ID: "old", Sender: "a", Recipient: "b",
+		RootID: "a/thread", Payload: "old", CreatedAt: old})
+	seq2, _ := st.InsertMessage(&store.Message{ID: "fresh", Sender: "a", Recipient: "b",
+		RootID: "a/thread", Payload: "fresh", CreatedAt: now - 86400})
+	_ = st.Ack(seq1, "b", old+1)
+	_ = st.Ack(seq2, "b", now)
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["messages_archived"] != 0 {
+		t.Fatalf("active thread was archived: %+v", stats)
+	}
+}

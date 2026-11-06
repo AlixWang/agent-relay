@@ -50,7 +50,10 @@ ME_IDENTITY="$(tr -d '[:space:]' < "$BASE/identity" 2>/dev/null || true)"
 #（如 Hatch 的 hook runtime：source "$HATCH_HOOK_RUNTIME" 后直接调 wake）。
 wake() {
   # $1 = 人话原因（通知/日志用），$2 = 事件 JSON（worker 按 id 去 spool 取全文）
-  printf '[%s] %s\n%s\n' "$(date -u +%FT%TZ)" "${1-}" "${2-}" >> "$SPOOL_DIR/pending.log"
+  # A failed append must not look like a successful hand-off, or the caller
+  # advances the spool offset past events no worker will ever read.
+  printf '[%s] %s\n%s\n' "$(date -u +%FT%TZ)" "${1-}" "${2-}" >> "$SPOOL_DIR/pending.log" || return 1
+  return 0
 }
 as_uint() {
   case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac
@@ -295,7 +298,7 @@ if [ -f "$WORKER_PENDING" ]; then
     pts="$(printf '%s' "$pline" | jq -r '.wake_ts // 0' 2>/dev/null || echo 0)"
     [ -z "$pid" ] && continue
     # 已 ack = worker 正常完成，移出 pending
-    if grep -qxF "$pid" "$BASE/.done_ids" 2>/dev/null; then
+    if [ -f "$BASE/.done_ids" ] && grep -qxF -- "$pid" "$BASE/.done_ids" 2>/dev/null; then
       continue
     fi
     # 超时未完成 → 发 status/cancelled（服务端词表无 failed，2026-10-14 修正）
@@ -347,89 +350,46 @@ if [ "$total" -gt "$offset" ]; then
         | if $ru == null then {} else {resources_update: true, resources_rev: ($ru.resources_rev // "")} end))
   ' "$newlines" 2>/dev/null || true)"
   rm -f "$newlines"
-  # offset 只在解析成功后推进：坏行不推进，下一轮重跑（at-least-once）
+  # offset 只在解析成功后推进，且只在"这批事件确实被处理"之后才落盘（见文件尾部）。
+  # 旧代码在这里就写 offset，而唤醒决策、忙跳过都在其后：wake_skipped_busy 时 offset
+  # 已经移过去，那批事件永不重读，"下轮重试"的注释是假的——这是丢消息的主因。
   if [ -n "$out" ] && [ "$out" != "null" ]; then
-    printf '%s' "$total" > "$OFFSET_FILE"
-    log_event debug "spool.drained" "spool 已读取" "$(jq -cn --argjson lines "$total" '{lines:$lines}' 2>/dev/null || echo '{}')"
+    spool_advanced="false"
   else
     out=""
+    spool_advanced="true"  # 解析失败：offset 原地不动，下一轮重跑
     log_event warn "spool.parse_error" "spool 解析失败" '{"spool":"wake.jsonl"}'
   fi
+else
+  spool_advanced="true"
 fi
 
 # spool 过大且已排空则截断，防止无限增长
 spool_size="$(as_uint "$(wc -c < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)")"
 if [ "$spool_size" -gt 2097152 ]; then
-  cur_total="$(as_uint "$(wc -l < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)")"
-  cur_offset="$(as_uint "$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)")"
-  if [ "$cur_offset" -ge "$cur_total" ]; then
-    : > "$SPOOL"
-    printf '0' > "$OFFSET_FILE"
-    log "spool_truncated" '{"reason":"size>2MB drained"}'
+  # The daemon is appending to this file the whole time. Counting and then
+  # truncating without a lock loses every line that lands in between, and a
+  # short read leaves the offset past EOF, wedging the drain forever.
+  exec 9>"$SPOOL.lock"
+  if flock -x -w 5 9 2>/dev/null; then
+    cur_total="$(as_uint "$(wc -l < "$SPOOL" 2>/dev/null | tr -d '[:space:]' || echo 0)")"
+    cur_offset="$(as_uint "$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)")"
+    if [ "$cur_offset" -ge "$cur_total" ]; then
+      : > "$SPOOL"
+      printf '0' > "$OFFSET_FILE"
+      log "spool_truncated" '{"reason":"size>2MB drained"}'
+    fi
+  else
+    log_event warn "spool.truncate_skip" "spool 截断跳过（拿不到锁）" '{}'
   fi
+  exec 9>&-
 fi
 
-# ---- 2.5 第 0 层：机械消息脚本直发 ack，不唤醒 worker ----
-# 背景：2026-10-13 erdan/Grace 1:1 对照实验验证——纯机械 result 经脚本 1-6 秒直发 ack，
-# 有实质内容的 result/chat/task 对抗样本零误吞。双边 10 轮稳定性/边界/时效测试 10/10 通过。
-# 保守边界（全部满足才算机械）：kind=="result"、payload<=120 字符、单行、
-# 无实质标记（不含 ?/？/任务/问题/需求/要求/请/确认事项/待办/TODO/不过/但是/然而）。
-# prompt_update/client_update 不受影响，照旧唤醒 worker。
-# 每条直发 ack 记日志；ack 失败或读不到 token 时回落正常唤醒，不吞消息。
-# 注意：本节需要读 $BASE/.token 发 POST /ack。分类跑在 drain spool 拿到的全文 JSON 上
-#（含完整 payload，不是发给 worker 的 120 字预览）。
-layer0_done="false"
-mech_count=0
-if [ -n "$out" ] && [ "$out" != "null" ]; then
-  mech_json="$(printf '%s' "$out" | jq -c '
-    [.tasks[]? | select(.kind=="result")
-     | ((.payload // "") | tostring) as $p
-     | select(($p | length) <= 120)
-     | select(($p | contains("\n")) | not)
-     | select(($p | test("[?？]|任务|问题|需求|要求|请|确认事项|待办|TODO|不过|但是|然而")) | not)
-     | .id]
-  ' 2>/dev/null || echo '[]')"
-  mech_count="$(as_uint "$(printf '%s' "$mech_json" | jq -r 'length' 2>/dev/null || echo 0)")"
-  if [ "$mech_count" != "0" ]; then
-    layer0_token="$(cat "$BASE/.token" 2>/dev/null || true)"
-    layer0_by="$(tr -d '[:space:]' < "$BASE/identity" 2>/dev/null || echo "unknown")"
-    if [ -z "$layer0_token" ]; then
-      log "layer0_no_token" '{"detail":"读不到 .token，回落正常唤醒"}'
-    else
-      layer0_ok="true"
-      for mid in $(printf '%s' "$mech_json" | jq -r '.[]' 2>/dev/null); do
-        ack_body="$(jq -cn --arg id "$mid" --arg by "$layer0_by" '{message_id: $id, by: $by}' 2>/dev/null || true)"
-        ack_resp="$(curl -sS --max-time 8 -X POST "$RELAY_URL/ack" \
-          -H "Authorization: Bearer $layer0_token" \
-          -H 'Content-Type: application/json' \
-          -d "$ack_body" 2>/dev/null || true)"
-        if ! printf '%s' "$ack_resp" | jq -e '.ok == true' >/dev/null 2>&1; then
-          layer0_ok="false"
-          break
-        fi
-      done
-      if [ "$layer0_ok" = "true" ]; then
-        # 全部直发 ack 成功：从任务列表剔除机械消息，其余照旧唤醒 worker
-        filtered_out="$(printf '%s' "$out" | jq -c --argjson m "$mech_json" '
-          .tasks |= map(select(.id as $id | $m | index($id) | not))' 2>/dev/null || true)"
-        if [ -n "$filtered_out" ]; then
-          out="$filtered_out"
-        fi
-        layer0_done="true"
-        log "layer0_ack" "$(printf '{"count":%s,"ids":%s}' "$mech_count" "$mech_json")"
-        # 对照日志：时间戳、消息 id、事件类型（脚本直发 ack / worker 唤醒），方便双边对账
-        now_ts="$(date +%s)"
-        printf '%s' "$mech_json" | jq -r --arg ts "$now_ts" '.[] | "\($ts) \(.) layer0-script-ack"' \
-          >> "$BASE/layer0-experiment.log" 2>/dev/null || true
-        # 幂等口径统一：直发 ack 的 id 同样记入 .done_ids（服务端已确认不会重发已 ack 消息）
-        printf '%s' "$mech_json" | jq -r '.[]' >> "$BASE/.done_ids" 2>/dev/null || true
-      else
-        log "layer0_ack_failed" "$(printf '{"count":%s,"detail":"ack 接口失败，回落正常唤醒"}' "$mech_count")"
-      fi
-      unset layer0_token
-    fi
-  fi
-fi
+# ---- 2.5 第 0 层已移除 ----
+# 脚本代 ack（短机械 result 不唤醒 worker）同时制造了两个问题：它让同一群里的
+# 已读人数按 kind 分叉抖动（result 秒 ack、chat 要等一次完整唤醒），并且会静默吞掉
+# 短英文结果（"ok, but failed" 完全匹配不到关键词表）。ack 现在一律由 worker 完成，
+# 投递位置由服务端的作用域水位决定，脚本不再持有任何 ack 语义。
 
 # ---- 3. 唤醒决策 ----
 msg_count=0
@@ -489,6 +449,11 @@ if [ -z "$final_payload" ] || [ "$final_payload" = "null" ]; then
 fi
 has_ru="$(printf '%s' "$out" | jq -r '.resources_update == true' 2>/dev/null || echo false)"
 if [ "$msg_count" = "0" ] && [ "$has_pu" != "true" ] && [ "$has_cu" != "true" ] && [ "$has_ru" != "true" ]; then
+  # Nothing to hand to a worker: the spool page is consumed.
+  if [ "${spool_advanced:-true}" = "false" ]; then
+    printf '%s' "$total" > "$OFFSET_FILE"
+    log_event debug "spool.drained" "spool 已读取" "$(jq -cn --argjson lines "$total" '{lines:$lines}' 2>/dev/null || echo '{}')"
+  fi
   silent "无新消息"
   exit 0
 fi
@@ -580,8 +545,17 @@ wake_ids="$(printf '%s' "$out" | jq -c '[.tasks[]?.id]' 2>/dev/null || echo '[]'
 wake_first="$(printf '%s' "$wake_ids" | jq -r '.[0] // ""' 2>/dev/null || true)"
 log_event info "wake.requested" "请求唤醒 worker" \
   "$(jq -cn --arg reason "$reason" --argjson ids "$wake_ids" '{reason:$reason,task_ids:$ids}' 2>/dev/null || echo '{}')" "$wake_first" ""
+wake_rc=0
 if ! wake "$reason" "$final_payload"; then
+  wake_rc=1
   log_event error "wake.failed" "wake 调用失败" \
     "$(jq -cn --arg reason "$reason" '{reason:$reason}' 2>/dev/null || echo '{}')"
+fi
+# Advance only after the wake decision actually resolved. A busy worker no
+# longer has its events dropped: wake returns non-zero and the page is
+# re-read next tick. Redelivery is the intended failure mode (at-least-once).
+if [ "$wake_rc" = "0" ] && [ "${spool_advanced:-true}" = "false" ]; then
+  printf '%s' "$total" > "$OFFSET_FILE"
+  log_event debug "spool.drained" "spool 已读取" "$(jq -cn --argjson lines "$total" '{lines:$lines}' 2>/dev/null || echo '{}')"
 fi
 exit 0

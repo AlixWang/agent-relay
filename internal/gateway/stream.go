@@ -95,17 +95,28 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		if !s.streamAlive(tok.ID, forID) {
 			return false
 		}
-		msgs, err := s.queue.Visible(forID, last, 200)
-		if err != nil {
-			return true // transient DB error: stay open, retry next ping
-		}
-		for _, m := range msgs {
-			item := streamItemOf(m)
-			body, _ := json.Marshal(item)
-			fmt.Fprintf(w, "id: %d\nevent: message\nretry: 3000\ndata: %s\n\n", m.Seq, body)
-			if m.Seq > last {
-				last = m.Seq
+		// Drain, do not sample. A single Visible(forID, last, 200) call used
+		// to leave a backlog deeper than 200 stranded until some unrelated
+		// message arrived — with the stream otherwise quiet, forever.
+		for {
+			msgs, err := s.queue.Visible(forID, last, 200)
+			if err != nil {
+				return true // transient DB error: stay open, retry next ping
 			}
+			for _, m := range msgs {
+				item := streamItemOf(m)
+				body, _ := json.Marshal(item)
+				fmt.Fprintf(w, "id: %d\nevent: message\nretry: 3000\ndata: %s\n\n", m.Seq, body)
+				if m.Seq > last {
+					last = m.Seq
+				}
+			}
+			if len(msgs) < 200 {
+				break
+			}
+			// Keep the response honest under a very deep backlog: flush per
+			// page so the client sees progress instead of one late burst.
+			fl.Flush()
 		}
 		fl.Flush()
 		return true

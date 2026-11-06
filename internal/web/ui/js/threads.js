@@ -345,7 +345,7 @@ export async function viewThread(root) {
         <div class="msg-body"><div class="rich-text">${renderMessage(m.payload)}</div></div>
         <div class="msg-foot">
           <span>id: <code>${esc(m.id)}</code></span>
-          <span>ack: ${m.acked_count || 0}</span>
+          <span>ack: ${m.acked_count || 0}${Number.isFinite(m.total) ? "/" + m.total : ""}</span>
           ${m.approval_state && m.approval_state !== 'n/a' ? `<span>审批状态: <b>${esc(m.approval_state)}</b></span>` : ''}
         </div>
         ${isPending ? `

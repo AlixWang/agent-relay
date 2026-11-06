@@ -73,6 +73,39 @@ type Invite struct {
 	UsedAt     int64
 }
 
+// ScopeKey returns the delivery scope a message belongs to. Scope is the
+// unit of FIFO ordering and of read watermarks. Control-plane events
+// (status, *_update) and informational system notices have no scope: they
+// are delivered by their own heartbeat/notice paths and must never pin a
+// read watermark. See DESIGN §5.4.
+func ScopeKey(m *Message) string {
+	switch m.Kind {
+	// Control-plane events and informational notices are never acked by a
+	// worker. Putting them in a scope would let one `system` roster notice
+	// pin every member's watermark at 0 forever.
+	case "status", "prompt_update", "client_update", "resources_update", "system":
+		return ""
+	}
+	// Room messages carry the room alias as their root id (guard.resolveRoot
+	// returns env.To for a room target). Identify the room before the generic
+	// thread branch, otherwise every room message becomes thread:grp_* and
+	// the room membership checks in ReadStats never run.
+	if strings.HasPrefix(m.RootID, "grp_") {
+		return "room:" + m.RootID
+	}
+	if m.RootID != "" {
+		return "thread:" + m.RootID
+	}
+	if strings.HasPrefix(m.Recipient, "grp_") {
+		return "room:" + m.Recipient
+	}
+	a, b := m.Sender, m.Recipient
+	if a > b {
+		a, b = b, a
+	}
+	return "dm:" + a + "|" + b
+}
+
 type Message struct {
 	Seq              int64
 	ID               string
@@ -272,6 +305,14 @@ type Store interface {
 	MessageVisibleTo(seq int64, peerID string) (bool, error)
 	AckIfVisible(messageSeq int64, peerID string, ts int64) (bool, error)
 	AcksForSeqs(seqs []int64) (map[int64][]string, error)
+	// Read watermarks (§5.4): the contiguous position a peer has processed
+	// in one scope. Scope-head delivery and server-side read counts derive
+	// from this; the legacy VisibleTo cursor path stays ack-compatible.
+	ReadWatermark(scope, peerID string) (int64, error)
+	AdvanceReadWatermark(scope, peerID string, ts int64) (int64, error)
+	ScopeHead(peerID string, limit int) ([]*Message, error)
+	ReadStats(seqs []int64) (map[int64]ReadStat, error)
+	ReadPeers(seqs []int64) (map[int64][]string, error)
 	// rooms (§6.8): group chat as a routing alias with a member list.
 	CreateRoom(r *Room) error
 	GetRoom(id string) (*Room, error)
@@ -412,7 +453,135 @@ func (s *sqliteStore) migrate() error {
 			return fmt.Errorf("migrate stmt %.60q: %w", stmt, err)
 		}
 	}
-	return nil
+	if err := s.backfillScope(); err != nil {
+		return err
+	}
+	return s.backfillWatermarks()
+}
+
+const (
+	scopeBackfillKey     = "migrated.scope_v1"
+	watermarkBackfillKey = "migrated.read_watermarks_v1"
+)
+
+// backfillScope assigns messages.scope to rows written before the column
+// existed. It uses the same ScopeKey as the write path: re-deriving the rule
+// in SQL is how the two drift apart.
+//
+// Control-plane rows intentionally keep scope="" — they are excluded from
+// every scope-based query. A settings marker makes this a one-time migration
+// instead of a full-table scan on every boot (and avoids the old '-' sentinel,
+// which ScopeHead used to treat as a real scope).
+func (s *sqliteStore) backfillScope() error {
+	var done int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM settings WHERE key=?`, scopeBackfillKey).Scan(&done); err == nil && done > 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Normalize scopes written by the first iteration of this change:
+	// room messages were stored as thread:grp_* and control-plane rows as '-'.
+	if _, err := tx.Exec(`UPDATE messages SET scope='room:' || substr(scope,8) WHERE scope LIKE 'thread:grp_%'`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE messages SET scope='' WHERE scope='-'`); err != nil {
+		return err
+	}
+
+	rows, err := tx.Query(`SELECT seq,sender,recipient,kind,root_id FROM messages WHERE scope=''`)
+	if err != nil {
+		return err
+	}
+	type row struct {
+		seq int64
+		m   Message
+	}
+	var todo []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.seq, &r.m.Sender, &r.m.Recipient, &r.m.Kind, &r.m.RootID); err != nil {
+			rows.Close()
+			return err
+		}
+		todo = append(todo, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, r := range todo {
+		scope := ScopeKey(&r.m)
+		if scope == "" {
+			continue // control-plane: leave scope empty by design
+		}
+		if _, err := tx.Exec(`UPDATE messages SET scope=? WHERE seq=?`, scope, r.seq); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?, '1', ?)`,
+		scopeBackfillKey, time.Now().Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// backfillWatermarks reconstructs the read frontier for databases that
+// already contain ack rows from the pre-watermark protocol. Without this,
+// every historical message would display "read 0" after an upgrade even
+// though its ack rows are still present.
+func (s *sqliteStore) backfillWatermarks() error {
+	var done int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM settings WHERE key=?`, watermarkBackfillKey).Scan(&done); err == nil && done > 0 {
+		return nil
+	}
+	// Keep watermarks written by the first iteration of this change in sync
+	// with the room scope rename above.
+	if _, err := s.db.Exec(`UPDATE OR REPLACE peer_read_watermarks
+		SET scope='room:' || substr(scope,8) WHERE scope LIKE 'thread:grp_%'`); err != nil {
+		return err
+	}
+	rows, err := s.db.Query(`SELECT DISTINCT m.scope, a.peer_id
+		FROM acks a JOIN messages m ON m.seq=a.message_seq
+		WHERE m.scope != '' AND m.scope != '-'`)
+	if err != nil {
+		return err
+	}
+	type pair struct{ scope, peer string }
+	var pairs []pair
+	for rows.Next() {
+		var p pair
+		if err := rows.Scan(&p.scope, &p.peer); err != nil {
+			rows.Close()
+			return err
+		}
+		pairs = append(pairs, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(pairs) == 0 {
+		// A fresh database has no historical acks. Leave the marker unset so a
+		// later direct Ack (used by tests and older callers) can still be
+		// adopted on the next open.
+		return nil
+	}
+	now := time.Now().Unix()
+	for _, p := range pairs {
+		if _, err := s.AdvanceReadWatermark(p.scope, p.peer, now); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.Exec(`INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?, '1', ?)`,
+		watermarkBackfillKey, now)
+	return err
 }
 
 func isDupErr(err error) bool {
@@ -423,12 +592,21 @@ func isDupErr(err error) bool {
 	return strings.Contains(msg, "already exists") || strings.Contains(msg, "duplicate column")
 }
 
-// dropConversationsV12 removes the v12 conversations tables and the two
-// message columns that release added. v0.14.0 was never deployed, but local
-// databases that ran it keep the leftovers and nothing reads them any more:
-// drop them so every database converges on the current schema. Best-effort —
-// an SQLite without DROP COLUMN just keeps two unused columns.
+// dropConversationsV12 removes the v12 conversations leftovers once per
+// database. v0.14.0 was never deployed, so this is a one-time cleanup, not a
+// standing rule: running it on every boot made it a live hazard — any future
+// messages.conv_id column would be silently dropped at startup, and the
+// swallowed errors meant nobody would find out.
+const dropConversationsV12Marker = "migrated.v12_drop"
+
 func (s *sqliteStore) dropConversationsV12() {
+	var done int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM settings WHERE key=?`, dropConversationsV12Marker).Scan(&done); err != nil {
+		return // settings not created yet on a brand-new database
+	}
+	if done > 0 {
+		return
+	}
 	for _, stmt := range []string{
 		`DROP TABLE IF EXISTS conversation_members`,
 		`DROP TABLE IF EXISTS conversations`,
@@ -437,6 +615,8 @@ func (s *sqliteStore) dropConversationsV12() {
 	} {
 		_, _ = s.db.Exec(stmt)
 	}
+	_, _ = s.db.Exec(`INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?, '1', ?)`,
+		dropConversationsV12Marker, time.Now().Unix())
 }
 
 // dropTokensFK rebuilds the tokens table without the peers FK for databases
@@ -797,9 +977,9 @@ func boolToInt(b bool) int {
 func (s *sqliteStore) InsertMessage(m *Message) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.Exec(`INSERT INTO messages(id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,status,op,target,detail,decision,expires_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, m.ID, m.Sender, m.Recipient, m.Kind, m.InReplyTo, m.RootID, boolToInt(m.RequiresApproval), m.ApprovalState, m.Payload, m.CreatedAt,
-		m.Status, m.Op, m.Target, m.Detail, m.Decision, m.ExpiresAt)
+	res, err := s.db.Exec(`INSERT INTO messages(id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,status,op,target,detail,decision,expires_at,scope)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, m.ID, m.Sender, m.Recipient, m.Kind, m.InReplyTo, m.RootID, boolToInt(m.RequiresApproval), m.ApprovalState, m.Payload, m.CreatedAt,
+		m.Status, m.Op, m.Target, m.Detail, m.Decision, m.ExpiresAt, ScopeKey(m))
 	if err != nil {
 		return 0, err
 	}
@@ -883,23 +1063,27 @@ func (s *sqliteStore) GetByIDAnySender(id string) ([]*Message, error) {
 // Parameter order (eight peer ids): direct recipient, broadcast sender,
 // room sender, room member, subscription sender filter, ticket assignee,
 // participant sender, participant recipient.
-const visibilityExpr = `((m.recipient = ?)
-		  OR (m.recipient = '*' AND m.sender != ?)
-		  OR (m.recipient LIKE 'grp_%' AND m.sender != ? AND EXISTS (
+func visibilityExprFor(alias string) string {
+	return fmt.Sprintf(`((%[1]s.recipient = ?)
+		  OR (%[1]s.recipient = '*' AND %[1]s.sender != ?)
+		  OR (%[1]s.recipient LIKE 'grp_%%' AND %[1]s.sender != ? AND EXISTS (
 		       SELECT 1 FROM room_members rm
-		       WHERE rm.room_id = m.recipient AND rm.peer_id = ? AND rm.start_seq < m.seq))
-		  OR (m.sender != ? AND EXISTS (
+		       WHERE rm.room_id = %[1]s.recipient AND rm.peer_id = ? AND rm.start_seq < %[1]s.seq))
+		  OR (%[1]s.sender != ? AND EXISTS (
 		       SELECT 1 FROM ticket_subscriptions ts
 		       JOIN tickets t ON t.id = ts.ticket_id
-		       WHERE ts.thread_root = m.root_id
+		       WHERE ts.thread_root = %[1]s.root_id
 		         AND t.assignee = ?
 		         AND t.state = 'open'
 		         AND ts.mode IN ('own','context')
 		         AND EXISTS (
 		           SELECT 1 FROM messages pm
-		           WHERE pm.root_id = m.root_id
+		           WHERE pm.root_id = %[1]s.root_id
 		             AND (pm.sender = ? OR pm.recipient = ?))))
-		  )`
+		  )`, alias)
+}
+
+var visibilityExpr = visibilityExprFor("m")
 
 // visibleSelect is the column list every message read shares.
 const visibleSelect = `SELECT m.seq,m.id,m.sender,m.recipient,m.kind,m.in_reply_to,m.root_id,
@@ -954,19 +1138,316 @@ func (s *sqliteStore) MessageVisibleTo(seq int64, peerID string) (bool, error) {
 // AckIfVisible acks one message when it is visible to that peer, reporting
 // whether the ack was applied.
 func (s *sqliteStore) AckIfVisible(messageSeq int64, peerID string, ts int64) (bool, error) {
+	// Serialize the ack insert and watermark advance: a stale target computed
+	// concurrently with a newer ack must never move the watermark backwards.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ok, err := s.MessageVisibleTo(messageSeq, peerID)
 	if err != nil || !ok {
+		return false, err
+	}
+	var scope string
+	if err := s.db.QueryRow(`SELECT scope FROM messages WHERE seq=?`, messageSeq).Scan(&scope); err != nil {
 		return false, err
 	}
 	if err := s.Ack(messageSeq, peerID, ts); err != nil {
 		return false, err
 	}
+	// The ack row is audit; the watermark is delivery. Advance it in the same
+	// call so a crash between the two can only cause a redelivery, never a
+	// skip.
+	if _, err := s.AdvanceReadWatermark(scope, peerID, ts); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
-func (s *sqliteStore) ThreadMessages(rootID string, limit int) ([]*Message, error) {
-	if limit <= 0 || limit > 1000 {
+// ReadWatermark returns how far peerID has processed in scope. 0 means
+// nothing processed yet (also the value when no row exists).
+func (s *sqliteStore) ReadWatermark(scope, peerID string) (int64, error) {
+	var seq int64
+	err := s.db.QueryRow(`SELECT seq FROM peer_read_watermarks WHERE scope=? AND peer_id=?`,
+		scope, peerID).Scan(&seq)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return seq, err
+}
+
+// AdvanceReadWatermark moves one (scope, peer) watermark forward as far as
+// the ack set allows. A visible pending-approval message is a hole and pins
+// it; messages outside the peer's visibility (join boundaries, private
+// replies to someone else) are skipped rather than allowed to block the
+// scope forever. Rejected messages are terminal and skipped.
+//
+// The target is recomputed from the ack rows rather than incremented: acks
+// arrive out of seq order (batch drains, retries), so the watermark must be a
+// function of the ack set, not of arrival order.
+func (s *sqliteStore) AdvanceReadWatermark(scope, peerID string, ts int64) (int64, error) {
+	if scope == "" || scope == "-" {
+		return 0, nil
+	}
+	// Oldest message in this scope that is visible to the peer and still
+	// unacked. Pending approval is deliberately not excluded: it is a hole
+	// that must pin the watermark until a human resolves it (DESIGN §5.4).
+	// Rejected messages are terminal and never deliverable, so they are
+	// skipped rather than allowed to block the scope forever.
+	var head sql.NullInt64
+	err := s.db.QueryRow(`SELECT MIN(m.seq) FROM messages m
+		WHERE m.scope = ?
+		  AND m.approval_state != 'rejected'
+		  AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.message_seq = m.seq AND a.peer_id = ?)
+		  AND `+visibilityExpr,
+		scope, peerID,
+		peerID, peerID, peerID, peerID, peerID, peerID, peerID, peerID,
+	).Scan(&head)
+	if err != nil {
+		return 0, err
+	}
+
+	cur, err := s.ReadWatermark(scope, peerID)
+	if err != nil {
+		return 0, err
+	}
+
+	// Target: newest visible seq strictly below the hole. With no hole, the
+	// peer has acked everything visible, so the newest visible seq wins.
+	var target int64
+	if head.Valid {
+		err = s.db.QueryRow(`SELECT COALESCE(MAX(m.seq),0) FROM messages m
+			WHERE m.scope = ? AND m.seq < ?
+			  AND m.approval_state != 'rejected'
+			  AND `+visibilityExpr,
+			scope, head.Int64,
+			peerID, peerID, peerID, peerID, peerID, peerID, peerID, peerID,
+		).Scan(&target)
+	} else {
+		err = s.db.QueryRow(`SELECT COALESCE(MAX(m.seq),0) FROM messages m
+			WHERE m.scope = ?
+			  AND m.approval_state != 'rejected'
+			  AND `+visibilityExpr,
+			scope,
+			peerID, peerID, peerID, peerID, peerID, peerID, peerID, peerID,
+		).Scan(&target)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if target <= cur {
+		return cur, nil
+	}
+	if _, err := s.db.Exec(`INSERT INTO peer_read_watermarks(scope,peer_id,seq,updated_at) VALUES(?,?,?,?)
+		ON CONFLICT(scope,peer_id) DO UPDATE SET
+		  seq=MAX(peer_read_watermarks.seq, excluded.seq),
+		  updated_at=excluded.updated_at`,
+		scope, peerID, target, ts); err != nil {
+		return 0, err
+	}
+	return target, nil
+}
+
+// scopeHeadSelect yields, per scope, only the oldest visible unacked message
+// above the peer's read watermark. FIFO is therefore a property of the
+// delivery query, not of any client. Acks remain an idempotency guard so a
+// batch redelivery cannot surface a message the worker already confirmed.
+// A pending-approval message is not deliverable, but it is a barrier: later
+// messages in the same scope wait until the human resolves it.
+var scopeHeadSelect = `SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,
+	requires_approval,approval_state,payload,created_at,
+	status,op,target,detail,decision,expires_at FROM (
+	SELECT m.seq,m.id,m.sender,m.recipient,m.kind,m.in_reply_to,m.root_id,
+	 m.requires_approval,m.approval_state,m.payload,m.created_at,
+	 m.status,m.op,m.target,m.detail,m.decision,m.expires_at,
+	 ROW_NUMBER() OVER (PARTITION BY m.scope ORDER BY m.seq) rn
+	FROM messages m
+	WHERE m.scope != '' AND m.scope != '-'
+	  AND m.approval_state NOT IN ('pending','rejected')
+	  AND m.seq > COALESCE((SELECT w.seq FROM peer_read_watermarks w
+	       WHERE w.scope = m.scope AND w.peer_id = ?), 0)
+	  AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.message_seq = m.seq AND a.peer_id = ?)
+	  AND ` + visibilityExpr + `
+	  AND NOT EXISTS (
+	    SELECT 1 FROM messages p
+	    WHERE p.scope = m.scope AND p.seq < m.seq
+	      AND p.approval_state = 'pending'
+	      AND ` + visibilityExprFor("p") + `
+	  )
+) WHERE rn = 1 ORDER BY seq ASC LIMIT ?`
+
+func (s *sqliteStore) ScopeHead(peerID string, limit int) ([]*Message, error) {
+	if limit <= 0 || limit > 500 {
 		limit = 200
+	}
+	rows, err := s.db.Query(scopeHeadSelect, peerID, peerID,
+		peerID, peerID, peerID, peerID, peerID, peerID, peerID, peerID,
+		peerID, peerID, peerID, peerID, peerID, peerID, peerID, peerID,
+		limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ReadStat is one message's read count and its eligible audience size, both
+// computed server-side so the console never re-derives eligibility.
+type ReadStat struct {
+	Read  int
+	Total int
+}
+
+// readEligiblePeerExprFor is the per-message audience predicate for a
+// candidate reader column. It deliberately mirrors visibilityExpr at the
+// message level instead of inferring the audience from the scope: one thread
+// can contain broadcast, room-wide, and one-to-one messages.
+func readEligiblePeerExprFor(peer string) string {
+	return fmt.Sprintf(`(
+  (m.recipient LIKE 'grp\_%%' ESCAPE '\' AND EXISTS (
+    SELECT 1 FROM room_members rm
+    WHERE rm.room_id = m.recipient AND rm.peer_id = %[1]s
+      AND rm.start_seq < m.seq))
+  OR (m.recipient NOT LIKE 'grp\_%%' ESCAPE '\' AND m.recipient != '*'
+      AND m.recipient NOT IN ('operator','system','')
+      AND %[1]s = m.recipient)
+  OR (m.recipient = '*')
+  OR (m.sender != %[1]s AND m.root_id != '' AND EXISTS (
+    SELECT 1 FROM ticket_subscriptions ts
+    JOIN tickets t ON t.id = ts.ticket_id
+    WHERE ts.thread_root = m.root_id AND t.assignee = %[1]s
+      AND t.state = 'open' AND ts.mode IN ('own','context')
+      AND EXISTS (
+        SELECT 1 FROM messages pm
+        WHERE pm.root_id = m.root_id
+          AND (pm.sender = %[1]s OR pm.recipient = %[1]s))))
+)`, peer)
+}
+
+var readEligiblePeerExpr = readEligiblePeerExprFor("w.peer_id")
+
+func (s *sqliteStore) ReadStats(seqs []int64) (map[int64]ReadStat, error) {
+	out := map[int64]ReadStat{}
+	if len(seqs) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(seqs))
+	for _, seq := range seqs {
+		args = append(args, seq)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(seqs)), ",")
+	rows, err := s.db.Query(`SELECT m.seq, COUNT(DISTINCT w.peer_id) FROM messages m
+		JOIN peer_read_watermarks w ON w.scope = m.scope
+		 AND w.peer_id != m.sender AND w.seq >= m.seq
+		WHERE m.seq IN (`+placeholders+`)
+		  AND m.scope NOT IN ('','-')
+		  AND m.approval_state NOT IN ('pending','rejected')
+		  AND `+readEligiblePeerExpr+`
+		GROUP BY m.seq`, args...)
+	if err != nil {
+		return nil, err
+	}
+	read, err := func() (map[int64]int, error) {
+		res := map[int64]int{}
+		defer rows.Close()
+		for rows.Next() {
+			var seq int64
+			var n int
+			if err := rows.Scan(&seq, &n); err != nil {
+				return nil, err
+			}
+			res[seq] = n
+		}
+		return res, rows.Err()
+	}()
+	if err != nil {
+		return nil, err
+	}
+	trows, err := s.db.Query(`SELECT m.seq,
+		  CASE
+		    WHEN m.recipient LIKE 'grp\_%' ESCAPE '\' THEN
+		      (SELECT COUNT(*) FROM room_members rm
+		       WHERE rm.room_id = m.recipient AND rm.start_seq < m.seq
+		         AND rm.peer_id != m.sender)
+		    WHEN m.recipient = '*' THEN
+		      (SELECT COUNT(*) FROM peers p WHERE p.id != m.sender)
+		    WHEN m.recipient IN ('operator','system','') THEN 0
+		    ELSE
+		      (CASE WHEN m.recipient != m.sender THEN 1 ELSE 0 END)
+		      + (SELECT COUNT(DISTINCT t.assignee)
+		         FROM ticket_subscriptions ts
+		         JOIN tickets t ON t.id = ts.ticket_id
+		         WHERE m.root_id != '' AND ts.thread_root = m.root_id
+		           AND t.state = 'open' AND ts.mode IN ('own','context')
+		           AND t.assignee != m.sender AND t.assignee != m.recipient)
+		  END
+		FROM messages m
+		WHERE m.seq IN (`+placeholders+`)
+		  AND m.scope NOT IN ('','-')
+		  AND m.approval_state NOT IN ('pending','rejected')`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer trows.Close()
+	for trows.Next() {
+		var seq int64
+		var total int
+		if err := trows.Scan(&seq, &total); err != nil {
+			return nil, err
+		}
+		out[seq] = ReadStat{Read: read[seq], Total: total}
+	}
+	return out, trows.Err()
+}
+
+// ReadPeers returns who has read each message, derived from the same
+// watermarks ReadStats counts. The console's "who has picked this up"
+// popover needs the identities, not just the number.
+func (s *sqliteStore) ReadPeers(seqs []int64) (map[int64][]string, error) {
+	out := map[int64][]string{}
+	if len(seqs) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(seqs))
+	for _, seq := range seqs {
+		args = append(args, seq)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(seqs)), ",")
+	rows, err := s.db.Query(`SELECT DISTINCT m.seq, w.peer_id FROM messages m
+		JOIN peer_read_watermarks w ON w.scope = m.scope
+		 AND w.peer_id != m.sender AND w.seq >= m.seq
+		WHERE m.seq IN (`+placeholders+`)
+		  AND m.scope NOT IN ('','-')
+		  AND m.approval_state NOT IN ('pending','rejected')
+		  AND `+readEligiblePeerExpr+`
+		ORDER BY m.seq, w.peer_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int64
+		var peer string
+		if err := rows.Scan(&seq, &peer); err != nil {
+			return nil, err
+		}
+		out[seq] = append(out[seq], peer)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) ThreadMessages(rootID string, limit int) ([]*Message, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 10000 {
+		limit = 10000
 	}
 	rows, err := s.db.Query(`SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
 		status,op,target,detail,decision,expires_at
@@ -1079,8 +1560,15 @@ func (s *sqliteStore) MaxSeq() (int64, error) {
 }
 
 func (s *sqliteStore) ThreadRoots(limit int) ([]string, error) {
-	if limit <= 0 || limit > 1000 {
+	// The old clamp was <=0||>1000 -> 100, which silently turned every
+	// caller's "1001 means scan more than the cap" probe into "scan the
+	// newest 100", so threads_skipped was unreachable dead code and old
+	// threads never expired.
+	if limit <= 0 {
 		limit = 100
+	}
+	if limit > 10000 {
+		limit = 10000
 	}
 	rows, err := s.db.Query(`SELECT root_id, MAX(seq) AS mx FROM messages GROUP BY root_id ORDER BY mx DESC LIMIT ?`, limit)
 	if err != nil {
@@ -1213,10 +1701,10 @@ func (s *sqliteStore) DecidePermission(msg *Message, requestID, decision string,
 		return false, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO messages(id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,status,op,target,detail,decision,expires_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, msg.ID, msg.Sender, msg.Recipient, msg.Kind, msg.InReplyTo, msg.RootID,
+	if _, err := tx.Exec(`INSERT INTO messages(id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,status,op,target,detail,decision,expires_at,scope)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, msg.ID, msg.Sender, msg.Recipient, msg.Kind, msg.InReplyTo, msg.RootID,
 		boolToInt(msg.RequiresApproval), msg.ApprovalState, msg.Payload, msg.CreatedAt,
-		msg.Status, msg.Op, msg.Target, msg.Detail, msg.Decision, msg.ExpiresAt); err != nil {
+		msg.Status, msg.Op, msg.Target, msg.Detail, msg.Decision, msg.ExpiresAt, ScopeKey(msg)); err != nil {
 		return false, err
 	}
 	newStatus := "allowed"
@@ -1254,7 +1742,20 @@ func (s *sqliteStore) PrunePermissions(olderThan int64) (int64, error) {
 // ---- acks ----
 
 func (s *sqliteStore) Ack(seq int64, peerID string, ts int64) error {
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO acks(message_seq,peer_id,acked_at) VALUES(?,?,?)`, seq, peerID, ts)
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO acks(message_seq,peer_id,acked_at) VALUES(?,?,?)`, seq, peerID, ts); err != nil {
+		return err
+	}
+	// Keep the low-level ack API consistent with AckIfVisible: legacy/direct
+	// callers still get the watermark side effect, and the audit row remains
+	// idempotent on replay.
+	var scope string
+	if err := s.db.QueryRow(`SELECT scope FROM messages WHERE seq=?`, seq).Scan(&scope); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	_, err := s.AdvanceReadWatermark(scope, peerID, ts)
 	return err
 }
 

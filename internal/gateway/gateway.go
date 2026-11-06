@@ -608,8 +608,19 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 403, "for must match your authenticated identity")
 		return
 	}
-	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
-	msgs, err := s.queue.Visible(forID, since, 200)
+	// Two delivery modes on one endpoint. `since` present is the legacy
+	// cursor protocol (kept so an un-upgraded receiver still works against a
+	// new gateway); absent means "server, tell me what is due" — one message
+	// per scope, FIFO enforced by the query (§5.4).
+	rawSince := r.URL.Query().Get("since")
+	since, _ := strconv.ParseInt(rawSince, 10, 64)
+	var msgs []*store.Message
+	var err error
+	if rawSince == "" {
+		msgs, err = s.queue.ScopeHead(forID, 200)
+	} else {
+		msgs, err = s.queue.Visible(forID, since, 200)
+	}
 	if err != nil {
 		log.Printf("pull error: %v", err)
 		writeErr(w, 500, "pull failed")
@@ -1401,17 +1412,35 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "thread failed")
 		return
 	}
-	// Room threads carry per-member ack detail so the console can show who has
-	// picked a message up ("已读 2/3") without N queries.
-	var acksBySeq map[int64][]string
+	// Read receipts are computed here, from the watermark table, for every
+	// thread. The console used to re-derive them in JavaScript from ack rows
+	// intersected with a member list, which is how the same message could
+	// show two different numbers in two views — and how the count could go
+	// 5,4,3 as the member list changed underneath it.
+	seqs := make([]int64, 0, len(msgs))
+	for _, m := range msgs {
+		seqs = append(seqs, m.Seq)
+	}
+	stats, err := s.st.ReadStats(seqs)
+	if err != nil {
+		log.Printf("admin messages read stats: %v", err)
+		writeErr(w, 500, "read stats failed")
+		return
+	}
+	var readsBySeq map[int64][]string
+	if strings.HasPrefix(thread, "grp_") {
+		// The popover lists who has picked each message up; it must come
+		// from the same watermark as the count, or the two disagree.
+		readsBySeq, err = s.st.ReadPeers(seqs)
+		if err != nil {
+			log.Printf("admin messages read peers: %v", err)
+			writeErr(w, 500, "read peers failed")
+			return
+		}
+	}
 	roomMembers := []string{}
 	roomName, roomArchived := "", false
 	if strings.HasPrefix(thread, "grp_") {
-		seqs := make([]int64, 0, len(msgs))
-		for _, m := range msgs {
-			seqs = append(seqs, m.Seq)
-		}
-		acksBySeq, _ = s.st.AcksForSeqs(seqs)
 		if room, err := s.st.GetRoom(thread); err == nil && room != nil {
 			roomName, roomArchived = room.Name, room.ArchivedAt != 0
 		}
@@ -1423,16 +1452,19 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		acked, _ := s.st.AckedCount(m.Seq)
+		st := stats[m.Seq]
 		item := map[string]any{
 			"seq": m.Seq, "id": m.ID, "sender": m.Sender, "recipient": m.Recipient,
 			"kind": m.Kind, "in_reply_to": m.InReplyTo, "payload": m.Payload,
-			"approval_state": m.ApprovalState, "acked_count": acked, "created_at": m.CreatedAt,
+			"approval_state": m.ApprovalState, "created_at": m.CreatedAt,
+			// read/total are authoritative; acked_count stays for older
+			// console bundles and now means the same number as read.
+			"read": st.Read, "total": st.Total, "acked_count": st.Read,
 			"status": m.Status, "op": m.Op, "target": m.Target,
 			"detail": m.Detail, "decision": m.Decision, "expires_at": m.ExpiresAt,
 		}
-		if acksBySeq != nil {
-			who := acksBySeq[m.Seq]
+		if readsBySeq != nil {
+			who := readsBySeq[m.Seq]
 			if who == nil {
 				who = []string{}
 			}

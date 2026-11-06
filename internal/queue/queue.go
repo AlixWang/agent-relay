@@ -281,8 +281,17 @@ func (s *Service) sendDecision(req *SendRequest, rootID string, now int64) (int6
 }
 
 // Visible returns messages visible to peerID with seq > since (DESIGN §4.4).
+// Callers that want the FIFO delivery model use ScopeHead instead; this stays
+// for compatibility with receivers that still carry their own cursor.
 func (s *Service) Visible(peerID string, since int64, limit int) ([]*store.Message, error) {
 	return s.st.VisibleTo(peerID, since, limit)
+}
+
+// ScopeHead returns, per scope, only the oldest deliverable message above
+// peerID's read watermark. FIFO is enforced by the query, so a client that
+// uses this mode needs no local cursor for ordering (§5.4).
+func (s *Service) ScopeHead(peerID string, limit int) ([]*store.Message, error) {
+	return s.st.ScopeHead(peerID, limit)
 }
 
 // AckByID marks every message with client id visible to `by` as acked.

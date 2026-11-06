@@ -9,8 +9,9 @@ POST   /register    { code, id, agent_type, protocol_version, capabilities }
                                    → { ok, peer_id, token }  （token 只显示这一次）
 POST   /messages    { id, to, from, kind, in_reply_to, requires_approval, payload }
                                    → { ok, seq, id } | 202 { held: true } | 409 | 429 | 426
+GET    /messages?for=<id>          → scope-head 模式：每个 scope 只返回最老的可投递消息（§5.4）
 GET    /messages?for=<id>&since=<seq>
-                                   → { ok, items: [...], next_since }
+                                   → 兼容旧接收端的增量模式：{ ok, items: [...], next_since }
 GET    /messages/room?room=grp_<slug>&limit=<n>   （只读回看群聊最新记录，仅群成员，§7.8）
                                    → { ok, room, items: [...] }（旧到新；不含别人的私聊回复）
 GET    /messages/stream?for=<id>&since=<seq>   （SSE，§4.4b 推送：backlog 回放 + live 帧，需鉴权）
@@ -194,16 +195,17 @@ GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last
 
 ### 群聊已读明细与解散（DESIGN §9.5）
 
-`GET /admin/messages?thread=grp_<slug>` 的每条消息带 `acked_by: [peer_id…]`，响应的
-`room.members` 给出成员 id，`GET /admin/rooms` 的成员对象再带 `start_seq`（入群时已看到的最大
-seq）。三者合起来就是控制台的已读面板：
+`GET /admin/messages?thread=grp_<slug>` 的每条消息带服务端计算的 `read` 与 `total`，以及用于
+弹层展示具体成员的 `acked_by: [peer_id…]`。`read` 来自 `peer_read_watermarks`，`total` 按消息级
+audience 计算（广播、房间成员、私聊收件人；操作者回复走收件箱水位，不计入逐条 ack）：
 
-- **只在入群早于该消息的成员之间统计**：`start_seq <= seq`。后来入群的成员既不算已读也不算未读
+- **只在入群早于该消息的成员之间统计**：`start_seq < seq`。后来入群的成员既不算已读也不算未读
   （他们看不到那条消息），控制台单独提示"该消息之后入群"的人数。
 - **发送者不计**：自己的消息天然已读。所以 `已读 n/m` 的 `m` 是该消息的合格成员数，不是群规模。
 - **只统计发给群的消息**：群线程里还夹着发给个人的回复（`to=<peer>` / `to=operator`），它们不是全群
   可见的消息——只有收件人能读、能 ack（`n/m` 分母是 1）；给操作者的回复走收件箱水位而不是逐条 ack，
   所以不显示已读徽标。
+- **控制台不得重新推导**：`read/total` 是权威值，`acked_by` 只用于展开已读成员列表。
 
 批量确认（§7.8）：一次唤醒可能带十几条只读消息，`POST /ack` 可以带 `ids` 数组一次确认
 （`{"ids":["id1","id2"],"by":"me"}`，≤200 条）。逐条按可见性处理，不可见/未知/待审批的 id

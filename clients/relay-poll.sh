@@ -60,7 +60,9 @@ auth=(-H "Authorization: Bearer $token")
 # newer worker instructions exist (§8.6), or resources_update=true when the
 # manifest digest changed (§4.12).
 hb_file="$(mktemp)"
-trap 'rm -f "$hb_file" "$resp_file"' EXIT
+resp_file=""
+wake_file=""
+trap 'rm -f "$hb_file" "${resp_file:-}" "${wake_file:-}"' EXIT
 resources_rev="$(tr -d '[:space:]' < "$RESOURCES_REV_FILE" 2>/dev/null || true)"
 hb_body="$(jq -nc --arg id "$ident" --argjson pv "$prompt_ver" --arg rr "$resources_rev" \
   '{id: $id, prompt_version: $pv, resources_rev: $rr}')"
@@ -135,21 +137,31 @@ case "$http_code" in
     ;;
 esac
 
-# 3. advance cursor + emit work if any
+# 3. emit work first, then advance the cursor. A failed stdout write must
+# leave the cursor behind so the next poll replays the batch; advancing first
+# is the silent-loss path this script must never take.
 next_since="$(jq -r '.next_since // 0' "$resp_file" 2>/dev/null || echo "$since")"
 [[ "$next_since" =~ ^[0-9]+$ ]] || next_since="$since"
-printf '%s' "$next_since" > "$SEQ_FILE"
 
 count="$(jq -r '.items | length' "$resp_file" 2>/dev/null || echo 0)"
 # Staged prompt/resource update with no message traffic still needs to wake
 # the assistant — otherwise new instructions sit unread until the next task.
 if [[ "$count" == "0" && -z "$update_event" && -z "$resources_event" ]]; then
+  printf '%s' "$next_since" > "$SEQ_FILE"
   exit 0
 fi
 
-# Work present: hand the full items to the waker. Events ride along as
-# siblings of tasks (resources_update is flat, like relay-tail emits it).
-jq -c --argjson pu "${update_event:-null}" --arg rr "$resources_event" '
+# Work present: hand the full items to the waker. Build the line in a file
+# first so a jq error cannot half-write a wake and still move the cursor.
+wake_file="$(mktemp)"
+if ! jq -c --argjson pu "${update_event:-null}" --arg rr "$resources_event" '
   {tasks: [.items[]?]}
   + (if $pu == null then {} else {prompt_update: $pu} end)
-  + (if $rr == "" then {} else {resources_update: true, resources_rev: $rr} end)' "$resp_file"
+  + (if $rr == "" then {} else {resources_update: true, resources_rev: $rr} end)' "$resp_file" > "$wake_file"; then
+  echo "relay-poll: failed to serialize wake payload" >&2
+  exit 1
+fi
+if ! cat "$wake_file"; then
+  exit 1
+fi
+printf '%s' "$next_since" > "$SEQ_FILE"

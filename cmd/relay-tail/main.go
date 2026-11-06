@@ -407,8 +407,15 @@ func emitWake(tasks []map[string]any, events ...string) bool {
 			out[k] = val
 		}
 	}
-	b, _ := json.Marshal(out)
-	fmt.Println(string(b))
+	b, err := json.Marshal(out)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "relay-tail: marshal wake: %v\n", err)
+		return false
+	}
+	if _, err := fmt.Println(string(b)); err != nil {
+		fmt.Fprintf(os.Stderr, "relay-tail: write wake: %v\n", err)
+		return false
+	}
 	return true
 }
 
@@ -448,8 +455,13 @@ func (c *cfg) runPoll() int {
 			time.Sleep(time.Duration(interval) * time.Second)
 			continue
 		}
-		c.writeSeq(pr.NextSince)
-		emitWake(pr.Items, promptEvent, clientEvent, resourcesEvent)
+		// Emit first, then advance. The other order silently dropped the
+		// whole batch on a crash or a failed stdout write between the two
+		// lines — and stdout is a pipe into the supervisor, so ENOSPC and
+		// EPIPE are not hypothetical.
+		if emitWake(pr.Items, promptEvent, clientEvent, resourcesEvent) {
+			c.writeSeq(pr.NextSince)
+		}
 		time.Sleep(time.Duration(interval) * time.Second)
 	}
 }
@@ -522,39 +534,56 @@ func (c *cfg) holdStream(since int64) int {
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	var datas []string
-	flush := func(idLine string) {
+	var pending int64 // seq from the last id line, not yet persisted
+	flush := func() bool {
 		if len(datas) == 0 {
-			return
+			return true
 		}
 		var tasks []map[string]any
 		for _, d := range datas {
 			var one map[string]any
-			if json.Unmarshal([]byte(d), &one) == nil {
-				tasks = append(tasks, one)
+			// Schema drift must fail loudly (DESIGN §8.10). Skipping the
+			// frame while the cursor still advanced is how a message got
+			// silently swallowed.
+			if err := json.Unmarshal([]byte(d), &one); err != nil {
+				fmt.Fprintf(os.Stderr, "relay-tail: unparseable frame: %v (%d bytes)\n", err, len(d))
+				return false
 			}
+			tasks = append(tasks, one)
 		}
 		datas = datas[:0]
-		if emitWake(tasks, "") {
-			delivered = true
+		if !emitWake(tasks, "") {
+			return false
 		}
-		_ = idLine
+		delivered = true
+		// Persist only after the line actually left the process.
+		if pending > 0 {
+			c.writeSeq(pending)
+			pending = 0
+		}
+		return true
 	}
-	var lastID string
 	for sc.Scan() {
 		line := sc.Text()
 		switch {
 		case strings.HasPrefix(line, "id: "):
 			if id := strings.TrimSpace(strings.TrimPrefix(line, "id: ")); isDigits(id) {
-				lastID = id
 				if n, err := strconv.ParseInt(id, 10, 64); err == nil {
-					c.writeSeq(n)
+					pending = n
 				}
 			}
 		case strings.HasPrefix(line, "data: "):
 			datas = append(datas, strings.TrimPrefix(line, "data: "))
 		case line == "":
-			flush(lastID) // blank line = end of frame: emit NOW
+			if !flush() { // blank line = end of frame: emit NOW
+				return -1
+			}
 		}
+	}
+	// A stream can end on a data line with no trailing blank line. Dropping
+	// that buffered frame lost the last message of every truncated stream.
+	if !flush() {
+		return -1
 	}
 	if !delivered {
 		return -1 // silent disconnect: caller backs off

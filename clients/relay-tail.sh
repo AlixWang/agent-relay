@@ -131,15 +131,38 @@ stage_resources_update() {
 
 # parse_stream — incremental SSE parser. Reads frames from stdin; for each
 # frame carrying data, prints one wake-JSON line ({tasks:[...]}) to stdout
-# immediately and persists the cursor on id: lines. The HTTP status is
-# delivered by curl's -w trailer as a final __HTTP_CODE__ line.
+# immediately and persists the cursor only after that line was written. The
+# HTTP status is delivered by curl's -w trailer as a final __HTTP_CODE__ line.
 # Must parse while the connection is open: buffering to a file and parsing
 # only on disconnect delays live messages until the next reconnect.
-# Exit codes: 0 stream ended, 2 auth/outdated (401/426), 3 rate-limited (429).
+# Exit codes: 0 stream ended, 1 emit failed (retry the same cursor), 2
+# auth/outdated (401/426), 3 rate-limited (429).
 parse_stream() {
-  local line id_val tasks_tmp code tasks_json
+  local line id_val pending_id tasks_tmp code tasks_json
   tasks_tmp="$(mktemp)"
   code=""
+  pending_id=""
+
+  emit_frame() {
+    if [[ -s "$tasks_tmp" ]]; then
+      if ! tasks_json="$(jq -cs '{tasks: .}' "$tasks_tmp" 2>/dev/null)"; then
+        return 1
+      fi
+      # Persist only after the wake line actually left the process. A failed
+      # stdout write must replay the frame, never silently skip it.
+      if ! printf '%s\n' "$tasks_json"; then
+        return 1
+      fi
+      if [[ -n "$pending_id" ]]; then
+        printf '%s' "$pending_id" > "$SEQ_FILE"
+      fi
+      touch "$EMITTED_FLAG"
+      : > "$tasks_tmp"
+    fi
+    pending_id=""
+    return 0
+  }
+
   while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
       "__HTTP_CODE__:"*)
@@ -148,7 +171,7 @@ parse_stream() {
       "id: "*)
         id_val="${line#id: }"
         if [[ "$id_val" =~ ^[0-9]+$ ]]; then
-          printf '%s' "$id_val" > "$SEQ_FILE"
+          pending_id="$id_val"
         fi
         ;;
       "data: "*)
@@ -156,16 +179,17 @@ parse_stream() {
         ;;
       "")
         # Blank line = end of one SSE frame: emit immediately.
-        if [[ -s "$tasks_tmp" ]]; then
-          if tasks_json="$(jq -cs '{tasks: .}' "$tasks_tmp" 2>/dev/null)"; then
-            printf '%s\n' "$tasks_json"
-            touch "$EMITTED_FLAG"
-          fi
-          : > "$tasks_tmp"
+        if ! emit_frame; then
+          rm -f "$tasks_tmp"
+          return 1
         fi
         ;;
     esac
   done
+  if ! emit_frame; then
+    rm -f "$tasks_tmp"
+    return 1
+  fi
   rm -f "$tasks_tmp"
   case "$code" in
     401|426) return 2 ;;

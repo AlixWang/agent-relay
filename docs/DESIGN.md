@@ -142,7 +142,7 @@ The guard is deliberately dumb and deterministic. It does not call an LLM; it co
   - *Room:* `to = grp_<slug>` (§6.8) — a routing alias with a member list, not a peer. Stored once; visible to members whose `start_seq < seq`, never to the sender. Joining later does not replay history, so an old room can never re-deliver a stale instruction.
   - *Console DM:* `to = operator` (§9.5) — the reserved identity of the human at the console. `operator` is a `from`/`to` value, never a peer: no row, no token, cannot authenticate.
   - *Thread reply:* `in_reply_to = <message id>` — inherits visibility from the parent (room threads and operator DMs have canonical keys — `grp_<slug>` and `op/<peer>` — so one conversation stays one thread regardless of `in_reply_to`).
-- **Per-identity delivery view.** A message is "delivered to X" when X's ack row exists. Broadcast visibility = `to = '*' AND from != X AND ack(X) is absent`; room visibility = membership with `start_seq < seq`. All three rules live in one `visibilityExpr` shared by the pull view and by acking, so no path can ack — and thereby silently swallow — a message it could not see.
+- **Per-identity delivery view.** A message is deliverable to X when it passes the shared `visibilityExpr`, sits above X's `peer_read_watermarks` position in that scope, and has no ack row from X (the ack row is the idempotency guard; the watermark is the delivery frontier). Broadcast visibility = `to = '*' AND from != X`; room visibility = membership with `start_seq < seq`. All rules live in one `visibilityExpr` shared by the pull view and by acking, so no path can ack — and thereby silently swallow — a message it could not see.
 - **Reserved identities.** `operator`, `system` and the `grp_` prefix cannot be registered or bound to an invite (§7.2). Without that rule an invited assistant could claim the operator's id and speak as the human inside group chat.
 - **Global ordering.** The server assigns a monotonically increasing `seq` (SQLite `AUTOINCREMENT` on the messages table) at insert time. Clients sync with `since=<seq>` and never depend on wall clocks. Per-thread ordering is `seq` order; cross-thread ordering is best-effort by `seq`.
 
@@ -186,7 +186,7 @@ SQLite (WAL mode) behind a repository interface so Postgres is a drop-in later. 
 
 ### 4.7 Retention (`internal/retention`)
 
-- Background job: messages whose thread is fully acked and older than `message_ttl` (default 30 days) are moved to an archive table (or exported as JSONL and deleted).
+- Background job: a thread with no traffic inside `message_ttl` (default 30 days) is considered inactive; its fully-acked messages older than the TTL are moved to an archive table (or exported as JSONL and deleted). A thread with any newer message is pinned so an active conversation does not lose its earlier turns.
 - Peers not seen in `peer_prune_after` (default 7 days) are pruned from the peers table (tokens remain until revoked).
 - Audit log retained longer (default 90 days), exportable from the UI.
 - Agent runtime logs are retained for `agent_log_retention_days` (default 30 days)
@@ -660,10 +660,14 @@ Admin (session cookie, separate from agent tokens):
 
 ### 5.4 Ordering, dedup, and sync
 
-- **Global seq.** Every message gets a server-side autoincrement `seq`. Clients persist `last_seen_seq` locally and poll with `since=<last_seen_seq>`. Clock skew between assistants is irrelevant.
+- **Global seq.** Every message gets a server-side autoincrement `seq`. Clock skew between assistants is irrelevant.
+- **Scope.** Every message carries a `scope`: `room:<grp>` when its root (or recipient) is a room alias, otherwise `thread:<root>` when it has a root id, otherwise `dm:<a>|<b>`. Control-plane events (`status`, `prompt_update`, `client_update`, `resources_update`) and informational `system` notices have **no scope**: they can neither pin a watermark nor block a queue.
+- **Scope-head delivery (FIFO by construction).** A receiver that omits `since` gets the scope-head view: for each `(peer, scope)` only the oldest deliverable message above the peer's read watermark, with ack rows used as an idempotency guard. The next one becomes visible when that one is acked. Ordering is therefore a property of the delivery query; receivers that still send `since` retain their local cursor for compatibility with older clients.
+- **Contiguous read watermark.** `peer_read_watermarks(scope, peer_id, seq)` records how far a peer has processed the **deliverable** sequence of one scope; read counts derive from the same frontier. A visible pending-approval message is a hole and **pins** the watermark until a human resolves it; messages outside the peer's visibility (join boundaries, private replies to someone else) do not enter that peer's sequence. Rejected messages are terminal and are skipped. `acks` rows remain an audit trail and idempotency record; they no longer define the delivery frontier or the console count.
+- **Read counts are computed server-side.** `/admin/messages` returns `read` and `total` per message, derived from watermarks and the same eligibility rule as delivery (`start_seq < seq`, sender excluded). The console renders them; it must not re-derive them from ack rows and a member list, which is how two views of one message came to disagree.
 - **Idempotent send.** `UNIQUE(sender, id)`: resending the same task body is a safe retry that returns `409` without duplicating.
-- **At-least-once delivery, ack-based completion.** A message remains visible until the recipient acks. A crashed assistant that restarts re-receives its unacked messages — handlers must therefore be idempotent or check for prior results before re-executing expensive work.
-- **No strict cross-client ordering guarantee** beyond seq; assistants that need causality use `in_reply_to` / `root_id`.
+- **At-least-once delivery, ack-based completion.** A message remains visible until the recipient acks. A crashed assistant that restarts re-receives its unacked messages — handlers must therefore be idempotent or check for prior results before re-executing expensive work. The receiver emits a wake line **before** advancing its transport cursor, and the wake scripts advance the spool offset only after the wake decision resolves: silent loss is the failure mode, never silent skipping.
+- **History is background, never replay.** A wake may include a labelled read-only section with the newest messages of its scope, stripped of `kind` (who/when/what only). It is explicitly non-actionable: it produces no ack and no watermark movement. The §6.8 refusal to replay history to late joiners stands — what is forbidden is re-delivering an old instruction as if it were new, not letting an assistant see context.
 
 ---
 
@@ -1167,8 +1171,9 @@ path; no agent-facing endpoint was added.
 - `GET /admin/inbox`, `POST /admin/inbox/read` — replies addressed to the operator, newest first,
   with an unread count. The watermark lives in `settings` and only moves forward (a stale tab cannot
   unread messages); `GET /admin/stats` exposes `inbox_unread` for the nav badge.
-- `GET /admin/messages?thread=grp_<slug>` gains `acked_by` per message plus the member list, so the
-  console can show "已读 2/3" without N queries.
+- `GET /admin/messages?thread=grp_<slug>` returns server-computed `read` / `total` per message
+  (watermark + message-level audience) and `acked_by` for the popover; the console must not
+  re-derive the count from ack rows and the member list.
 - The 指挥台 is the SPA route `/#command` (`/admin/command` 302-redirects to it): an Alpine
   component (`ui/js/command.js`) over the JSON APIs above — inbox, single-recipient composer, room
   list, and a room pane with timeline, per-message read receipts, member management and composer.
@@ -1237,10 +1242,12 @@ The UI is intentionally boring: a tiny embedded SPA (Alpine + plain ESM modules 
 两个容易做错的细节：
 
 - **后来入群的成员不参与**：成员只有 `start_seq` 之后的消息才看得见，把他们算作"未读"是错的。
-  控制台按 `start_seq <= seq` 过滤，并单独提示"n 名成员在该消息之后入群，未计入"。
+  服务端按 `start_seq < seq` 过滤，并单独提示"n 名成员在该消息之后入群，未计入"。
 - **发送者不计**：自己的消息天然已读，否则每条自己发的消息都会凭空多出一个未读者。
 
-数据全部来自既有接口（线程的 `acked_by`、房间成员的 `start_seq`），没有新增字段。
+`GET /admin/messages` 返回的 `read` / `total` 是权威值：`read` 来自 `peer_read_watermarks`，
+`total` 按消息级 audience（广播、房间成员、私聊收件人）计算；控制台只渲染，
+不得再按 `acked_by` + 成员列表重新推导。`acked_by` 仅用于详情弹层展示具体成员。
 
 ### 10.4 Web self-update
 
@@ -1308,7 +1315,7 @@ The console JS that follows a job is verified by `make test-ui-js`
 
 ### 10.2 Retention & storage hygiene
 
-- Fully-acked messages older than 30 days → archive (JSONL export) and delete.
+- Inactive threads (newest message older than 30 days) → fully-acked messages older than 30 days are archived (JSONL export) and deleted.
 - Peers unseen for 7 days → pruned from the peers table (their tokens persist until revoked, so a returning assistant can still authenticate and re-register presence).
 - Audit log: 90 days online, exportable.
 - A `VACUUM` runs on schedule; DB size is reported on the UI dashboard.

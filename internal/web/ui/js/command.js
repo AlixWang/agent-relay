@@ -357,6 +357,8 @@ function createCommandState() {
             payload: m.payload,
             time: m.created_at,
             acked_by: m.acked_by || [],
+            read: m.read,
+            total: m.total,
             approval_state: m.approval_state,
           }));
         } else if (this.activeTarget.type === 'peer') {
@@ -373,6 +375,8 @@ function createCommandState() {
             payload: m.payload,
             time: m.created_at,
             acked_by: m.acked_by || [],
+            read: m.read,
+            total: m.total,
             approval_state: m.approval_state,
           }));
           this.markPeerRead(this.activeTarget.id);
@@ -706,21 +710,26 @@ function createCommandState() {
       const acked = new Set(m.acked_by || []);
       return this.ackEligible(m).filter((id) => !acked.has(id));
     },
+    // read/total are computed server-side from the contiguous read watermark.
+    // The browser must not re-derive them: doing so was how the same message
+    // could read "已读 4/5" in the room and "ack: 3" in the thread browser,
+    // and how the number could go down when a member was removed.
+    ackCounts(m) {
+      const total = Number.isFinite(m.total) ? m.total : this.ackEligible(m).length;
+      const read = Number.isFinite(m.read) ? m.read : this.ackReaders(m).length;
+      return { read, total };
+    },
     ackLabel(m) {
-      const total = this.ackEligible(m).length;
-      const read = this.ackReaders(m).length;
+      const { read, total } = this.ackCounts(m);
       if (!total) return '';
-      if (read === total) return '全部已读';
+      if (read >= total) return '全部已读';
       if (read === 0) return '无人已读';
       return '已读 ' + read + '/' + total;
     },
     ackTone(m) {
-      const total = this.ackEligible(m).length;
-      const read = this.ackReaders(m).length;
+      const { read, total } = this.ackCounts(m);
       if (!total) return '';
-      if (read === total) return 'ok';
-      if (read === 0) return 'warn';
-      return 'warn';
+      return read >= total ? 'ok' : 'warn';
     },
 
     // Assistants with unread replies float to the top (stable otherwise), so a
