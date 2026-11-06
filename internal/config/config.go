@@ -68,6 +68,14 @@ type Config struct {
 	OfflineWebhookURL string `toml:"offline_webhook_url"`
 	MaxBodyBytes      int    `toml:"max_body_bytes"`
 
+	// Self-service resource registration (DESIGN §4.12, ADR 0006).
+	ResourceSelfRegistration bool `toml:"resource_self_registration"`
+	ResourcePendingMax       int  `toml:"resource_pending_max_per_peer"`
+	ResourceLiveMax          int  `toml:"resource_live_max_per_peer"`
+	ResourceSubmitPerHour    int  `toml:"resource_submit_per_hour"`
+	ResourcePendingTTLDays   int  `toml:"resource_pending_ttl_days"`
+	ResourceNotifyBatchSecs  int  `toml:"resource_notify_batch_secs"`
+
 	// SSE push (DESIGN §4.4b): outbound-only event stream assistants can
 	// hold instead of short-polling. Zero disables the corresponding knob.
 	StreamKeepaliveSecs int `toml:"stream_keepalive_secs"`
@@ -124,6 +132,12 @@ func Default() *Config {
 		AgentLogRatePerMinute:        60,
 		AgentLogMaxRowsPerPeer:       20000,
 		MaxBodyBytes:                 1 << 20,
+		ResourceSelfRegistration:     true,
+		ResourcePendingMax:           20,
+		ResourceLiveMax:              100,
+		ResourceSubmitPerHour:        10,
+		ResourcePendingTTLDays:       30,
+		ResourceNotifyBatchSecs:      600,
 		StreamKeepaliveSecs:          20,
 		StreamMaxPerPeer:             3,
 		ProfileRefreshDays:           7,
@@ -166,6 +180,9 @@ func Load(path string) (*Config, error) {
 		"peer_prune_after_days": true, "audit_retention_days": true,
 		"agent_log_retention_days": true, "agent_log_rate_per_minute": true, "agent_log_max_rows_per_peer": true,
 		"offline_webhook_url": true, "max_body_bytes": true,
+		"resource_self_registration": true, "resource_pending_max_per_peer": true,
+		"resource_live_max_per_peer": true, "resource_submit_per_hour": true,
+		"resource_pending_ttl_days": true, "resource_notify_batch_secs": true,
 		"stream_keepalive_secs": true, "stream_max_per_peer": true,
 		"profile_refresh_days": true,
 		"max_room_members":     true, "room_fuse_max_messages": true,
@@ -224,6 +241,21 @@ func (c *Config) Validate() error {
 	}
 	if c.AgentLogMaxRowsPerPeer < 0 {
 		return fmt.Errorf("agent_log_max_rows_per_peer must be >= 0")
+	}
+	if c.ResourcePendingMax < 1 {
+		return fmt.Errorf("resource_pending_max_per_peer must be >= 1")
+	}
+	if c.ResourceLiveMax < 1 {
+		return fmt.Errorf("resource_live_max_per_peer must be >= 1")
+	}
+	if c.ResourceSubmitPerHour < 1 {
+		return fmt.Errorf("resource_submit_per_hour must be >= 1")
+	}
+	if c.ResourcePendingTTLDays < 0 {
+		return fmt.Errorf("resource_pending_ttl_days must be >= 0")
+	}
+	if c.ResourceNotifyBatchSecs < 0 {
+		return fmt.Errorf("resource_notify_batch_secs must be >= 0")
 	}
 	if c.MaxOpenPermissions < 0 {
 		return fmt.Errorf("max_open_permissions must be >= 0")

@@ -574,3 +574,22 @@ func TestResourceSyncDocumented(t *testing.T) {
 		}
 	}
 }
+
+// Self-service registration contract (ADR 0006 / prompt v19): every type must
+// teach the assistant to submit resources explicitly, keep secrets out of chat
+// and poll its own submission status.
+func TestResourceReportDocumented(t *testing.T) {
+	for _, typ := range Types() {
+		for _, reconf := range []bool{false, true} {
+			out := render(t, typ, Data{InviteCode: "inv_test", IsReconfigure: reconf})
+			for _, needle := range []string{
+				"资源上报", "/resources/submissions", "/resources/submissions/skill",
+				"/resources/submissions/mine", "${secret:NAME}", "approved_name", "review_note",
+			} {
+				if !strings.Contains(out, needle) {
+					t.Fatalf("%s (reconfigure=%v): resource report section missing %q", typ, reconf, needle)
+				}
+			}
+		}
+	}
+}

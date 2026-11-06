@@ -62,6 +62,9 @@ type Server struct {
 
 	adminHash []byte
 	mu        sync.Mutex
+
+	resourceNotifyMu sync.Mutex
+	resourceNotifyAt map[string]int64
 	// Update jobs live on disk (update-jobs/), not here: the helper
 	// restarts this process mid-job. See internal/gateway/update.go.
 
@@ -73,8 +76,9 @@ func New(cfg *config.Config, st store.Store, au *auth.Service, q *queue.Service,
 	return &Server{
 		cfg: cfg, st: st, auth: au, queue: q,
 		presence: p, verify: v,
-		agentLogs:  agentlog.New(st, cfg.AgentLogRatePerMinute, cfg.AgentLogMaxRowsPerPeer),
-		serverAddr: serverAddr,
+		agentLogs:        agentlog.New(st, cfg.AgentLogRatePerMinute, cfg.AgentLogMaxRowsPerPeer),
+		serverAddr:       serverAddr,
+		resourceNotifyAt: map[string]int64{},
 	}
 }
 
@@ -150,6 +154,14 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /resources/secrets/{name}", s.handleResourceSecret)
 	mux.HandleFunc("GET /resources/mcp/{name}", s.handleResourceMCP)
 	mux.HandleFunc("GET /resources/skills/{name}", s.handleResourceSkill)
+	// Self-service registration (ADR 0006): staged submissions, never direct
+	// writes to the live hub.
+	mux.HandleFunc("POST /resources/submissions", s.handleResourceSubmit)
+	mux.HandleFunc("POST /resources/submissions/skill", s.handleResourceSubmitSkill)
+	mux.HandleFunc("GET /resources/submissions/mine", s.handleResourceSubmissionsMine)
+	mux.HandleFunc("DELETE /resources/submissions/{id}", s.handleResourceSubmissionWithdraw)
+	mux.HandleFunc("POST /resources/takedowns", s.handleResourceTakedownRequest)
+	mux.HandleFunc("GET /resources/takedowns/mine", s.handleResourceTakedownsMine)
 
 	mux.HandleFunc("POST /admin/login", s.handleAdminLogin)
 	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)
@@ -188,6 +200,16 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("DELETE /admin/resources/{kind}/{name}", s.requireAdmin(s.handleAdminResourceDelete))
 	mux.HandleFunc("POST /admin/resources/{kind}/{name}/grants", s.requireAdmin(s.handleAdminResourceGrant))
 	mux.HandleFunc("DELETE /admin/resources/{kind}/{name}/grants/{peer}", s.requireAdmin(s.handleAdminResourceRevoke))
+	mux.HandleFunc("GET /admin/resources/skill/{name}/archive", s.requireAdmin(s.handleAdminResourceSkillArchive))
+	mux.HandleFunc("GET /admin/resource-submissions", s.requireAdmin(s.handleAdminResourceSubmissions))
+	mux.HandleFunc("GET /admin/resource-submissions/{id}", s.requireAdmin(s.handleAdminResourceSubmissionGet))
+	mux.HandleFunc("GET /admin/resource-submissions/{id}/archive", s.requireAdmin(s.handleAdminResourceSubmissionArchive))
+	mux.HandleFunc("POST /admin/resource-submissions/{id}/approve", s.requireAdmin(s.handleAdminResourceSubmissionApprove))
+	mux.HandleFunc("POST /admin/resource-submissions/{id}/reject", s.requireAdmin(s.handleAdminResourceSubmissionReject))
+	mux.HandleFunc("POST /admin/resource-submissions/bulk", s.requireAdmin(s.handleAdminResourceSubmissionsBulk))
+	mux.HandleFunc("GET /admin/resource-takedowns", s.requireAdmin(s.handleAdminResourceTakedowns))
+	mux.HandleFunc("POST /admin/resource-takedowns/{id}/approve", s.requireAdmin(s.handleAdminResourceTakedownApprove))
+	mux.HandleFunc("POST /admin/resource-takedowns/{id}/reject", s.requireAdmin(s.handleAdminResourceTakedownReject))
 	mux.HandleFunc("GET /admin/muse/accounts", s.requireAdmin(s.handleAdminMuseList))
 	mux.HandleFunc("POST /admin/muse/accounts", s.requireAdmin(s.handleAdminMuseCreate))
 	mux.HandleFunc("PATCH /admin/muse/accounts/{id}", s.requireAdmin(s.handleAdminMusePatch))
@@ -893,6 +915,7 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 	for _, v := range views {
 		v.AdminNote = ""
 		v.ResourcesRev, v.ResourcesUpdatedAt = "", 0
+		v.ResourceSubmitEnabled = false
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "peers": views})
 }
@@ -1159,7 +1182,8 @@ func (s *Server) liveTransports() map[string]bool {
 func (s *Server) handleAdminDeletePeer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	now := time.Now().Unix()
-	n, err := s.st.DeletePeer(id, now)
+	deleteResources := r.URL.Query().Get("delete_resources") == "1"
+	n, err := s.st.DeletePeerWithResourcePolicy(id, now, deleteResources)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown peer") {
 			writeErr(w, 404, "unknown peer")
@@ -1169,17 +1193,18 @@ func (s *Server) handleAdminDeletePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.st.AppendAudit("admin", "peer.deleted",
-		fmt.Sprintf("peer=%s tokens_revoked=%d", id, n), now)
+		fmt.Sprintf("peer=%s tokens_revoked=%d delete_resources=%t", id, n, deleteResources), now)
 	writeJSON(w, 200, map[string]any{"ok": true, "tokens_revoked": n})
 }
 
 func (s *Server) handleAdminPatchPeer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req struct {
-		DisplayName string  `json:"display_name"`
-		Status      string  `json:"status"`
-		Profile     string  `json:"profile"`
-		AdminNote   *string `json:"admin_note"`
+		DisplayName           string  `json:"display_name"`
+		Status                string  `json:"status"`
+		Profile               string  `json:"profile"`
+		AdminNote             *string `json:"admin_note"`
+		ResourceSubmitEnabled *bool   `json:"resource_submit_enabled"`
 	}
 	if !s.readJSON(w, r, &req) {
 		return
@@ -1211,6 +1236,14 @@ func (s *Server) handleAdminPatchPeer(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, "update failed")
 			return
 		}
+	}
+	if req.ResourceSubmitEnabled != nil {
+		if err := s.st.SetPeerResourceSubmitEnabled(id, *req.ResourceSubmitEnabled); err != nil {
+			writeErr(w, 500, "update failed")
+			return
+		}
+		_ = s.st.AppendAudit("admin", "peer.resource_submit",
+			fmt.Sprintf("peer=%s enabled=%t", id, *req.ResourceSubmitEnabled), time.Now().Unix())
 	}
 	if req.Status != "" {
 		switch req.Status {
@@ -1680,6 +1713,12 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		body["tokens_active"] = c.TokensActive
 		body["audit_total"] = c.AuditTotal
 	}
+	if s.resources != nil {
+		if subs, tds, err := s.resources.PendingCounts(); err == nil {
+			body["resource_submissions_pending"] = subs
+			body["resource_takedowns_pending"] = tds
+		}
+	}
 	if s.work != nil {
 		body["work_ready"] = s.work.Ready()
 		if c, err := s.work.Counts(); err == nil {
@@ -1735,6 +1774,14 @@ func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 			"fuse_max_messages": s.cfg.FuseMaxMessages,
 			"fuse_max_age_secs": s.cfg.FuseMaxAgeSecs,
 			"rate_per_minute":   s.cfg.RatePerMinute,
+		},
+		"resources": map[string]any{
+			"self_registration":    s.cfg.ResourceSelfRegistration,
+			"pending_max_per_peer": s.cfg.ResourcePendingMax,
+			"live_max_per_peer":    s.cfg.ResourceLiveMax,
+			"submit_per_hour":      s.cfg.ResourceSubmitPerHour,
+			"pending_ttl_days":     s.cfg.ResourcePendingTTLDays,
+			"notify_batch_secs":    s.cfg.ResourceNotifyBatchSecs,
 		},
 		"presence": map[string]any{
 			"online_timeout_secs": s.cfg.OnlineTimeoutSecs,

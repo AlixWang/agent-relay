@@ -129,7 +129,7 @@
       <a href="#command" data-route="command" class="sb-link"><svg class="icon"><use href="#i-send"/></svg><span>指挥台</span><em id="navInbox" class="sb-count warn" hidden></em></a>
       <div class="sb-group">接入</div>
       <a href="#prompts" data-route="prompts" class="sb-link"><svg class="icon"><use href="#i-user-plus"/></svg><span>邀请 &amp; Prompt</span></a>
-      <a href="#resources" data-route="resources" class="sb-link"><svg class="icon"><use href="#i-package"/></svg><span>资源中心</span></a>
+      <a href="#resources" data-route="resources" class="sb-link"><svg class="icon"><use href="#i-package"/></svg><span>资源中心</span><em id="navResource" class="sb-count warn" hidden></em></a>
       <div class="sb-group">安全</div>
       <a href="#audit" data-route="audit" class="sb-link"><svg class="icon"><use href="#i-scroll"/></svg><span>审计日志</span></a>
       <a href="#logs" data-route="logs" class="sb-link"><svg class="icon"><use href="#i-terminal"/></svg><span>Agent 日志</span><em id="navLogs" class="sb-count warn" hidden></em></a>
@@ -830,25 +830,35 @@
       <section id="page-resources" class="page" hidden>
         <div class="panel">
           <div class="panel-bar">
+            <div class="seg" id="resViewSeg" role="tablist">
+              <button data-v="live" class="on">正式资源</button>
+              <button data-v="pending">待审核 <span class="badge xs" id="resPendingCount" hidden></span></button>
+              <button data-v="takedowns">下架申请 <span class="badge xs" id="resTakedownCount" hidden></span></button>
+            </div>
+            <div class="bar-right">
+              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="resQ" type="search" placeholder="搜索名称 / 描述"></label>
+              <button class="btn btn-outline btn-sm" id="resBulkApprove" hidden>批量批准</button>
+              <button class="btn btn-outline btn-sm" id="resBulkReject" hidden>批量拒绝</button>
+              <button class="btn btn-outline btn-sm" id="resRefresh"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
+              <button class="btn btn-primary btn-sm" id="resCreate"><svg class="icon"><use href="#i-plus"/></svg>新建</button>
+            </div>
+          </div>
+          <div class="panel-bar">
             <div class="seg" id="resSeg" role="tablist">
               <button data-v="secret" class="on">密钥</button>
               <button data-v="mcp">MCP</button>
               <button data-v="skill">Skill</button>
               <button data-v="prompt">Prompt</button>
             </div>
-            <div class="bar-right">
-              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="resQ" type="search" placeholder="搜索名称 / 描述"></label>
-              <button class="btn btn-outline btn-sm" id="resRefresh"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
-              <button class="btn btn-primary btn-sm" id="resCreate"><svg class="icon"><use href="#i-plus"/></svg>新建</button>
-            </div>
+            <div class="bar-right"><span class="muted xs" id="resViewNote"></span></div>
           </div>
           <div class="table-wrap">
             <table class="table" id="resTable">
-              <thead><tr><th>名称</th><th>描述</th><th>授权</th><th>更新</th><th class="th-right">操作</th></tr></thead>
+              <thead><tr><th>名称</th><th>描述</th><th>授权</th><th>来源</th><th>更新</th><th class="th-right">操作</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
-          <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg><span>密钥只写不读：登记后控制台不再显示明文，只能覆盖。MCP 配置用 <code>${secret:NAME}</code> 引用密钥，助手拉取解析后的配置时按密钥拉取同样审计。</span></p>
+          <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg><span>密钥只写不读：登记后控制台不再显示明文，只能覆盖。MCP 配置用 <code>${secret:NAME}</code> 引用密钥，助手拉取解析后的配置时按密钥拉取同样审计。助手自注册的资源进入「待审核」，批准后才进入正式目录并可授权。</span></p>
         </div>
       </section>
 
@@ -1035,6 +1045,41 @@
     <div id="grantList" class="grant-list"></div>
     <div class="modal-foot">
       <button type="button" class="btn btn-ghost" data-close>关闭</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Resource submission review ============ -->
+<dialog id="resReviewDlg" class="modal" aria-labelledby="resReviewTitle">
+  <form method="dialog" id="resReviewForm">
+    <div class="modal-head">
+      <svg class="icon" style="color: var(--muted)"><use href="#i-package"/></svg>
+      <div><h2 id="resReviewTitle">审核资源提交</h2><p id="resReviewMeta" class="muted xs"></p></div>
+    </div>
+    <div id="resReviewBody"></div>
+    <label class="field" id="resReviewNameField">批准后的名称<input id="resReviewName" maxlength="64" autocomplete="off" spellcheck="false"></label>
+    <label class="field">描述<input id="resReviewDesc" maxlength="500" autocomplete="off"></label>
+    <label class="switch" id="resReviewSkillAckRow" hidden><input type="checkbox" id="resReviewSkillAck"><span></span>我已查看该 skill 的文件清单与 SKILL.md</label>
+    <p id="resReviewErr" class="alert alert-bad" hidden></p>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <button type="button" class="btn btn-danger" id="resReviewReject">拒绝</button>
+      <button type="button" class="btn btn-primary" id="resReviewApprove">批准</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Resource reject note ============ -->
+<dialog id="resRejectDlg" class="modal sm" aria-labelledby="resRejectTitle">
+  <form method="dialog">
+    <div class="modal-head">
+      <svg class="icon dlg-ic bad"><use href="#i-alert"/></svg>
+      <div><h2 id="resRejectTitle">拒绝提交</h2><p class="muted xs">来源助手会看到这条 note，可修改后重新提交。</p></div>
+    </div>
+    <label class="field">拒绝原因<textarea id="resRejectNote" rows="4" placeholder="例如：SKILL.md 名称与已有资源冲突"></textarea></label>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <button type="button" class="btn btn-danger" id="resRejectOk">确认拒绝</button>
     </div>
   </form>
 </dialog>

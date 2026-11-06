@@ -215,3 +215,52 @@ func parseSkillFrontmatter(b []byte) (name, description string, err error) {
 
 // ValidSkill reports whether b is a well-formed skill archive.
 func ValidSkill(b []byte) bool { _, err := ParseSkill(b); return err == nil }
+
+// SkillInspection is the admin-review view of a skill archive: file listing,
+// SKILL.md text and aggregate size. It never writes anything to disk and never
+// executes archive content.
+type SkillInspection struct {
+	Files      []string `json:"files"`
+	FilesCount int      `json:"files_count"`
+	Size       int      `json:"size"`
+	SkillMD    string   `json:"skill_md"`
+}
+
+// InspectSkill validates the archive exactly like ParseSkill and then returns
+// its file list plus the SKILL.md text for the review UI.
+func InspectSkill(raw []byte) (*SkillInspection, error) {
+	meta, err := ParseSkill(raw)
+	if err != nil {
+		return nil, err
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("%w: not a gzip archive: %v", ErrInvalid, err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	insp := &SkillInspection{Files: []string{}, Size: meta.Size}
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: read archive: %v", ErrInvalid, err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		clean := path.Clean(hdr.Name)
+		insp.Files = append(insp.Files, clean)
+		if path.Base(clean) == frontmatterName && strings.Count(clean, "/") <= 1 {
+			data, err := io.ReadAll(io.LimitReader(tr, int64(maxSkillBytes)+1))
+			if err != nil {
+				return nil, fmt.Errorf("%w: read %s: %v", ErrInvalid, clean, err)
+			}
+			insp.SkillMD = string(data)
+		}
+	}
+	insp.FilesCount = len(insp.Files)
+	return insp, nil
+}

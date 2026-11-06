@@ -54,6 +54,9 @@ type PeerView struct {
 	ResourcesRev       string `json:"resources_rev,omitempty"`
 	ResourcesUpdatedAt int64  `json:"resources_updated_at,omitempty"`
 	ResourcesPending   bool   `json:"resources_pending,omitempty"`
+	// ResourceSubmitEnabled is the operator-controlled per-peer switch for
+	// self-service resource registration (ADR 0006). Admin-only.
+	ResourceSubmitEnabled bool `json:"resource_submit_enabled,omitempty"`
 	// Transport (§4.4b): how the peer currently receives messages.
 	// "sse" = holding a live /messages/stream; "poll" = short-polling
 	// (or offline/unknown). Computed from the stream hub, not stored.
@@ -191,6 +194,7 @@ func (s *Service) List(now int64, live map[string]bool) ([]*PeerView, error) {
 			MemoryNote: p.MemoryNote, MemoryVersion: p.MemoryVersion, MemoryReconciledAt: p.MemoryReconciledAt,
 			AdminNote:    p.AdminNote,
 			ResourcesRev: p.ResourcesRev, ResourcesUpdatedAt: p.ResourcesUpdatedAt,
+			ResourceSubmitEnabled: p.ResourceSubmitEnabled,
 		}
 		var caps any
 		if err := json.Unmarshal([]byte(orEmptyJSON(p.Capabilities)), &caps); err == nil {

@@ -117,6 +117,14 @@ func main() {
 		log.Printf("WARN: resource hub disabled: %v", err)
 	} else {
 		resSvc = svc
+		resSvc.SetSubmissionPolicy(resources.SubmissionPolicy{
+			Enabled:         cfg.ResourceSelfRegistration,
+			PendingMax:      cfg.ResourcePendingMax,
+			LiveMax:         cfg.ResourceLiveMax,
+			PerHour:         cfg.ResourceSubmitPerHour,
+			PendingTTLDays:  cfg.ResourcePendingTTLDays,
+			NotifyBatchSecs: cfg.ResourceNotifyBatchSecs,
+		})
 		redactor := svc.Redactor()
 		q.SetRedactor(redactor.Redact, func(sender string, names []string, now int64) {
 			_ = st.AppendAudit(sender, "secret.redacted",
@@ -211,7 +219,7 @@ func main() {
 	fx.Start(ctx)
 	go presenceLoop(ctx, p)
 	go verifyLoop(ctx, v)
-	go retentionLoop(ctx, st, cfg)
+	go retentionLoop(ctx, st, cfg, resSvc)
 	if museSvc != nil && cfg.MuseKeepaliveSecs > 0 {
 		go museLoop(ctx, museSvc, cfg)
 	}
@@ -332,7 +340,7 @@ func museLoop(ctx context.Context, m *muse.Service, cfg *config.Config) {
 	}
 }
 
-func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config) {
+func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resSvc *resources.Service) {
 	r := retention.New(st, retention.Policy{
 		MessageTTLDays:         cfg.MessageTTLDays,
 		PeerPruneAfterDays:     cfg.PeerPruneAfterDays,
@@ -354,6 +362,13 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config) {
 		} else {
 			log.Printf("retention: %+v", stats)
 		}
+		if resSvc != nil {
+			if n, err := resSvc.ExpirePendingSubmissions(); err != nil {
+				log.Printf("resources: expire submissions: %v", err)
+			} else if n > 0 {
+				log.Printf("resources: expired %d pending submissions", n)
+			}
+		}
 		_ = st.Vacuum()
 	}
 	for {
@@ -365,6 +380,13 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config) {
 				log.Printf("retention: %v", err)
 			} else {
 				log.Printf("retention: %+v", stats)
+			}
+			if resSvc != nil {
+				if n, err := resSvc.ExpirePendingSubmissions(); err != nil {
+					log.Printf("resources: expire submissions: %v", err)
+				} else if n > 0 {
+					log.Printf("resources: expired %d pending submissions", n)
+				}
 			}
 			_ = st.Vacuum()
 		}

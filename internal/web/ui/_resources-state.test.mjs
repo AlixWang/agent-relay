@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const mod = await import(pathToFileURL(path.join(here, 'js', 'resources.js')).href);
-const { resURL, grantURL, grantSummary, grantRows, filterResources, NAME_RE, ALL_PEERS, RES_KINDS, kindLabel, secretRefsIn, buildPutBody, MCP_EXAMPLE, checkSkillFile, humanSize, MAX_SKILL_UPLOAD } = mod;
+const { resURL, grantURL, grantSummary, grantRows, filterResources, NAME_RE, ALL_PEERS, RES_KINDS, kindLabel, secretRefsIn, buildPutBody, MCP_EXAMPLE, checkSkillFile, humanSize, MAX_SKILL_UPLOAD, RES_VIEWS, submissionStatusLabel, canBulkReview, filterSubmissions, filterTakedowns, ownerLabel } = mod;
 
 const assert = (cond, msg) => {
   if (!cond) {
@@ -68,5 +68,14 @@ assert(checkSkillFile({ name: 'Code-Review.TGZ', size: 10 }) === '', 'tgz ok, ca
 assert(checkSkillFile({ name: 'x.tar.gz', size: 10 }) === '', 'tar.gz ok');
 assert(/4 MiB/.test(checkSkillFile({ name: 'x.tar.gz', size: MAX_SKILL_UPLOAD + 1 })), 'oversized rejected');
 assert(humanSize(512) === '512 B' && humanSize(2048) === '2 KiB' && humanSize(3 << 20) === '3.0 MiB', 'humanSize');
+
+assert(RES_VIEWS.map((v) => v.view).join() === 'live,pending,takedowns', 'three resource views');
+assert(submissionStatusLabel('pending') === '待审核' && submissionStatusLabel('approved') === '已批准', 'submission status labels');
+assert(canBulkReview({ kind: 'secret', status: 'pending' }), 'secret bulkable');
+assert(!canBulkReview({ kind: 'skill', status: 'pending' }), 'skill not bulkable');
+assert(!canBulkReview({ kind: 'prompt', status: 'approved' }), 'only pending bulkable');
+assert(ownerLabel({ owner_peer: 'alice' }) === 'alice' && ownerLabel({}) === 'operator', 'owner label');
+assert(filterSubmissions([{ name: 'MCP', description: 'x', submitted_by: 'alice' }], 'alice').length === 1, 'filter submissions by peer');
+assert(filterTakedowns([{ name: 'S', reason: 'old', requested_by: 'bob' }], 'old').length === 1, 'filter takedowns by reason');
 
 console.log('ok resources-state');

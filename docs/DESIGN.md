@@ -302,6 +302,21 @@ prompt snippets configured by hand on each. The hub lets the operator
 - **Grants:** default deny. `resource_grants` holds per-peer grants plus the
   wildcard `*` (every peer, including ones registered later). No exclusions.
   Deleting or pruning a peer drops its grants in the same transaction.
+- **Self-registration (ADR 0006):** active peers may submit their own
+  `secret` / `mcp` / `skill` / `prompt` resources through
+  `POST /resources/submissions` (JSON) and `POST /resources/submissions/skill`
+  (multipart). Submissions are staged in `resource_submissions` as `pending`;
+  they do not affect `manifest_rev` until an operator approves them in
+  `/admin/resource-submissions`. `resources.owner_peer` records the source
+  peer (`""` = operator-owned), names remain globally unique, and registration
+  never creates a grant. The review gate is mandatory: peer-authored MCP
+  configs and skills are executable content on other assistants. Approval may
+  rename non-skill resources; skill names come from `SKILL.md` and conflicts
+  are rejected. Secret submissions are encrypted with the same
+  `data_dir/secrets.key`; no admin response ever returns secret plaintext.
+  Rejected/withdrawn/expired submissions wipe their content. Defaults: 20
+  pending submissions and 100 live owned resources per peer, 10 submissions
+  per hour, 30-day pending TTL, plus global/per-peer switches.
 - **Distribution:** `GET /resources/current` returns the caller's manifest:
   secrets/skills by `fetch_url`, MCP/prompt inline with `${secret:}` left
   unresolved, plus `manifest_rev` = SHA-256 over sorted `kind:name:hash` lines
@@ -545,11 +560,32 @@ CREATE TABLE resource_revisions (
 );
 CREATE TABLE resources (                 -- live pointer per (kind,name)
     kind TEXT NOT NULL, name TEXT NOT NULL, revision_id TEXT NOT NULL,
-    updated_at INTEGER NOT NULL, PRIMARY KEY (kind, name)
+    updated_at INTEGER NOT NULL, owner_peer TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (kind, name)
 );
 CREATE TABLE resource_grants (           -- peer_id '*' = every peer
     kind TEXT NOT NULL, name TEXT NOT NULL, peer_id TEXT NOT NULL,
     granted_at INTEGER NOT NULL, PRIMARY KEY (kind, name, peer_id)
+);
+-- Self-service registration (ADR 0006): staging only; approval promotes a
+-- submission into resource_revisions/resources. content is AES-GCM ciphertext
+-- for kind='secret' and is wiped on reject/withdraw/expire.
+CREATE TABLE resource_submissions (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    content BLOB NOT NULL, content_hash TEXT NOT NULL,
+    submitted_by TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+    review_note TEXT NOT NULL DEFAULT '', reviewed_by TEXT NOT NULL DEFAULT '',
+    reviewed_at INTEGER NOT NULL DEFAULT 0, approved_name TEXT NOT NULL DEFAULT '',
+    revision_id TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE resource_takedowns (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+    requested_by TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending', review_note TEXT NOT NULL DEFAULT '',
+    reviewed_by TEXT NOT NULL DEFAULT '', reviewed_at INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 -- peers.resources_rev / resources_updated_at: the manifest digest last applied.
 
@@ -595,6 +631,10 @@ All endpoints require `Authorization: Bearer <token>` unless noted.
 | `GET /resources/current` | Resource hub manifest (§4.12, ADR 0004) | Only resources granted to the caller (directly or via `*`); `manifest_rev` digest. Heartbeat carries `resources_rev` both ways. |
 | `GET /resources/secrets/{name}` | Fetch one secret (ADR 0005) | `{name, value}`; 404 when missing or not granted; `no-store`; audited as `secret.fetch`. |
 | `GET /resources/skills/{name}` | Download a skill archive (ADR 0005) | The uploaded tar.gz byte-for-byte; 404 when missing or not granted; `no-store`. |
+| `POST /resources/submissions` | Submit a secret/mcp/prompt (ADR 0006) | JSON `{kind,name,description,value|content}`; creates a pending submission, not a live resource. |
+| `POST /resources/submissions/skill` | Submit a skill archive (ADR 0006) | Multipart `archive` + optional `description`; name from `SKILL.md`. |
+| `GET /resources/submissions/mine` · `DELETE /resources/submissions/{id}` | Own submission status/withdraw (ADR 0006) | Never returns content; withdraw only pending. |
+| `POST /resources/takedowns` · `GET /resources/takedowns/mine` | Owner requests a live resource be removed (ADR 0006) | Resource keeps serving until operator approval. |
 | `GET /resources/mcp/{name}` | Fetch a resolved MCP config (ADR 0005) | `{name, config}` with `${secret:}` filled in; 409 + `missing_secrets` when a referenced secret is not granted; `no-store`; one `secret.fetch` row per secret revealed. |
 
 Admin (session cookie, separate from agent tokens):
@@ -611,6 +651,9 @@ Admin (session cookie, separate from agent tokens):
 | `POST /admin/prompts` | Generate an onboarding prompt for a chosen agent type (§9.3). |
 | `GET /admin/resources?kind=` · `GET/PUT/DELETE /admin/resources/{kind}/{name}` | Resource hub (§4.12): list, history, create/overwrite (secret value write-only; empty value keeps it), delete. |
 | `POST /admin/resources/skill` | Upload a skill archive (multipart `archive` + optional `description`); name from `SKILL.md`. |
+| `GET /admin/resource-submissions` · `GET /admin/resource-submissions/{id}` · `POST …/{id}/approve` · `POST …/{id}/reject` · `POST …/bulk` | Review peer submissions (ADR 0006); secret values are never returned. |
+| `GET /admin/resource-submissions/{id}/archive` · `GET /admin/resources/skill/{name}/archive` | Admin-only skill archive download for review (read-only, never executed). |
+| `GET /admin/resource-takedowns` · `POST …/{id}/approve` · `POST …/{id}/reject` | Process owner takedown requests. |
 | `POST /admin/resources/{kind}/{name}/grants` · `DELETE …/grants/{peer}` | Grant to a peer or `*`; revoke (secret revocation answers with a rotate-upstream warning). |
 | `GET/POST /admin/muse/accounts` · `PATCH/DELETE /admin/muse/accounts/:id` | Optional Muse account authorization (§4.9): write-only cookie binding, enable/auto-wake switches, revoke. |
 | `POST /admin/muse/accounts/:id/keepalive` · `/wake` · `POST /admin/muse/keepalive` · `GET /admin/muse/status` | Manual session renewal / VM wake / all-account sweep / loop status. |

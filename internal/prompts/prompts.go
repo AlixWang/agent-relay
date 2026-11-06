@@ -102,7 +102,7 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 18
+const PromptVersion = 19
 
 // RoomAwarePromptVersion is the revision that first documents rooms and the
 // operator identity (§7.8 muse/claw/generic, §6.7 hermes), and that requires the
@@ -205,6 +205,11 @@ var ChangeLog = []ChangeEntry{
 		Version: 18,
 		Summary: "新增「资源同步」一节（muse/claw/generic §7.9，hermes §6.8）：operator 在控制台资源中心登记密钥、MCP、Skill、Prompt 并授权给你；heartbeat 带 resources_rev，摘要变化时接收端写 .resources_rev.staged 并随 resources_update 事件唤醒你。",
 		Actions: "读「资源同步」一节；被 resources_update 唤醒时：GET /resources/current 拉清单 → 密钥存 resources/secrets/<name>（600，不进 memory/消息/日志）、MCP 取 fetch_url 的 .config 写进本机运行时、Skill 下载 tar.gz 解到 resources/skills/<name>/（不以 root 解包、不擅自执行脚本）、Prompt 存 resources/prompts/<name>.md → 删掉清单外的本地资源 → mv .resources_rev.staged .resources_rev 确认。旧版接收端收不到这个事件，按 client_update 换新版接收端即可。",
+	},
+	{
+		Version: 19,
+		Summary: "新增「资源上报」一节（muse/claw/generic §7.10，hermes §6.9）：助手可把本机的 secret / MCP / Skill / Prompt 提交到中继资源中心的待审核区；operator 批准后才进入正式目录，批准不等于授权。",
+		Actions: "读「资源上报」一节；只在用户要求登记/共享资源时逐项确认后调用 POST /resources/submissions（skill 用 multipart /resources/submissions/skill）；MCP 里的 token 先拆成独立 secret 再用 ${secret:NAME} 引用提交；用 GET /resources/submissions/mine 查状态；409 不要覆盖，按 review_note 修正后重提。",
 	},
 }
 

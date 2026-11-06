@@ -24,6 +24,9 @@ type ResourceRevision struct {
 type Resource struct {
 	ResourceRevision
 	UpdatedAt int64
+	// OwnerPeer is "" for operator-owned resources, otherwise the peer that
+	// submitted and owns it (ADR 0006).
+	OwnerPeer string
 }
 
 // ResourceGrant authorizes one peer (or '*' for every peer) to use a resource.
@@ -34,20 +37,21 @@ type ResourceGrant struct {
 	GrantedAt int64
 }
 
-const resourceColumns = `v.id,v.kind,v.name,v.description,v.content,v.content_hash,v.created_at,v.created_by,r.updated_at`
+const resourceColumns = `v.id,v.kind,v.name,v.description,v.content,v.content_hash,v.created_at,v.created_by,r.updated_at,r.owner_peer`
 
 func scanResource(sc rowScanner) (*Resource, error) {
 	var r Resource
 	err := sc.Scan(&r.ID, &r.Kind, &r.Name, &r.Description, &r.Content, &r.ContentHash,
-		&r.CreatedAt, &r.CreatedBy, &r.UpdatedAt)
+		&r.CreatedAt, &r.CreatedBy, &r.UpdatedAt, &r.OwnerPeer)
 	if err != nil {
 		return nil, err
 	}
 	return &r, nil
 }
 
-// PutResource appends a revision and points (kind,name) at it, in one transaction.
-func (s *sqliteStore) PutResource(rev *ResourceRevision) error {
+// PutResource appends a revision and points (kind,name) at it, in one
+// transaction. ownerPeer is "" for operator-owned resources.
+func (s *sqliteStore) PutResource(rev *ResourceRevision, ownerPeer string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -60,9 +64,10 @@ func (s *sqliteStore) PutResource(rev *ResourceRevision) error {
 		rev.CreatedAt, rev.CreatedBy); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO resources(kind,name,revision_id,updated_at) VALUES(?,?,?,?)
-		ON CONFLICT(kind,name) DO UPDATE SET revision_id=excluded.revision_id, updated_at=excluded.updated_at`,
-		rev.Kind, rev.Name, rev.ID, rev.CreatedAt); err != nil {
+	if _, err := tx.Exec(`INSERT INTO resources(kind,name,revision_id,updated_at,owner_peer) VALUES(?,?,?,?,?)
+		ON CONFLICT(kind,name) DO UPDATE SET revision_id=excluded.revision_id, updated_at=excluded.updated_at,
+			owner_peer=excluded.owner_peer`,
+		rev.Kind, rev.Name, rev.ID, rev.CreatedAt, ownerPeer); err != nil {
 		return err
 	}
 	return tx.Commit()

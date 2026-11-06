@@ -74,6 +74,10 @@ reassign + lease 到期回收 + `waiting|ready|failed|dropped`（dropped 终态�
   四个模板加「资源同步」一节，`PromptVersion` 18；成员页显示同步状态
 - [x] **P3b** `skill` 上传/校验/下载（tar.gz，`SKILL.md` frontmatter，≤1 MiB 解压，防路径穿越/链接/gzip 炸弹）
 - [x] **P4** Guard / `POST /logs` 入站密钥明文打码为 `[secret:NAME]`，审计 `secret.redacted`
+- [x] **P5** 助手自助注册（ADR 0006）：active peer 可提交 secret / mcp / skill / prompt
+  到 `resource_submissions` 待审核区；operator 在 `/admin/resource-submissions` 批准/拒绝/改名
+  （skill 逐个预览），批准后进入正式目录；owner 归属、per-peer 配额与开关、pending 过期清理、
+  来源助手下架申请，以及 prompt v19「资源上报」章节
 
 ## P2 polish 状态（本版已含）
 

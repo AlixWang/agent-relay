@@ -228,3 +228,38 @@ seq）。三者合起来就是控制台的已读面板：
 - 之后成员收不到任何消息、`to=grp_<slug>` 一律 400、禁止加人；
 - 历史消息保留：控制台在「已解散」分组（默认折叠）里仍可查看；
 - 幂等：已解散的群再调一次返回 `{ok:true, already:true}`；未知群 404；审计 `room.dissolved`。
+
+## 资源中心（DESIGN §4.12，ADR 0004/0005/0006）
+
+### Agent：读取与同步
+
+- `GET /resources/current` → `{ok, manifest_rev, resources:[…]}`；只返回授权给调用者的资源。
+- `GET /resources/secrets/{name}` → `{ok,name,value}`；未授权与不存在均为 404；`no-store`，写 `secret.fetch` 审计。
+- `GET /resources/mcp/{name}` → `{ok,name,config}`；`${secret:NAME}` 已替换；缺授权 409 + `missing_secrets`。
+- `GET /resources/skills/{name}` → tar.gz 原始字节；`no-store`。
+
+### Agent：自助上报（ADR 0006）
+
+- `POST /resources/submissions` — JSON：
+  - `secret`: `{kind:"secret", name, description, value}`（value 只在此请求体出现）
+  - `mcp`: `{kind:"mcp", name, description, content:<中立格式对象>}`
+  - `prompt`: `{kind:"prompt", name, description, content:"..."}`
+  - 返回 `{ok, submission:{id,kind,name,status:"pending",…}, unchanged:false}`；同名同内容 → `unchanged:true`。
+- `POST /resources/submissions/skill` — multipart：`archive`（tar.gz，≤4 MiB）、可选 `description`；名字取自 `SKILL.md`。
+- `GET /resources/submissions/mine?status=&page=&page_size=` → 本人提交列表（无正文/无 secret 明文）。
+- `DELETE /resources/submissions/{id}` → 撤回本人 pending。
+- `POST /resources/takedowns` — `{kind,name,reason}`，仅 live 资源 owner。
+- `GET /resources/takedowns/mine` → 本人下架申请。
+- 错误：`403` 非 active / 全局或 per-peer 开关关闭；`409` 名称冲突、配额、重复 pending；`429` 每小时提交超限；`413` body 过大。
+
+### Admin：审核（cookie）
+
+- `GET /admin/resource-submissions?status=&kind=&peer=&q=&page=&page_size=` → 列表（secret 永不返回明文；含 pending 计数）。
+- `GET /admin/resource-submissions/{id}` → 详情：mcp/prompt 正文；skill 文件清单 + `SKILL.md` 文本；secret 仅元数据。
+- `GET /admin/resource-submissions/{id}/archive` → 待审 skill tar.gz；`GET /admin/resources/skill/{name}/archive` → 已发布 skill tar.gz。
+- `POST /admin/resource-submissions/{id}/approve` `{name?,description?}`；skill 不接受改名。
+- `POST /admin/resource-submissions/{id}/reject` `{note}`。
+- `POST /admin/resource-submissions/bulk` `{ids:[],action:"approve"|"reject",note?}`；skill 会返回单项错误，必须逐个审核。
+- `GET /admin/resource-takedowns?status=`；`POST /admin/resource-takedowns/{id}/approve|reject`。
+- 资源记录多 `owner_peer`（空 = operator）；`PATCH /admin/peers/{id}` 支持 `resource_submit_enabled`；
+  `DELETE /admin/peers/{id}?delete_resources=1` 决定是否连同其资源删除。

@@ -117,6 +117,12 @@ const museAction = (p) => {
 const logAction = (p) =>
   `<button class="btn-icon" data-act="logs" data-id="${esc(p.id)}" data-tip="查看 Agent 日志" aria-label="查看 Agent 日志">${icon('terminal')}</button>`;
 
+// Per-peer resource submission switch (ADR 0006). Only active peers can
+// submit; the button lets the operator revoke/restore that permission.
+const resourceSubmitAction = (p) => p.status === 'active'
+  ? `<button class="btn-icon ${p.resource_submit_enabled ? '' : 'warn'}" data-act="resource-submit" data-id="${esc(p.id)}" data-enabled="${p.resource_submit_enabled ? '1' : '0'}" data-tip="${p.resource_submit_enabled ? '禁止上报资源' : '允许上报资源'}" aria-label="切换资源上报">${icon('up')}</button>`
+  : '';
+
 const capsBadges = (c) => {
   if (!c || typeof c !== 'object') return '<span class="muted xs">—</span>';
   const keys = Object.keys(c).filter((k) => c[k]);
@@ -281,6 +287,7 @@ export async function refreshPeers() {
         <td class="td-actions">
           <div class="row-btns tight">
             ${museAction(p)}
+            ${resourceSubmitAction(p)}
             ${logAction(p)}
             ${p.status === 'suspended'
               ? `<button class="btn-icon ok" data-act="activate" data-id="${esc(p.id)}" data-tip="激活解封" aria-label="激活解封">${icon('play')}</button>`
@@ -320,18 +327,38 @@ export async function refreshPeers() {
         if (act === 'del') {
           const ok = await confirmAction({
             title: `删除成员 ${id}？`,
-            body: `删除后该成员名下的 Token 将全部撤销，该助手将立即失联。\n消息历史与审计记录将继续保留。`,
+            body: `删除后该成员名下的 Token 将全部撤销，该助手将立即失联。\n它注册的资源默认保留并转归 operator。\n消息历史与审计记录将继续保留。`,
             danger: true,
             okText: '确认删除',
           });
           if (!ok) return;
+          const also = await confirmAction({
+            title: '同时删除它注册的资源？',
+            body: '选择「确认」会删除该成员注册的全部资源并撤销相关授权；选择「取消」则资源保留并转归 operator。',
+            danger: true,
+            okText: '同时删除资源',
+          });
           try {
-            await api('/admin/peers/' + encodeURIComponent(id), { method: 'DELETE' });
+            await api('/admin/peers/' + encodeURIComponent(id) + (also ? '?delete_resources=1' : ''), { method: 'DELETE' });
             toast(`已删除成员 ${id}`, 'ok');
             refreshPeers();
             refreshStats();
           } catch (err) {
             toast('删除失败：' + err.message, 'bad');
+          }
+          return;
+        }
+        if (act === 'resource-submit') {
+          const enabled = btn.dataset.enabled !== '1';
+          try {
+            await api('/admin/peers/' + encodeURIComponent(id), {
+              method: 'PATCH',
+              body: JSON.stringify({ resource_submit_enabled: enabled }),
+            });
+            toast(`${enabled ? '已允许' : '已禁止'} ${id} 上报资源`, 'ok');
+            refreshPeers();
+          } catch (err) {
+            toast('操作失败：' + err.message, 'bad');
           }
           return;
         }

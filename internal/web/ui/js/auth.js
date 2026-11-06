@@ -90,6 +90,13 @@ export async function refreshStats() {
       navLogs.hidden = errors === 0;
     }
 
+    const navResource = $('navResource');
+    if (navResource) {
+      const pendingResources = (s.resource_submissions_pending || 0) + (s.resource_takedowns_pending || 0);
+      navResource.textContent = pendingResources > 0 ? pendingResources : '';
+      navResource.hidden = pendingResources === 0;
+    }
+
     if (s.prompt_version) serverPromptVersion = s.prompt_version;
     if (s.client_version) serverClientVersion = s.client_version;
     if (s.receiver_rev) serverReceiverRev = s.receiver_rev;

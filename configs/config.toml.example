@@ -70,6 +70,16 @@ offline_webhook_url = ""
 # Max request body bytes (default 1 MiB).
 max_body_bytes = 1048576
 
+# Self-service resource registration (ADR 0006). Active assistants may submit
+# secret/mcp/skill/prompt resources into a review queue; an operator must
+# approve before anything enters the live resource hub or is grantable.
+resource_self_registration = true
+resource_pending_max_per_peer = 20
+resource_live_max_per_peer = 100
+resource_submit_per_hour = 10
+resource_pending_ttl_days = 30
+resource_notify_batch_secs = 600
+
 # SSE push (DESIGN §4.4b): outbound-only event stream for assistants that
 # can hold a persistent process (relay-tail.sh). Short polling stays default.
 stream_keepalive_secs = 20

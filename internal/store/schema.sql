@@ -46,6 +46,10 @@ ALTER TABLE peers ADD COLUMN admin_note TEXT DEFAULT '';
 -- last applied, reported in heartbeat as resources_rev. Empty = not reporting.
 ALTER TABLE peers ADD COLUMN resources_rev TEXT DEFAULT '';
 ALTER TABLE peers ADD COLUMN resources_updated_at INTEGER DEFAULT 0;
+-- Self-service resource registration (ADR 0006): per-peer switch for the
+-- submission endpoints. 1 = allowed (subject to the global config switch),
+-- 0 = this peer may not submit resources. Admin-only; never exposed to agents.
+ALTER TABLE peers ADD COLUMN resource_submit_enabled INTEGER NOT NULL DEFAULT 1;
 -- Reported in heartbeat as client_version; empty means "not reporting"
 -- (shell scripts have no version concept). The server nudges via heartbeat
 -- when a newer Release exists, same channel as prompt_update. Advisory
@@ -316,6 +320,9 @@ CREATE TABLE IF NOT EXISTS resources (
     updated_at    INTEGER NOT NULL,
     PRIMARY KEY (kind, name)
 );
+-- Adds owner_peer for both existing and freshly created databases (duplicate
+-- column is ignored by the boot migration helper).
+ALTER TABLE resources ADD COLUMN owner_peer TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS resource_grants (
     kind          TEXT NOT NULL,
     name          TEXT NOT NULL,
@@ -323,6 +330,50 @@ CREATE TABLE IF NOT EXISTS resource_grants (
     granted_at    INTEGER NOT NULL,
     PRIMARY KEY (kind, name, peer_id)
 );
+-- Self-service resource registration (ADR 0006). Submissions are staged here
+-- until an operator approves them; pending rows never appear in a manifest.
+-- content is AES-GCM ciphertext for kind='secret'. Rejected/withdrawn/expired
+-- rows keep only metadata and a hash: the content blob is wiped.
+CREATE TABLE IF NOT EXISTS resource_submissions (
+    id            TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    description   TEXT NOT NULL DEFAULT '',
+    content       BLOB NOT NULL,
+    content_hash  TEXT NOT NULL,
+    submitted_by  TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    review_note   TEXT NOT NULL DEFAULT '',
+    reviewed_by   TEXT NOT NULL DEFAULT '',
+    reviewed_at   INTEGER NOT NULL DEFAULT 0,
+    approved_name TEXT NOT NULL DEFAULT '',
+    revision_id   TEXT NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS resource_takedowns (
+    id            TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    requested_by  TEXT NOT NULL,
+    reason        TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'pending',
+    review_note   TEXT NOT NULL DEFAULT '',
+    reviewed_by   TEXT NOT NULL DEFAULT '',
+    reviewed_at   INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_submissions_pending
+    ON resource_submissions(submitted_by, kind, name) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS idx_resource_submissions_peer
+    ON resource_submissions(submitted_by, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_resource_submissions_status
+    ON resource_submissions(status, kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_resource_takedowns_status
+    ON resource_takedowns(status, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_takedowns_pending
+    ON resource_takedowns(kind, name) WHERE status='pending';
 CREATE INDEX IF NOT EXISTS idx_room_members_peer ON room_members(peer_id, room_id);
 CREATE INDEX IF NOT EXISTS idx_messages_recipient_seq ON messages(recipient, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_root ON messages(root_id, seq);

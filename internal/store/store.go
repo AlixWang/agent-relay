@@ -46,6 +46,9 @@ type Peer struct {
 	// applied (§4.12, ADR 0004); "" = not reporting.
 	ResourcesRev       string
 	ResourcesUpdatedAt int64
+	// ResourceSubmitEnabled gates the self-service submission endpoints
+	// (ADR 0006). Admin-only policy; never exposed on GET /peers.
+	ResourceSubmitEnabled bool
 }
 
 type TokenRow struct {
@@ -295,7 +298,7 @@ type Store interface {
 	DeleteMuseAccount(id string) error
 	// resource hub (§4.12, ADR 0004/0005): content is opaque here; secret
 	// encryption and hashing live in internal/resources.
-	PutResource(rev *ResourceRevision) error
+	PutResource(rev *ResourceRevision, ownerPeer string) error
 	GetResource(kind, name string) (*Resource, error)
 	ListResources(kind string) ([]*Resource, error)
 	ListGrantedResources(peerID string) ([]*Resource, error)
@@ -305,6 +308,25 @@ type Store interface {
 	RevokeResource(kind, name, peerID string) (bool, error)
 	ListResourceGrants(kind, name string) ([]*ResourceGrant, error)
 	UpdatePeerResourcesRev(id, rev string, ts int64) error
+	// self-service resource registration (§4.12, ADR 0006)
+	CreateResourceSubmission(sub *ResourceSubmission) error
+	GetResourceSubmission(id string) (*ResourceSubmission, error)
+	ListResourceSubmissions(f ResourceSubmissionFilter) ([]*ResourceSubmission, int, error)
+	UpdateResourceSubmissionStatus(id, status, note, reviewer string, reviewedAt int64, wipe bool) (bool, error)
+	ReplacePendingResourceSubmission(id, description string, content []byte, contentHash string, now int64) error
+	SupersedePendingResourceSubmission(id string, now int64) error
+	ExpirePendingSubmissions(olderThan, now int64) (int64, error)
+	CountResourceSubmissions(peerID, status string, since int64) (int, error)
+	CountLiveResourcesOwnedBy(peerID string) (int, error)
+	ApproveResourceSubmission(id, revisionID, approvedName, description, reviewer string, now int64) (*Resource, error)
+	CreateResourceTakedown(t *ResourceTakedown) error
+	GetResourceTakedown(id string) (*ResourceTakedown, error)
+	HasPendingTakedown(kind, name string) (bool, error)
+	ListResourceTakedowns(status, peer string, limit, offset int) ([]*ResourceTakedown, int, error)
+	ResolveResourceTakedown(id, status, note, reviewer string, now int64) (bool, error)
+	SetPeerResourceSubmitEnabled(peerID string, enabled bool) error
+	TransferPeerResourceOwnership(peerID string, now int64) (int64, error)
+	DeletePeerWithResourcePolicy(id string, ts int64, deleteResources bool) (int64, error)
 	// settings + operator inbox (§9.5)
 	GetSetting(key string) (string, error)
 	SetSetting(key, value string, ts int64) error
@@ -464,12 +486,12 @@ func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
 		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,''),
-		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0) FROM peers WHERE id=?`, id).
+		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0),COALESCE(resource_submit_enabled,1) FROM peers WHERE id=?`, id).
 		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
 			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote,
-			&p.ResourcesRev, &p.ResourcesUpdatedAt)
+			&p.ResourcesRev, &p.ResourcesUpdatedAt, &p.ResourceSubmitEnabled)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -493,13 +515,13 @@ func (s *sqliteStore) FindPeerFold(id string) (*Peer, int, error) {
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
 		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,''),
-		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0)
+		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0),COALESCE(resource_submit_enabled,1)
 		FROM peers WHERE id = ? COLLATE NOCASE ORDER BY id LIMIT 1`, id).
 		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
 			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote,
-			&p.ResourcesRev, &p.ResourcesUpdatedAt)
+			&p.ResourcesRev, &p.ResourcesUpdatedAt, &p.ResourceSubmitEnabled)
 	if err != nil {
 		return nil, n, err
 	}
@@ -512,7 +534,7 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
 		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,''),
-		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0) FROM peers ORDER BY id`)
+		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0),COALESCE(resource_submit_enabled,1) FROM peers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +546,7 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
 			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote,
-			&p.ResourcesRev, &p.ResourcesUpdatedAt); err != nil {
+			&p.ResourcesRev, &p.ResourcesUpdatedAt, &p.ResourceSubmitEnabled); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
@@ -602,6 +624,18 @@ func (s *sqliteStore) PrunePeers(olderThan int64) (int64, error) {
 		(SELECT id FROM peers WHERE last_seen>0 AND last_seen<?)`, olderThan); err != nil {
 		return 0, err
 	}
+	// Self-registered resources outlive their source peer (ADR 0006): move
+	// them to the operator instead of deleting them, and withdraw any pending
+	// submissions from that peer.
+	if _, err := tx.Exec(`UPDATE resources SET owner_peer='' WHERE owner_peer IN
+		(SELECT id FROM peers WHERE last_seen>0 AND last_seen<?)`, olderThan); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`UPDATE resource_submissions SET status='withdrawn', review_note='source peer pruned',
+		reviewed_by='system', reviewed_at=?, updated_at=?, content=x'' WHERE status='pending' AND submitted_by IN
+		(SELECT id FROM peers WHERE last_seen>0 AND last_seen<?)`, olderThan, olderThan, olderThan); err != nil {
+		return 0, err
+	}
 	// A pruned peer's Muse authorization (cookie ciphertext) must not linger.
 	if _, err := tx.Exec(`DELETE FROM muse_accounts WHERE peer_id IN
 		(SELECT id FROM peers WHERE last_seen>0 AND last_seen<?)`, olderThan); err != nil {
@@ -616,35 +650,7 @@ func (s *sqliteStore) PrunePeers(olderThan int64) (int64, error) {
 }
 
 func (s *sqliteStore) DeletePeer(id string, ts int64) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE tokens SET revoked_at=? WHERE peer_id=? AND revoked_at=0`, ts, id)
-	if err != nil {
-		return 0, err
-	}
-	revoked, _ := res.RowsAffected()
-	if _, err := tx.Exec(`DELETE FROM verify_state WHERE peer_id=?`, id); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(`DELETE FROM muse_accounts WHERE peer_id=?`, id); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(`DELETE FROM resource_grants WHERE peer_id=?`, id); err != nil {
-		return 0, err
-	}
-	res, err = tx.Exec(`DELETE FROM peers WHERE id=?`, id)
-	if err != nil {
-		return 0, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return 0, fmt.Errorf("unknown peer %q", id)
-	}
-	return revoked, tx.Commit()
+	return s.DeletePeerWithResourcePolicy(id, ts, false)
 }
 
 // ---- tokens ----

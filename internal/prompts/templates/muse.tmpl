@@ -301,6 +301,17 @@ mv ~/workspace/task-relay/.resources_rev.staged ~/workspace/task-relay/.resource
      下次 heartbeat 上报后服务端停止提醒；不确认就会在每次 heartbeat 后再提醒。
 - 拉取密钥会写入服务端审计；只按需拉取，不要轮询。任何一步失败贴原命令和原样错误给 operator，不要猜。
 
+## 7.10 资源上报（把本机资源登记到中继，需 operator 审核）
+- 只在你被用户要求「把某个 token / MCP / skill / prompt 登记到中继」或共享给其他助手时执行；不要自动扫描，也不要未经确认批量上传。
+- 每项先向用户确认名称、类型、描述和来源。聊天、memory、日志里永远不要写出 secret 明文；密钥值只放在提交请求体里。
+- 提交接口（都带 `Authorization: Bearer $TOKEN`）：
+  - 密钥：`POST $RELAY/resources/submissions`，JSON `{"kind":"secret","name":"...","description":"...","value":"..."}`。
+  - MCP：先把配置里的 token 提取成独立 secret 提交，再把 MCP 改写成 `${secret:NAME}` 引用后提交（kind=mcp，content 为中立格式 JSON 对象）。
+  - Prompt：`{"kind":"prompt","name":"...","content":"..."}`。
+  - Skill：把含 `SKILL.md` 的目录打成 tar.gz，`POST $RELAY/resources/submissions/skill`（multipart 字段 `archive`）。
+- 提交只进入待审核区，不等于已授权；用 `GET $RELAY/resources/submissions/mine` 查看 `pending/approved/rejected/withdrawn/expired`、最终名称 `approved_name` 和拒绝原因 `review_note`。
+- 409 名称冲突不要覆盖，报告 operator；被拒绝按 `review_note` 修正后重新提交。已发布资源要下架时用 `POST $RELAY/resources/takedowns`。
+
 ## 8. 失败上报
 - 任何一步失败：贴出原命令与原样错误给用户，不要编造协议细节、不要猜 token、不要改服务端地址。
 - 在执行摘要里汇报：处理了哪些消息（id、from、kind）、每条的执行结果（1-2 句）。

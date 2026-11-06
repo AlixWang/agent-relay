@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AlixWang/agent-relay/internal/config"
 	"github.com/AlixWang/agent-relay/internal/resources"
 	"github.com/AlixWang/agent-relay/internal/store"
 )
@@ -26,6 +27,12 @@ func newResourceFixture(t *testing.T) *fixture {
 	f.srv.SetResources(svc)
 	f.registerPeer(t, "alice", "muse")
 	f.registerPeer(t, "bob", "claw")
+	// Self-service submission requires active peers; reads do not.
+	for _, id := range []string{"alice", "bob"} {
+		if err := f.srv.st.UpdatePeerStatus(id, "active"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return f
 }
 
@@ -407,6 +414,14 @@ func TestResourceHubSkill(t *testing.T) {
 	if rec.Header().Get("Content-Type") != "application/gzip" || !strings.Contains(rec.Header().Get("Content-Disposition"), "code-review.tar.gz") {
 		t.Fatalf("download headers: %+v", rec.Header())
 	}
+	// Admin can download the live archive for inspection.
+	req = httptest.NewRequest("GET", "/admin/resources/skill/code-review/archive", nil)
+	req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: admin})
+	rec = httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || !bytes.Equal(rec.Body.Bytes(), archive) {
+		t.Fatalf("admin live archive: %d len=%d", rec.Code, rec.Body.Len())
+	}
 	// Re-upload with new content → digest moves → nudge.
 	rev := f.heartbeat(t, "alice", nil)["resources_rev"].(string)
 	f.heartbeat(t, "alice", map[string]any{"resources_rev": rev})
@@ -497,5 +512,196 @@ func TestSecretRedactionOnIngress(t *testing.T) {
 	}
 	if !whereMsg || !whereLogs {
 		t.Fatalf("redaction not audited: %+v", audit)
+	}
+}
+
+func (f *fixture) submitSkill(t *testing.T, token string, archive []byte, desc string) (int, map[string]any) {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, _ := mw.CreateFormFile("archive", "skill.tar.gz")
+	_, _ = fw.Write(archive)
+	if desc != "" {
+		_ = mw.WriteField("description", desc)
+	}
+	_ = mw.Close()
+	req := httptest.NewRequest("POST", "/resources/submissions/skill", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out
+}
+
+func TestResourceSubmissionSecretFlow(t *testing.T) {
+	f := newResourceFixture(t)
+	admin := f.adminLogin(t)
+
+	c, out := f.do(t, "POST", "/resources/submissions", map[string]any{
+		"kind": "secret", "name": "PEER_KEY", "description": "from alice", "value": "sk-peer-secret",
+	}, f.tok["alice"])
+	sub, _ := out["submission"].(map[string]any)
+	if c != 200 || sub == nil || sub["status"] != "pending" {
+		t.Fatalf("submit: %d %+v", c, out)
+	}
+	id := sub["id"].(string)
+
+	// Admin list/detail never contain the secret value.
+	for _, path := range []string{"/admin/resource-submissions", "/admin/resource-submissions/" + id} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: admin})
+		rec := httptest.NewRecorder()
+		f.mux.ServeHTTP(rec, req)
+		if rec.Code != 200 || strings.Contains(rec.Body.String(), "sk-peer-secret") {
+			t.Fatalf("%s leaked or failed: %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Approve, grant, fetch.
+	if c, out := f.doCookie(t, "POST", "/admin/resource-submissions/"+id+"/approve", map[string]any{}, admin); c != 200 {
+		t.Fatalf("approve: %d %+v", c, out)
+	}
+	_, out = f.doCookie(t, "GET", "/admin/resources/secret/PEER_KEY", nil, admin)
+	res := out["resource"].(map[string]any)
+	if res["owner_peer"] != "alice" {
+		t.Fatalf("owner: %+v", res)
+	}
+	f.doCookie(t, "POST", "/admin/resources/secret/PEER_KEY/grants", map[string]any{"peer_id": "bob"}, admin)
+	c, out = f.do(t, "GET", "/resources/secrets/PEER_KEY", nil, f.tok["bob"])
+	if c != 200 || out["value"] != "sk-peer-secret" {
+		t.Fatalf("fetch: %d %+v", c, out)
+	}
+	audit, _ := f.srv.st.ListAudit("", "resource.approved", 0, 20)
+	if len(audit) == 0 {
+		t.Fatal("missing approval audit")
+	}
+}
+
+func TestResourceSubmissionSwitchesAndStatus(t *testing.T) {
+	f := newResourceFixture(t)
+	admin := f.adminLogin(t)
+
+	// Pending peers cannot submit; active ones can.
+	if err := f.srv.st.UpdatePeerStatus("bob", "pending"); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := f.do(t, "POST", "/resources/submissions", map[string]any{"kind": "prompt", "name": "P", "content": "x"}, f.tok["bob"]); c != 403 {
+		t.Fatalf("pending peer submit: %d", c)
+	}
+	if c, out := f.do(t, "POST", "/resources/submissions", map[string]any{"kind": "prompt", "name": "P", "content": "x"}, f.tok["alice"]); c != 200 {
+		t.Fatalf("active submit: %d %+v", c, out)
+	}
+
+	// Per-peer switch.
+	if c, out := f.doCookie(t, "PATCH", "/admin/peers/alice", map[string]any{"resource_submit_enabled": false}, admin); c != 200 {
+		t.Fatalf("disable: %d %+v", c, out)
+	}
+	if c, _ := f.do(t, "POST", "/resources/submissions", map[string]any{"kind": "prompt", "name": "Q", "content": "x"}, f.tok["alice"]); c != 403 {
+		t.Fatalf("disabled peer submit: %d", c)
+	}
+}
+
+func TestResourceSubmissionGlobalSwitch(t *testing.T) {
+	f := newFixtureWithConfig(t, func(c *config.Config) { c.ResourceSelfRegistration = false })
+	svc, err := resources.New(f.srv.st, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.srv.SetResources(svc)
+	f.registerPeer(t, "alice", "muse")
+	_ = f.srv.st.UpdatePeerStatus("alice", "active")
+	if c, _ := f.do(t, "POST", "/resources/submissions", map[string]any{"kind": "prompt", "name": "P", "content": "x"}, f.tok["alice"]); c != 403 {
+		t.Fatalf("global switch off: %d", c)
+	}
+}
+
+func TestResourceSubmissionMCPPromptAndSkill(t *testing.T) {
+	f := newResourceFixture(t)
+	admin := f.adminLogin(t)
+
+	cfg := map[string]any{"transport": "stdio", "command": "npx", "args": []string{"-y", "server"}, "env": map[string]string{"TOKEN": "${secret:PEER_KEY}"}}
+	c, out := f.do(t, "POST", "/resources/submissions", map[string]any{"kind": "mcp", "name": "peer-mcp", "content": cfg}, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("mcp submit: %d %+v", c, out)
+	}
+	mcpID := out["submission"].(map[string]any)["id"].(string)
+	_, detail := f.doCookie(t, "GET", "/admin/resource-submissions/"+mcpID, nil, admin)
+	d := detail["submission"].(map[string]any)
+	if d["requires_secrets"] == nil || len(d["requires_secrets"].([]any)) != 1 {
+		t.Fatalf("mcp detail: %+v", d)
+	}
+
+	md := "---\nname: peer-skill\ndescription: Peer skill\n---\n# body\n"
+	archive := skillArchive(t, md, map[string]string{"code-review/run.sh": "echo hi\n"})
+	c, out = f.submitSkill(t, f.tok["alice"], archive, "")
+	if c != 200 {
+		t.Fatalf("skill submit: %d %+v", c, out)
+	}
+	skillID := out["submission"].(map[string]any)["id"].(string)
+	// Skill must be previewable before approval; archive bytes are exact.
+	req := httptest.NewRequest("GET", "/admin/resource-submissions/"+skillID+"/archive", nil)
+	req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: admin})
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || !bytes.Equal(rec.Body.Bytes(), archive) {
+		t.Fatalf("skill preview: %d len=%d", rec.Code, rec.Body.Len())
+	}
+}
+
+func TestResourceSubmissionBulkReviewRejectsSkill(t *testing.T) {
+	f := newResourceFixture(t)
+	admin := f.adminLogin(t)
+	md := "---\nname: bulk-skill\ndescription: Bulk skill\n---\n"
+	_, out := f.submitSkill(t, f.tok["alice"], skillArchive(t, md, nil), "")
+	skillID := out["submission"].(map[string]any)["id"].(string)
+	_, out = f.do(t, "POST", "/resources/submissions", map[string]any{"kind": "prompt", "name": "bulk-prompt", "content": "x"}, f.tok["alice"])
+	promptID := out["submission"].(map[string]any)["id"].(string)
+	c, out := f.doCookie(t, "POST", "/admin/resource-submissions/bulk", map[string]any{"ids": []string{skillID, promptID}, "action": "approve"}, admin)
+	if c != 200 {
+		t.Fatalf("bulk: %d %+v", c, out)
+	}
+	results := out["results"].([]any)
+	if len(results) != 2 || results[0].(map[string]any)["ok"] == true || results[1].(map[string]any)["ok"] != true {
+		t.Fatalf("bulk results: %+v", results)
+	}
+}
+
+func TestResourceSubmitMineAndWithdraw(t *testing.T) {
+	f := newResourceFixture(t)
+	c, out := f.do(t, "POST", "/resources/submissions", map[string]any{"kind": "prompt", "name": "mine", "content": "x"}, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("submit: %d %+v", c, out)
+	}
+	id := out["submission"].(map[string]any)["id"].(string)
+	c, out = f.do(t, "GET", "/resources/submissions/mine", nil, f.tok["alice"])
+	if c != 200 || len(out["submissions"].([]any)) != 1 {
+		t.Fatalf("mine: %d %+v", c, out)
+	}
+	if c, _ := f.do(t, "DELETE", "/resources/submissions/"+id, nil, f.tok["bob"]); c != 404 {
+		t.Fatalf("other peer withdraw: %d", c)
+	}
+	if c, _ := f.do(t, "DELETE", "/resources/submissions/"+id, nil, f.tok["alice"]); c != 200 {
+		t.Fatalf("withdraw: %d", c)
+	}
+}
+
+func TestResourceTakedownFlow(t *testing.T) {
+	f := newResourceFixture(t)
+	admin := f.adminLogin(t)
+	_, out := f.do(t, "POST", "/resources/submissions", map[string]any{"kind": "prompt", "name": "td", "content": "x"}, f.tok["alice"])
+	id := out["submission"].(map[string]any)["id"].(string)
+	f.doCookie(t, "POST", "/admin/resource-submissions/"+id+"/approve", map[string]any{}, admin)
+	c, out := f.do(t, "POST", "/resources/takedowns", map[string]any{"kind": "prompt", "name": "td", "reason": "done"}, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("takedown: %d %+v", c, out)
+	}
+	tdID := out["takedown"].(map[string]any)["id"].(string)
+	if c, out := f.doCookie(t, "POST", "/admin/resource-takedowns/"+tdID+"/approve", map[string]any{}, admin); c != 200 {
+		t.Fatalf("approve takedown: %d %+v", c, out)
+	}
+	if c, _ := f.do(t, "GET", "/resources/current", nil, f.tok["alice"]); c != 200 {
+		t.Fatalf("manifest after delete: %d", c)
 	}
 }

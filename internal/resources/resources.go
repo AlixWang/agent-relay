@@ -1,7 +1,9 @@
-// Package resources is the resource hub (DESIGN §4.12, ADR 0004/0005): the
-// operator registers a secret / MCP config / skill / prompt snippet once,
-// grants it to peers, and assistants pull it. The relay distributes config
-// only — it never proxies MCP calls or runs skills.
+// Package resources is the resource hub (DESIGN §4.12, ADR 0004/0005/0006):
+// the operator registers a secret / MCP config / skill / prompt snippet once,
+// grants it to peers, and assistants pull it. ADR 0006 adds peer
+// self-registration: a peer submit is staged for operator review and never
+// becomes live until approved. The relay distributes config only — it never
+// proxies MCP calls or runs skills.
 package resources
 
 import (
@@ -78,9 +80,10 @@ func enabledKind(kind string) bool { return knownKind(kind) }
 
 // Service owns validation, secret encryption and manifest computation.
 type Service struct {
-	st  store.Store
-	key []byte
-	now func() time.Time
+	st     store.Store
+	key    []byte
+	now    func() time.Time
+	policy SubmissionPolicy
 
 	redactorOnce sync.Once
 	redactor     *Redactor
@@ -92,7 +95,7 @@ func New(st store.Store, dataDir string) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{st: st, key: key, now: time.Now}, nil
+	return &Service{st: st, key: key, now: time.Now, policy: DefaultSubmissionPolicy()}, nil
 }
 
 // View is the admin-safe description of a live resource. It never carries
@@ -105,6 +108,7 @@ type View struct {
 	Size        int      `json:"size"`
 	CreatedBy   string   `json:"created_by"`
 	UpdatedAt   int64    `json:"updated_at"`
+	OwnerPeer   string   `json:"owner_peer"`
 	Grants      []string `json:"grants"`
 	// Content is the editable body for mcp (neutral config object) and
 	// prompt (text). Never set for secrets.
@@ -173,7 +177,11 @@ func (s *Service) PutSecret(name, description, value string) (*View, error) {
 		}
 		rev.Content, rev.ContentHash = sealed, secretHash(s.key, value)
 	}
-	if err := s.st.PutResource(rev); err != nil {
+	owner := ""
+	if cur != nil {
+		owner = cur.OwnerPeer
+	}
+	if err := s.st.PutResource(rev, owner); err != nil {
 		return nil, err
 	}
 	s.Redactor().invalidate()
@@ -199,7 +207,7 @@ func toView(r *store.Resource, grants []*store.ResourceGrant) *View {
 	v := &View{
 		Kind: r.Kind, Name: r.Name, Description: r.Description, RevisionID: r.ID,
 		Size: len(r.Content), CreatedBy: r.CreatedBy, UpdatedAt: r.UpdatedAt,
-		Grants: []string{},
+		OwnerPeer: r.OwnerPeer, Grants: []string{},
 	}
 	if r.Kind == KindSecret {
 		v.Size = 0 // ciphertext length leaks the plaintext length; not useful anyway
@@ -282,12 +290,20 @@ func (s *Service) putPlain(kind, name, description string, content []byte) (*Vie
 	if err != nil {
 		return nil, err
 	}
+	cur, err := s.st.GetResource(kind, name)
+	if err != nil {
+		return nil, err
+	}
+	owner := ""
+	if cur != nil {
+		owner = cur.OwnerPeer // operator edits keep the source peer's ownership
+	}
 	rev := &store.ResourceRevision{
 		ID: newRevisionID(), Kind: kind, Name: name, Description: desc,
 		Content: content, ContentHash: contentHash(content),
 		CreatedAt: s.now().Unix(), CreatedBy: actorOperator,
 	}
-	if err := s.st.PutResource(rev); err != nil {
+	if err := s.st.PutResource(rev, owner); err != nil {
 		return nil, err
 	}
 	return s.view(kind, name)

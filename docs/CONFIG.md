@@ -9,7 +9,7 @@
 |---|---|---|---|
 | `listen_addr` | string | `"auto"` | `"auto"`/`"tailnet"` = 绑定 `tailscale ip -4`，失败回退 `127.0.0.1`；其他值原样使用（`127.0.0.1` 用于测试，公网模式才可用 `0.0.0.0`） |
 | `port` | int | `18789` | 监听端口 |
-| `data_dir` | string | `/var/lib/agent-relay` | SQLite 文件 + `archive/` JSONL 归档目录 + `muse-cookie.key`（Muse Cookie 加密密钥） |
+| `data_dir` | string | `/var/lib/agent-relay` | SQLite 文件 + `archive/` JSONL 归档目录 + `muse-cookie.key`（Muse Cookie 加密密钥）+ `secrets.key`（资源中心密钥加密密钥；丢失后已登记密钥不可恢复） |
 | `public` | bool | `false` | 公网 HTTPS 模式；`true` 时必须配 `tls_cert`+`tls_key`，UI cookie 才带 `Secure` |
 | `tls_cert` / `tls_key` | string | `""` | 公网模式证书路径（Let's Encrypt 或自备） |
 | `admin_password_hash` | string | `""` | bcrypt hash；`agent-relay -hash 'pw'` 生成。为空则启动时打印一次性随机密码（重启失效，仅开发用） |
@@ -32,6 +32,12 @@
 | `agent_log_max_rows_per_peer` | int | `20000` | 单 peer 保留的 Agent 日志最大行数，超出按最旧删除（0=不限） |
 | `offline_webhook_url` | string | `""` | peer 由在线转离线时 POST `{"kind","key","peer_id","offline_secs","ts"}`，并带 `X-Agent-Relay-Effect-Kind/Key` 头；由持久化 effects 队列重试，接收方按 kind+key 幂等（Phase 3） |
 | `max_body_bytes` | int | `1048576` | 请求体上限 1 MiB |
+| `resource_self_registration` | bool | `true` | 是否允许 active 助手向资源中心提交资源（全局开关；关闭后现有资源与授权不受影响） |
+| `resource_pending_max_per_peer` | int | `20` | 单个 peer 的 pending 提交上限 |
+| `resource_live_max_per_peer` | int | `100` | 单个 peer 拥有的 live 资源上限 |
+| `resource_submit_per_hour` | int | `10` | 单个 peer 每小时最多提交次数 |
+| `resource_pending_ttl_days` | int | `30` | pending 提交未处理自动过期天数（0=不过期；过期清除正文） |
+| `resource_notify_batch_secs` | int | `600` | 同一 peer 的待审核通知合并窗口秒数（0=不合并） |
 | `stream_keepalive_secs` | int | `20` | SSE 保活间隔秒（0=用 20；上限 120，§4.4b） |
 | `stream_max_per_peer` | int | `3` | 单身份并发流上限，超限 `429`（0=用 3，§4.4b） |
 | `profile_refresh_days` | int | `7` | 简介超期天数：heartbeat 带 `profile_refresh=true` 提醒更新（0=不提醒，§8.7） |
