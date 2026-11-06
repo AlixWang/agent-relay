@@ -366,10 +366,6 @@ if echo "$SELF_VIEW" | jq -e '[.items[] | select(.payload | test("控制台指�
 else
   bad "room message delivered to addressed member" "$SELF_VIEW"
 fi
-jq_ok "member acks room message" '.ok == true' \
-  curl -s -X POST "$BASE/ack" "${AUTH_A[@]}" \
-    -H 'Content-Type: application/json' \
-    --data '{"message_id":"'"$(echo "$SELF_VIEW" | jq -r '[.items[] | select(.to=="grp_ops")][0].id // "none"')"'","by":"t-alice"}'
 
 # Batch ack (§7.8): one wake can carry a dozen chat messages, so the worker acks
 # them in one call. Ids it cannot see come back under "skipped" — never a silent
@@ -439,6 +435,12 @@ if echo "$AFTER_REPLY" | jq -e '[.items[] | select(.from == "operator")] | lengt
 else
   bad "sender still sees other room messages"
 fi
+# Ack the operator's room task after the visibility checks above. This also
+# gives the read-receipt test a message from another sender to display.
+jq_ok "member acks room message" '.ok == true and .acked == 1' \
+  curl -s -X POST "$BASE/ack" "${AUTH_A[@]}" \
+    -H 'Content-Type: application/json' \
+    --data '{"message_id":"'"$(echo "$SELF_VIEW" | jq -r '[.items[] | select(.to=="grp_ops" and .from=="operator")][0].id // "none"')"'","by":"t-alice"}'
 jq_ok "agent reports to operator" '.ok == true' \
   curl -s -X POST "$BASE/messages" "${AUTH_B[@]}" \
     -H 'Content-Type: application/json' \
