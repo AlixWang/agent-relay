@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/AlixWang/agent-relay/internal/resources"
+	"github.com/AlixWang/agent-relay/internal/store"
 )
 
 func newResourceFixture(t *testing.T) *fixture {
@@ -417,5 +418,84 @@ func TestResourceHubSkill(t *testing.T) {
 	_, out = f.doCookie(t, "GET", "/admin/resources/skill/code-review", nil, admin)
 	if r := out["resource"].(map[string]any); r["description"] != "团队规范" || len(out["revisions"].([]any)) != 2 {
 		t.Fatalf("admin view after re-upload: %+v", out)
+	}
+}
+
+// P4: a secret an assistant pastes back into a message or a log never lands
+// in storage or the console — it is masked and audited instead.
+func TestSecretRedactionOnIngress(t *testing.T) {
+	f := newResourceFixture(t)
+	admin := f.adminLogin(t)
+	// Wire redaction the way main does.
+	red := f.srv.resources.Redactor()
+	f.srv.queue.SetRedactor(red.Redact, func(sender string, names []string, now int64) {
+		_ = f.srv.st.AppendAudit(sender, "secret.redacted", "secret="+strings.Join(names, ",")+" where=message", now)
+	})
+	f.srv.AgentLogs().SetRedactor(red.Redact, func(peerID string, names []string) {
+		_ = f.srv.st.AppendAudit(peerID, "secret.redacted", "secret="+strings.Join(names, ",")+" where=logs", 0)
+	})
+	const val = "sk-live-ultrasecret-42"
+	f.doCookie(t, "PUT", "/admin/resources/secret/OPENAI_API_KEY", map[string]any{"value": val}, admin)
+
+	c, out := f.do(t, "POST", "/messages", map[string]any{
+		"id": "m-redact-1", "to": "bob", "kind": "chat",
+		"payload": "my key is " + val + " -- please use it, and " + val + " again",
+	}, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("send: %d %+v", c, out)
+	}
+	// Stored text is masked; the recipient sees the placeholder.
+	_, out = f.do(t, "GET", "/messages?for=bob&since=0", nil, f.tok["bob"])
+	body := fmt.Sprint(out)
+	if strings.Contains(body, val) || !strings.Contains(body, "[secret:OPENAI_API_KEY]") {
+		t.Fatalf("message not masked: %s", body)
+	}
+	// The console export/query is masked too (same stored row).
+	_, out = f.doCookie(t, "GET", "/admin/messages?q=secret", nil, admin)
+	if strings.Contains(fmt.Sprint(out), val) {
+		t.Fatalf("console leaked plaintext: %+v", out)
+	}
+	// Short/placeholder-only text passes through untouched.
+	if _, out := f.do(t, "POST", "/messages", map[string]any{
+		"id": "m-redact-2", "to": "bob", "kind": "chat", "payload": "nothing secret here",
+	}, f.tok["alice"]); c != 200 || strings.Contains(fmt.Sprint(out), "secret.redacted") {
+		t.Fatalf("clean message: %+v", out)
+	}
+
+	// Logs: message + a string field value.
+	c, out = f.do(t, "POST", "/logs", map[string]any{
+		"version": 1, "client": map[string]any{"version": "v-e2e"},
+		"events": []any{map[string]any{
+			"id": "e-redact-1", "level": "info", "source": "relay-watch", "event": "wake.requested",
+			"message": "fetched with " + val, "fields": map[string]any{"cmd": "curl -H 'Authorization: Bearer " + val + "'"},
+		}},
+	}, f.tok["alice"])
+	if c != 200 {
+		t.Fatalf("logs: %d %+v", c, out)
+	}
+	logs, _, err := f.srv.st.ListAgentLogsPage(store.AgentLogFilter{PeerID: "alice"}, 10, 0)
+	if err != nil || len(logs) == 0 {
+		t.Fatalf("logs: %v %+v", err, logs)
+	}
+	for _, l := range logs {
+		if strings.Contains(l.Message+l.Fields, val) {
+			t.Fatalf("log row leaked plaintext: %+v", l)
+		}
+	}
+	if !strings.Contains(logs[0].Message, "[secret:OPENAI_API_KEY]") {
+		t.Fatalf("log message not masked: %q", logs[0].Message)
+	}
+
+	audit, _ := f.srv.st.ListAudit("alice", "secret.redacted", 0, 10)
+	var whereMsg, whereLogs bool
+	for _, a := range audit {
+		if strings.Contains(a.Detail, val) {
+			t.Fatal("audit leaked plaintext")
+		}
+		whereMsg = whereMsg || strings.Contains(a.Detail, "where=message")
+		whereLogs = whereLogs || strings.Contains(a.Detail, "where=logs")
+	}
+	if !whereMsg || !whereLogs {
+		t.Fatalf("redaction not audited: %+v", audit)
 	}
 }

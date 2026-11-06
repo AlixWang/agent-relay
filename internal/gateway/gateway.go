@@ -106,6 +106,10 @@ func (s *Server) notifyStream() {
 
 func (s *Server) SetGuard(g *guard.Guard) { s.guard = g }
 
+// AgentLogs exposes the log ingestor so main can wire secret redaction
+// (DESIGN §4.12, P4).
+func (s *Server) AgentLogs() *agentlog.Ingestor { return s.agentLogs }
+
 func (s *Server) SetAdminHash(hash []byte) { s.adminHash = hash }
 
 // Handler builds the mux.

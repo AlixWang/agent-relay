@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -80,6 +81,9 @@ type Service struct {
 	st  store.Store
 	key []byte
 	now func() time.Time
+
+	redactorOnce sync.Once
+	redactor     *Redactor
 }
 
 // New loads or creates data_dir/secrets.key.
@@ -172,6 +176,7 @@ func (s *Service) PutSecret(name, description, value string) (*View, error) {
 	if err := s.st.PutResource(rev); err != nil {
 		return nil, err
 	}
+	s.Redactor().invalidate()
 	return s.view(KindSecret, name)
 }
 
@@ -424,6 +429,9 @@ func (s *Service) Delete(kind, name string) error {
 	}
 	if !ok {
 		return ErrNotFound
+	}
+	if kind == KindSecret {
+		s.Redactor().invalidate()
 	}
 	return nil
 }

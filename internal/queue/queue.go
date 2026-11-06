@@ -34,11 +34,43 @@ type SendRequest struct {
 type Service struct {
 	st    store.Store
 	guard *guard.Guard
+	// redact masks stored secret values in payload/detail before storage
+	// (DESIGN §4.12, P4). Nil keeps text untouched.
+	redact func(string) (string, []string)
+	// onRedacted is called with the sender and the secret names that were
+	// masked, so the gateway can write an audit row.
+	onRedacted func(sender string, names []string, now int64)
 }
 
 // New creates a queue Service.
 func New(st store.Store, g *guard.Guard) *Service {
 	return &Service{st: st, guard: g}
+}
+
+// SetRedactor wires secret redaction for message text. fn returns the masked
+// text and the secret names it replaced; onHit (optional) records the audit.
+func (s *Service) SetRedactor(fn func(string) (string, []string), onHit func(sender string, names []string, now int64)) {
+	s.redact, s.onRedacted = fn, onHit
+}
+
+// redactPayload masks secrets in the message body and handshake detail. It
+// runs before the guard, so the guard and the fuse see the same text that is
+// stored.
+func (s *Service) redactPayload(req *SendRequest, now int64) {
+	if s.redact == nil {
+		return
+	}
+	for _, f := range []*string{&req.Payload, &req.Detail} {
+		if *f == "" {
+			continue
+		}
+		if masked, hits := s.redact(*f); masked != *f {
+			*f = masked
+			if s.onRedacted != nil {
+				s.onRedacted(req.From, hits, now)
+			}
+		}
+	}
 }
 
 // Handshake TTL bounds (DESIGN §6.5). ExpiresInSecs above the max is
@@ -95,6 +127,7 @@ func (s *Service) Send(req *SendRequest, now int64) (int64, bool, string, error)
 	if kind == "" {
 		kind = "task"
 	}
+	s.redactPayload(req, now)
 	env := &guard.Envelope{
 		ID:               req.ID,
 		To:               req.To,

@@ -73,7 +73,7 @@ reassign + lease 到期回收 + `waiting|ready|failed|dropped`（dropped 终态�
   转发 `resources_update`、heartbeat 带 `.resources_rev`、`.resources_rev.staged` 去重（`receiver_rev` 会变）；
   四个模板加「资源同步」一节，`PromptVersion` 18；成员页显示同步状态
 - [x] **P3b** `skill` 上传/校验/下载（tar.gz，`SKILL.md` frontmatter，≤1 MiB 解压，防路径穿越/链接/gzip 炸弹）
-- [ ] **P4** Guard / `POST /logs` 入站密钥明文打码为 `[secret:NAME]`，审计 `secret.redacted`
+- [x] **P4** Guard / `POST /logs` 入站密钥明文打码为 `[secret:NAME]`，审计 `secret.redacted`
 
 ## P2 polish 状态（本版已含）
 

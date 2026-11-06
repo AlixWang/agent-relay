@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -80,6 +81,9 @@ type Ingestor struct {
 	maxRows int
 	mu      sync.Mutex
 	hits    map[string][]int64
+
+	redact     func(string) (string, []string)
+	onRedacted func(peerID string, names []string)
 }
 
 func New(st store.Store, ratePerMinute, maxRowsPerPeer int) *Ingestor {
@@ -87,6 +91,40 @@ func New(st store.Store, ratePerMinute, maxRowsPerPeer int) *Ingestor {
 		ratePerMinute = 60
 	}
 	return &Ingestor{st: st, rate: ratePerMinute, maxRows: maxRowsPerPeer, hits: map[string][]int64{}}
+}
+
+// SetRedactor masks stored secret values in the free-text parts of an event
+// (message, task/thread ids, field values; DESIGN §4.12, P4). onHit records
+// an audit row per batch that had a hit. Nil keeps text untouched.
+func (i *Ingestor) SetRedactor(fn func(string) (string, []string), onHit func(peerID string, names []string)) {
+	i.redact, i.onRedacted = fn, onHit
+}
+
+// redactEvent masks secret values in place; it reports whether anything hit.
+func (i *Ingestor) redactEvent(ev *Event) []string {
+	if i.redact == nil {
+		return nil
+	}
+	var hits []string
+	str := func(s *string) {
+		if *s == "" {
+			return
+		}
+		if masked, h := i.redact(*s); masked != *s {
+			*s, hits = masked, append(hits, h...)
+		}
+	}
+	str(&ev.Message)
+	str(&ev.TaskID)
+	str(&ev.Thread)
+	for k, v := range ev.Fields {
+		if s, ok := v.(string); ok && s != "" {
+			if masked, h := i.redact(s); masked != s {
+				ev.Fields[k], hits = masked, append(hits, h...)
+			}
+		}
+	}
+	return hits
 }
 
 // Ingest validates and stores a batch. Invalid individual events are counted
@@ -107,8 +145,10 @@ func (i *Ingestor) Ingest(peerID string, b Batch, now int64) (*Result, error) {
 		return nil, &RateError{Retry: retry}
 	}
 	result := &Result{}
+	var redacted []string
 	batch := make([]*store.AgentLog, 0, len(b.Events))
 	for _, in := range b.Events {
+		redacted = append(redacted, i.redactEvent(&in)...)
 		ev, err := normalize(in, now)
 		if err != nil {
 			result.Rejected++
@@ -122,6 +162,18 @@ func (i *Ingestor) Ingest(peerID string, b Batch, now int64) (*Result, error) {
 	}
 	if len(batch) == 0 {
 		return result, nil
+	}
+	if len(redacted) > 0 && i.onRedacted != nil {
+		uniq := map[string]bool{}
+		var names []string
+		for _, n := range redacted {
+			if !uniq[n] {
+				uniq[n] = true
+				names = append(names, n)
+			}
+		}
+		sort.Strings(names)
+		i.onRedacted(peerID, names)
 	}
 	accepted, duplicates, err := i.st.InsertAgentLogs(batch)
 	if err != nil {

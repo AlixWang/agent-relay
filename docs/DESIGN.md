@@ -331,6 +331,16 @@ prompt snippets configured by hand on each. The hub lets the operator
 - **Revocation** removes a resource from the manifest but cannot reach copies
   already on the assistant's host; the console says so and recommends
   rotating the key upstream.
+- **Redaction (P4):** an assistant that pastes a secret back into a message or
+  an agent log would otherwise store it in plaintext forever. Inbound
+  `POST /messages` payloads and `POST /logs` text (message, task/thread ids,
+  string field values) are scanned against the decrypted secret values and
+  masked as `[secret:NAME]` before the guard runs and before storage;
+  longest value first, values under 8 characters skipped (too short to be a
+  credential and likely to hit ordinary words). One `secret.redacted` audit
+  row per hit (`where=message|logs`) carries only the names — never the
+  value. The decrypt cache is invalidated on secret write/delete. This is
+  best effort: a secret encoded or split across messages is not caught.
 
 ---
 
