@@ -283,3 +283,33 @@ func TestResourceHubMCPAndPrompt(t *testing.T) {
 		t.Fatalf("bob prompt manifest: %+v", out)
 	}
 }
+
+func TestResourceSyncStatusIsOperatorOnly(t *testing.T) {
+	f := newResourceFixture(t)
+	admin := f.adminLogin(t)
+	f.doCookie(t, "PUT", "/admin/resources/prompt/reviewer", map[string]any{"content": "x"}, admin)
+	f.doCookie(t, "POST", "/admin/resources/prompt/reviewer/grants", map[string]any{"peer_id": "alice"}, admin)
+	peerRow := func(out map[string]any, id string) map[string]any {
+		for _, it := range out["peers"].([]any) {
+			if m := it.(map[string]any); m["id"] == id {
+				return m
+			}
+		}
+		t.Fatalf("no %s in %+v", id, out)
+		return nil
+	}
+	_, out := f.doCookie(t, "GET", "/admin/peers", nil, admin)
+	if peerRow(out, "alice")["resources_pending"] != true || peerRow(out, "bob")["resources_pending"] != nil {
+		t.Fatalf("pending flags: %+v", out)
+	}
+	rev := f.heartbeat(t, "alice", nil)["resources_rev"].(string)
+	f.heartbeat(t, "alice", map[string]any{"resources_rev": rev})
+	_, out = f.doCookie(t, "GET", "/admin/peers", nil, admin)
+	if a := peerRow(out, "alice"); a["resources_pending"] != nil || a["resources_rev"] != rev {
+		t.Fatalf("after receipt: %+v", a)
+	}
+	_, out = f.do(t, "GET", "/peers", nil, f.tok["bob"])
+	if a := peerRow(out, "alice"); a["resources_rev"] != nil || a["resources_pending"] != nil {
+		t.Fatalf("agent /peers leaked another peer's receipt: %+v", a)
+	}
+}

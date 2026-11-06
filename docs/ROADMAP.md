@@ -69,9 +69,10 @@ reassign + lease 到期回收 + `waiting|ready|failed|dropped`（dropped 终态�
   `resources_rev` 回执、控制台「资源中心」密钥页
 - [x] **P2** `mcp` / `prompt` 资源；MCP 中立格式校验；`GET /resources/mcp/{name}`
   解析 `${secret:}`，缺授权 409；授权 MCP 时提示缺少的依赖密钥
-- [ ] **P3** `skill` 上传/校验/下载；接收端（relay-tail、relay-poll.sh、Hermes supervisor）
-  转发 `resources_update` 并带 `.resources_rev`（`receiver_rev` 会变）；四个模板加
-  「资源同步」一节并 bump `PromptVersion`；成员页显示同步状态
+- [x] **P3** 接收端（relay-tail、relay-poll.sh、relay-tail.sh、两份 relay-watch.sh、Hermes supervisor）
+  转发 `resources_update`、heartbeat 带 `.resources_rev`、`.resources_rev.staged` 去重（`receiver_rev` 会变）；
+  四个模板加「资源同步」一节，`PromptVersion` 18；成员页显示同步状态
+- [ ] **P3b** `skill` 上传/校验/下载（tar.gz，`SKILL.md` frontmatter，≤1 MiB 解压，防路径穿越/链接/gzip 炸弹）
 - [ ] **P4** Guard / `POST /logs` 入站密钥明文打码为 `[secret:NAME]`，审计 `secret.redacted`
 
 ## P2 polish 状态（本版已含）

@@ -882,10 +882,11 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "peers failed")
 		return
 	}
-	// AdminNote is operator-only: strip it on the agent-facing endpoint.
-	// The admin console reads the same shape from GET /admin/peers.
+	// AdminNote and the resource-hub receipt are operator-only: strip them on
+	// the agent-facing endpoint. The console reads GET /admin/peers.
 	for _, v := range views {
 		v.AdminNote = ""
+		v.ResourcesRev, v.ResourcesUpdatedAt = "", 0
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "peers": views})
 }
@@ -1121,6 +1122,7 @@ func (s *Server) handleAdminListPeers(w http.ResponseWriter, r *http.Request) {
 	// Operator-only Muse summary (DESIGN §4.9). Agent-facing /peers never
 	// calls this, so the authorization state stays in the admin trust domain.
 	s.attachMuse(views)
+	s.attachResourceStatus(views)
 	// Facets are computed over the unfiltered set so filter chips can show
 	// "全部 N / 在线 M" regardless of the current selection.
 	facets := map[string]int{"all": len(views)}

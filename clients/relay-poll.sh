@@ -8,6 +8,7 @@
 #   ~/workspace/task-relay/.last_seq  sync cursor (server seq)
 #   ~/workspace/task-relay/.prompt_version  confirmed worker-instruction rev (§8.6)
 #   ~/workspace/task-relay/prompt-update.md  latest pulled instructions (if any)
+#   ~/workspace/task-relay/.resources_rev    confirmed resource manifest digest (§4.12)
 #
 # Behaviour per poll:
 #   1. POST /heartbeat (best-effort) carrying prompt_version;
@@ -27,6 +28,7 @@ ID_FILE="$BASE/identity"
 SEQ_FILE="$BASE/.last_seq"
 PROMPT_VER_FILE="$BASE/.prompt_version"
 PROMPT_UPDATE_FILE="$BASE/prompt-update.md"
+RESOURCES_REV_FILE="$BASE/.resources_rev"
 
 # Sandbox tunnel proxy (Muse sandbox quirk): if HTTPS_PROXY is set, the
 # tailnet address must go through ${HTTPS_PROXY%:*}:3130.
@@ -54,14 +56,18 @@ prompt_ver="$(cat "$PROMPT_VER_FILE" 2>/dev/null || echo 0)"
 auth=(-H "Authorization: Bearer $token")
 
 # 1. heartbeat (best-effort, never blocks the poll). Carries our confirmed
-# prompt_version; the server answers prompt_update=true when newer worker
-# instructions exist (§8.6).
+# prompt_version and resources_rev; the server answers prompt_update=true when
+# newer worker instructions exist (§8.6), or resources_update=true when the
+# manifest digest changed (§4.12).
 hb_file="$(mktemp)"
 trap 'rm -f "$hb_file" "$resp_file"' EXIT
+resources_rev="$(tr -d '[:space:]' < "$RESOURCES_REV_FILE" 2>/dev/null || true)"
+hb_body="$(jq -nc --arg id "$ident" --argjson pv "$prompt_ver" --arg rr "$resources_rev" \
+  '{id: $id, prompt_version: $pv, resources_rev: $rr}')"
 curl --fail --silent --max-time 10 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} "${auth[@]}" \
   -X POST "$RELAY/heartbeat" \
   -H 'Content-Type: application/json' \
-  -d "{\"id\":\"$ident\",\"prompt_version\":$prompt_ver}" -o "$hb_file" 2>/dev/null || true
+  -d "$hb_body" -o "$hb_file" 2>/dev/null || true
 
 # 1b. prompt update available → pull full current instructions and stage
 # them for the assistant. The assistant applies them and confirms by
@@ -90,6 +96,19 @@ if jq -e '.prompt_update == true' "$hb_file" >/dev/null 2>&1; then
       fi
     fi
     rm -f "$pu_file"
+  fi
+fi
+
+# 1c. resource hub nudge (§4.12) → stage .resources_rev.staged and wake once
+# per digest. The assistant syncs, then confirms with
+# mv .resources_rev.staged .resources_rev (reported by the next heartbeat).
+resources_event=""
+if jq -e '.resources_update == true' "$hb_file" >/dev/null 2>&1; then
+  new_rr="$(jq -r '.resources_rev // ""' "$hb_file" 2>/dev/null || true)"
+  staged_rr="$(tr -d '[:space:]' < "$RESOURCES_REV_FILE.staged" 2>/dev/null || true)"
+  if [[ -n "$new_rr" && "$new_rr" != "$staged_rr" ]]; then
+    printf '%s' "$new_rr" > "$RESOURCES_REV_FILE.staged"
+    resources_event="$new_rr"
   fi
 fi
 
@@ -122,15 +141,15 @@ next_since="$(jq -r '.next_since // 0' "$resp_file" 2>/dev/null || echo "$since"
 printf '%s' "$next_since" > "$SEQ_FILE"
 
 count="$(jq -r '.items | length' "$resp_file" 2>/dev/null || echo 0)"
-# Staged prompt update with no message traffic still needs to wake the
-# assistant — otherwise new instructions sit unread until the next task.
-if [[ "$count" == "0" && -z "$update_event" ]]; then
+# Staged prompt/resource update with no message traffic still needs to wake
+# the assistant — otherwise new instructions sit unread until the next task.
+if [[ "$count" == "0" && -z "$update_event" && -z "$resources_event" ]]; then
   exit 0
 fi
 
-# Work present: hand the full items to the waker.
-if [[ -n "$update_event" ]]; then
-  jq -c --argjson pu "$update_event" '{tasks: [.items[]?], prompt_update: $pu}' "$resp_file"
-else
-  jq -c '{tasks: [.items[]?]}' "$resp_file"
-fi
+# Work present: hand the full items to the waker. Events ride along as
+# siblings of tasks (resources_update is flat, like relay-tail emits it).
+jq -c --argjson pu "${update_event:-null}" --arg rr "$resources_event" '
+  {tasks: [.items[]?]}
+  + (if $pu == null then {} else {prompt_update: $pu} end)
+  + (if $rr == "" then {} else {resources_update: true, resources_rev: $rr} end)' "$resp_file"

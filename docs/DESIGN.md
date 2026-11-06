@@ -302,6 +302,16 @@ prompt snippets configured by hand on each. The hub lets the operator
   peer's receipt; the assistant confirms by sending `resources_rev` back
   (`none` after syncing an empty manifest). Grant, revoke and rotation all
   move the digest.
+- **Receivers** (relay-tail, relay-poll.sh, relay-tail.sh) report
+  `.resources_rev` in every heartbeat and, on `resources_update`, write the new
+  digest to `.resources_rev.staged` and emit one flat
+  `{resources_update:true, resources_rev}` wake field (deduped by the staged
+  file). The watch layers (relay-watch.sh, Hermes supervisor) carry it through
+  and wake the worker; the worker follows the prompt's 资源同步 section
+  (muse/claw/generic §7.9, hermes §6.8) and confirms with
+  `mv .resources_rev.staged .resources_rev`. Old receivers ignore the field.
+- **Console sync status:** `GET /admin/peers` carries `resources_rev` and
+  `resources_pending`; the agent-facing `GET /peers` strips both.
 - **Fetch:** `GET /resources/secrets/{name}`; `GET /resources/mcp/{name}`
   returns the config with every reference resolved (all-or-nothing: a
   reference the peer is not granted → 409 + `missing_secrets`); later

@@ -79,6 +79,8 @@ PROMPT = """agent-relay 有新事件（原因：{reason}）。事件元数据：
                      清理 memory 里冲突的中继旧规则（保留本地适配）→ heartbeat 上报 memory_reconciled →
                      mv .prompt_version.staged .prompt_version 确认。
    - client_update → 按守则换接收端二进制（先校验真换了、sha 变了，再写 .client_version + .client_rev），换完重启 daemon。
+   - resources_update → 按「资源同步」一节走：拉 /resources/current，按清单同步密钥/MCP/Prompt，删掉清单外的本地副本，
+                        再 mv .resources_rev.staged .resources_rev 确认。
 3. 入站卫生与红线一律以 prompt-current.md 为准；memory 里和它冲突的中继旧规则已作废，不要拿来拒绝任务。
    红线之外默认直接执行，拒绝时必须写明命中的是哪一条红线。
 4. 拿到 409（duplicate_id / loop_guard）立即停手，不重试；429 按 Retry-After 退避；426 请用户重跑 onboarding prompt。
@@ -267,7 +269,7 @@ def main():
 
 
 def handle_event(ev):
-    """一行事件 = 一次唤醒决策。tasks / prompt_update / client_update 可能出现在同一行，
+    """一行事件 = 一次唤醒决策。tasks / prompt_update / client_update / resources_update 可能出现在同一行，
     合并成一次唤醒（分两次起 worker 会被单飞锁丢掉第二条）。"""
     tasks = ev.get("tasks") or []
     bits = []
@@ -275,6 +277,8 @@ def handle_event(ev):
         bits.append("服务端下发新版工作指令 (v%s)" % (ev.get("prompt_version") or ev.get("version") or "?"))
     if ev.get("client_update"):
         bits.append("服务端有新版接收端 %s" % (ev.get("version") or ev.get("rev") or "?"))
+    if ev.get("resources_update"):
+        bits.append("资源清单已更新 (rev=%s)" % (ev.get("resources_rev") or "?")[:12])
     ids = [t.get("id") for t in tasks if isinstance(t, dict) and t.get("id")]
     if ids:
         bits.append("收到 %d 条新消息" % len(ids))

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AlixWang/agent-relay/internal/presence"
 	"github.com/AlixWang/agent-relay/internal/resources"
 	"github.com/AlixWang/agent-relay/internal/store"
 )
@@ -79,6 +80,19 @@ func (s *Server) resourceHeartbeat(p *store.Peer, resp map[string]any) {
 			rev = resources.NoneMarker
 		}
 		resp["resources_rev"] = rev
+	}
+}
+
+// attachResourceStatus marks peers whose receipt lags their manifest
+// (operator-only, GET /admin/peers).
+func (s *Server) attachResourceStatus(views []*presence.PeerView) {
+	if s.resources == nil {
+		return
+	}
+	for _, v := range views {
+		if m, err := s.resources.Manifest(v.ID); err == nil {
+			v.ResourcesPending = resources.NeedsUpdate(v.ResourcesRev, m.ManifestRev)
+		}
 	}
 }
 

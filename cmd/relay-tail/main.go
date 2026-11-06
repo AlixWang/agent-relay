@@ -59,6 +59,11 @@ type cfg struct {
 	// for prompts): the reported version confirmed by the worker after
 	// upgrading the binary. Dedups the nudge to once per Release.
 	clientVerPath string
+	// resourcesRevPath is the manifest digest the worker last applied
+	// (§4.12), reported in every heartbeat; resourcesStagedPath dedups a
+	// resources_update wake until the worker confirms by moving it over.
+	resourcesRevPath    string
+	resourcesStagedPath string
 }
 
 func main() {
@@ -115,6 +120,9 @@ func loadCfg() (*cfg, error) {
 		updatePath:    filepath.Join(base, "prompt-update.md"),
 		changePath:    filepath.Join(base, "prompt-changes.json"),
 		clientVerPath: filepath.Join(base, ".client_version"),
+
+		resourcesRevPath:    filepath.Join(base, ".resources_rev"),
+		resourcesStagedPath: filepath.Join(base, ".resources_rev.staged"),
 	}, nil
 }
 
@@ -249,18 +257,18 @@ func (c *cfg) auth(r *http.Request) {
 // per-round spam in long-lived receivers). Same rule for client_update:
 // once .client_version matches the nudged release, stay silent; the worker
 // confirms by upgrading the binary (which reports the new version).
-func (c *cfg) heartbeatOnce() (promptEvent, clientEvent string) {
+func (c *cfg) heartbeatOnce() (promptEvent, clientEvent, resourcesEvent string) {
 	ver := c.readVer()
 	body, _ := json.Marshal(map[string]any{
 		"id": c.ident, "prompt_version": ver, "client_version": clientVersion,
-		"client_rev": receiverRev,
+		"client_rev": receiverRev, "resources_rev": readTrimFile(c.resourcesRevPath),
 	})
 	req, _ := http.NewRequest("POST", c.relay+"/heartbeat", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	c.auth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	defer resp.Body.Close()
 	var hb struct {
@@ -269,9 +277,12 @@ func (c *cfg) heartbeatOnce() (promptEvent, clientEvent string) {
 		ClientUpdate  bool   `json:"client_update"`
 		ClientVersion string `json:"client_version"`
 		ReceiverRev   string `json:"receiver_rev"`
+		// Resource hub (§4.12): manifest digest changed since our receipt.
+		ResourcesUpdate bool   `json:"resources_update"`
+		ResourcesRev    string `json:"resources_rev"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&hb) != nil {
-		return "", ""
+		return "", "", ""
 	}
 	if !hb.PromptUpdate || hb.PromptVersion <= ver {
 		promptEvent = ""
@@ -282,7 +293,7 @@ func (c *cfg) heartbeatOnce() (promptEvent, clientEvent string) {
 		c.auth(req2)
 		resp2, err := c.http.Do(req2)
 		if err != nil {
-			return "", ""
+			return "", "", ""
 		}
 		defer resp2.Body.Close()
 		var pu struct {
@@ -290,7 +301,7 @@ func (c *cfg) heartbeatOnce() (promptEvent, clientEvent string) {
 			Changes []map[string]any `json:"changes"`
 		}
 		if json.NewDecoder(resp2.Body).Decode(&pu) != nil || pu.Prompt == "" {
-			return "", ""
+			return "", "", ""
 		}
 		_ = os.WriteFile(c.updatePath, []byte(pu.Prompt), 0o644)
 		ch, _ := json.Marshal(pu.Changes)
@@ -335,7 +346,27 @@ func (c *cfg) heartbeatOnce() (promptEvent, clientEvent string) {
 			clientEvent = string(ce)
 		}
 	}
-	return promptEvent, clientEvent
+	// Resource hub nudge (§4.12): wake once per manifest digest. The worker
+	// syncs, then confirms with mv .resources_rev.staged .resources_rev; the
+	// next heartbeat reports it and the server stops nudging ("none" = the
+	// worker synced an empty manifest).
+	if hb.ResourcesUpdate && hb.ResourcesRev != "" && readTrimFile(c.resourcesStagedPath) != hb.ResourcesRev {
+		_ = os.WriteFile(c.resourcesStagedPath, []byte(hb.ResourcesRev), 0o644)
+		re, _ := json.Marshal(map[string]any{
+			"resources_update": true, "resources_rev": hb.ResourcesRev,
+		})
+		resourcesEvent = string(re)
+	}
+	return promptEvent, clientEvent, resourcesEvent
+}
+
+// readTrimFile returns a small state file's trimmed content, "" when absent.
+func readTrimFile(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // readConfirmedClient returns the staged client_update version (unconfirmed
@@ -349,7 +380,7 @@ func (c *cfg) readConfirmedClient() string {
 }
 
 // emitWake prints one normalized wake line: {tasks:[...]} plus optional
-// prompt_update / client_update events. Same shape as the shell scripts so
+// prompt_update / client_update / resources_update events. Same shape as the shell scripts so
 // the thin wake shell needs no change. Returns false when there is nothing
 // to wake on.
 func emitWake(tasks []map[string]any, events ...string) bool {
@@ -389,7 +420,7 @@ func (c *cfg) runPoll() int {
 		interval = 5
 	}
 	for {
-		promptEvent, clientEvent := c.heartbeatOnce()
+		promptEvent, clientEvent, resourcesEvent := c.heartbeatOnce()
 		since := c.readSeq()
 		req, _ := http.NewRequest("GET",
 			fmt.Sprintf("%s/messages?for=%s&since=%d", c.relay, c.ident, since), nil)
@@ -418,7 +449,7 @@ func (c *cfg) runPoll() int {
 			continue
 		}
 		c.writeSeq(pr.NextSince)
-		emitWake(pr.Items, promptEvent, clientEvent)
+		emitWake(pr.Items, promptEvent, clientEvent, resourcesEvent)
 		time.Sleep(time.Duration(interval) * time.Second)
 	}
 }
@@ -430,11 +461,11 @@ func (c *cfg) runSSE() int {
 	go c.heartbeatLoop()
 	for {
 		since := c.readSeq()
-		promptEvent, clientEvent := c.heartbeatOnce()
-		if promptEvent != "" || clientEvent != "" {
+		promptEvent, clientEvent, resourcesEvent := c.heartbeatOnce()
+		if promptEvent != "" || clientEvent != "" || resourcesEvent != "" {
 			// Surface staged instructions / client nudges without killing
 			// the stream: same wake line the shell heartbeat used to emit.
-			emitWake(nil, promptEvent, clientEvent)
+			emitWake(nil, promptEvent, clientEvent, resourcesEvent)
 		}
 		code := c.holdStream(since)
 		switch code {
@@ -460,8 +491,8 @@ func (c *cfg) runSSE() int {
 func (c *cfg) heartbeatLoop() {
 	for {
 		time.Sleep(60 * time.Second)
-		if pe, ce := c.heartbeatOnce(); pe != "" || ce != "" {
-			emitWake(nil, pe, ce)
+		if pe, ce, re := c.heartbeatOnce(); pe != "" || ce != "" || re != "" {
+			emitWake(nil, pe, ce, re)
 		}
 	}
 }

@@ -63,6 +63,19 @@ const clientBadge = (p) => {
   return `<span class="badge warn mono" title="上报于 ${esc(when)} · rev ${esc(rev)}">${esc(v)}</span>`;
 };
 
+// Resource hub sync (§4.12): only shown once the peer has something to sync
+// or has ever confirmed a manifest.
+export const resourcesBadge = (p) => {
+  const rev = p.resources_rev || '';
+  if (p.resources_pending) {
+    const tip = rev ? `已同步 ${rev === 'none' ? '空清单' : rev.slice(0, 12)}，清单已变化` : '尚未同步过资源清单';
+    return `<span class="badge warn" title="${esc(tip)}">${icon('package', 'xs')}资源待同步</span>`;
+  }
+  if (!rev) return '';
+  const when = p.resources_updated_at ? fmtTime(p.resources_updated_at) : '未知';
+  return `<span class="badge ok" title="资源清单已同步 · ${esc(when)}">${icon('package', 'xs')}资源</span>`;
+};
+
 const transportBadge = (p) => {
   const isSSE = (p.transport || 'poll') === 'sse';
   return isSSE
@@ -252,6 +265,7 @@ export async function refreshPeers() {
             ${promptBadge(p)}
             ${memoryBadge(p)}
             ${clientBadge(p)}
+            ${resourcesBadge(p)}
           </div>
         </td>
         <td>${capsBadges(p.capabilities)}</td>

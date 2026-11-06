@@ -553,3 +553,23 @@ func TestLineDiff(t *testing.T) {
 		t.Fatalf("removed: %+v", removed)
 	}
 }
+
+// The resource hub sync contract (DESIGN §4.12): every type documents the
+// manifest pull, the staged-receipt confirm and the secret hygiene rule, and
+// the distributed prompt carries it too.
+func TestResourceSyncDocumented(t *testing.T) {
+	for _, typ := range Types() {
+		for _, reconf := range []bool{false, true} {
+			out := render(t, typ, Data{InviteCode: "inv_test", IsReconfigure: reconf})
+			for _, needle := range []string{
+				"资源同步", "resources_update", "/resources/current", ".resources_rev.staged",
+				"mv ~/workspace/task-relay/.resources_rev.staged ~/workspace/task-relay/.resources_rev",
+				"missing_secrets", "${secret:NAME}", "chmod 600",
+			} {
+				if !strings.Contains(out, needle) {
+					t.Fatalf("%s (reconfigure=%v): resource sync section missing %q", typ, reconf, needle)
+				}
+			}
+		}
+	}
+}
