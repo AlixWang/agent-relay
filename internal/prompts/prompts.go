@@ -102,7 +102,7 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 17
+const PromptVersion = 18
 
 // RoomAwarePromptVersion is the revision that first documents rooms and the
 // operator identity (§7.8 muse/claw/generic, §6.7 hermes), and that requires the
@@ -200,6 +200,11 @@ var ChangeLog = []ChangeEntry{
 		Version: 17,
 		Summary: "工作项状态词表补齐 §6.5/§5.5：started/progress/resumed 进行中，waiting 暂缓，ready 待验收，blocked 卡住，failed 失败，dropped 放弃（终态，不再重开）。",
 		Actions: "读本类型 §6.5/§5.5 的状态词表；执行中按真实语义回 status：等外部条件发 waiting，待验收发 ready，失败发 failed，主动放弃发 dropped；dropped 后不可再发 started/resumed 重开同一工作项。",
+	},
+	{
+		Version: 18,
+		Summary: "新增「资源同步」一节（muse/claw/generic §7.9，hermes §6.8）：operator 在控制台资源中心登记密钥、MCP、Skill、Prompt 并授权给你；heartbeat 带 resources_rev，摘要变化时接收端写 .resources_rev.staged 并随 resources_update 事件唤醒你。",
+		Actions: "读「资源同步」一节；被 resources_update 唤醒时：GET /resources/current 拉清单 → 密钥存 resources/secrets/<name>（600，不进 memory/消息/日志）、MCP 取 fetch_url 的 .config 写进本机运行时、Skill 下载 tar.gz 解到 resources/skills/<name>/（不以 root 解包、不擅自执行脚本）、Prompt 存 resources/prompts/<name>.md → 删掉清单外的本地资源 → mv .resources_rev.staged .resources_rev 确认。旧版接收端收不到这个事件，按 client_update 换新版接收端即可。",
 	},
 }
 

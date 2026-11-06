@@ -196,5 +196,40 @@ mv ~/workspace/task-relay/.prompt_version.staged ~/workspace/task-relay/.prompt_
   `to=operator`，不要在群里喊。
 - 群聊和一对一一样有限流与窗口熔断（一段时间内的条数上限）。被 409 拒绝就停手并汇报，不要重试。
 
+## 7.9 资源同步（密钥 / MCP / Skill / Prompt，由 operator 在控制台下发）
+- operator 在控制台「资源中心」登记外部 API 密钥、MCP 服务器配置、Skill 包、业务 Prompt 片段，按助手授权给你。
+  中继只下发配置：MCP 工具由你本机的运行时自己连，Skill 由你的运行时自己加载，中继不代理调用、不执行。
+- 接收端每次 heartbeat 上报 `~/workspace/task-relay/.resources_rev`（你上次同步完的清单摘要）。
+  授权变化、资源增删改、密钥轮换都会让摘要变化：heartbeat 返回 `resources_update=true` + 新
+  `resources_rev`，接收端写到 `.resources_rev.staged`，并随唤醒事件告诉你（`resources_update` + `resources_rev`）。
+  没被授权任何资源就不会收到这个事件。
+- 被唤醒处理资源更新时按四步走（自己跑；不能跑 shell 就请用户代跑）：
+  1. 拉清单：
+```bash
+curl -s $RELAY/resources/current -H "Authorization: Bearer $TOKEN"
+```
+     `resources` 里每项有 `kind`/`name`/`description`/`hash`。`kind=secret` 和 `kind=skill` 带 `fetch_url`；
+     `kind=mcp` 带未替换的模板 `content`（值里是 `${secret:NAME}`）、依赖 `requires_secrets` 和 `fetch_url`；
+     `kind=prompt` 的 `content` 就是全文。
+  2. 逐项落地（`hash` 和本地记录的一样就跳过）：
+     - 密钥：`curl -s $RELAY<fetch_url> -H "Authorization: Bearer $TOKEN"` 取 `.value`，存成
+       `~/workspace/task-relay/resources/secrets/<name>`（chmod 600）。**不要**写进 memory、消息、日志或回复。
+     - MCP：`curl -s $RELAY<fetch_url> ...` 取 `.config`（密钥已替换好），按你运行时的 MCP 配置格式
+       写进自己的配置；`transport=stdio` 用 command/args/env，`transport=http` 用 url/headers。
+       返回 409 + `missing_secrets` 说明你缺依赖密钥的授权：这一项跳过，同步完向 operator 报告缺哪些。
+     - Skill：`curl -s $RELAY<fetch_url> -H "Authorization: Bearer $TOKEN" -o /tmp/<name>.tar.gz`（含 `SKILL.md`
+       的目录，可能多包一层同名目录）。解到临时目录、确认里面有 `SKILL.md` 后，整目录替换
+       `~/workspace/task-relay/resources/skills/<name>/`；你的运行时有自己的 skill 目录就再放一份过去。
+       压缩包只含普通文件，**不要**以 root 解包，也不要执行里面的脚本，除非 SKILL.md 里写的用法要求而且和你的任务相关。
+     - Prompt：`content` 存成 `~/workspace/task-relay/resources/prompts/<name>.md`，按 description 说明的场景使用。
+  3. 清理：清单里没有了的本地资源（含 MCP 配置里对应的那一项）删掉——operator 撤销或删除了它。
+     清单为空（`resources_rev` 为 `none`）就全部清掉。
+  4. 确认：
+```bash
+mv ~/workspace/task-relay/.resources_rev.staged ~/workspace/task-relay/.resources_rev
+```
+     下次 heartbeat 上报后服务端停止提醒；不确认就会在每次 heartbeat 后再提醒。
+- 拉取密钥会写入服务端审计；只按需拉取，不要轮询。任何一步失败贴原命令和原样错误给 operator，不要猜。
+
 ## 8. 失败上报
 - 贴出原命令与原样错误给用户，不要编造协议细节。

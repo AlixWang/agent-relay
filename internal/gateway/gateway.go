@@ -26,6 +26,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/presence"
 	"github.com/AlixWang/agent-relay/internal/prompts"
 	"github.com/AlixWang/agent-relay/internal/queue"
+	"github.com/AlixWang/agent-relay/internal/resources"
 	"github.com/AlixWang/agent-relay/internal/store"
 	"github.com/AlixWang/agent-relay/internal/stream"
 	"github.com/AlixWang/agent-relay/internal/verify"
@@ -57,6 +58,7 @@ type Server struct {
 	work      *work.Service
 	effects   *effects.Worker
 	agentLogs *agentlog.Ingestor
+	resources *resources.Service
 
 	adminHash []byte
 	mu        sync.Mutex
@@ -104,6 +106,10 @@ func (s *Server) notifyStream() {
 
 func (s *Server) SetGuard(g *guard.Guard) { s.guard = g }
 
+// AgentLogs exposes the log ingestor so main can wire secret redaction
+// (DESIGN §4.12, P4).
+func (s *Server) AgentLogs() *agentlog.Ingestor { return s.agentLogs }
+
 func (s *Server) SetAdminHash(hash []byte) { s.adminHash = hash }
 
 // Handler builds the mux.
@@ -138,6 +144,12 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	// Prompt distribution (§8.6): peers pull worker-instruction updates
 	// here when heartbeat signals prompt_update. Authed, per-identity.
 	mux.HandleFunc("GET /prompts/current", s.handlePromptCurrent)
+	// Resource hub (DESIGN §4.12): grant-scoped, read-only. ADR 0004 (manifest)
+	// and ADR 0005 (fetch); secret responses are no-store and audited.
+	mux.HandleFunc("GET /resources/current", s.handleResourcesCurrent)
+	mux.HandleFunc("GET /resources/secrets/{name}", s.handleResourceSecret)
+	mux.HandleFunc("GET /resources/mcp/{name}", s.handleResourceMCP)
+	mux.HandleFunc("GET /resources/skills/{name}", s.handleResourceSkill)
 
 	mux.HandleFunc("POST /admin/login", s.handleAdminLogin)
 	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)
@@ -169,6 +181,13 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 
 	// Muse account authorization + keepalive (§4.9). Optional: all handlers
 	// answer 503 when no service is wired, so the routes stay discoverable.
+	mux.HandleFunc("GET /admin/resources", s.requireAdmin(s.handleAdminResourcesList))
+	mux.HandleFunc("GET /admin/resources/{kind}/{name}", s.requireAdmin(s.handleAdminResourceGet))
+	mux.HandleFunc("PUT /admin/resources/{kind}/{name}", s.requireAdmin(s.handleAdminResourcePut))
+	mux.HandleFunc("POST /admin/resources/skill", s.requireAdmin(s.handleAdminResourceSkillUpload))
+	mux.HandleFunc("DELETE /admin/resources/{kind}/{name}", s.requireAdmin(s.handleAdminResourceDelete))
+	mux.HandleFunc("POST /admin/resources/{kind}/{name}/grants", s.requireAdmin(s.handleAdminResourceGrant))
+	mux.HandleFunc("DELETE /admin/resources/{kind}/{name}/grants/{peer}", s.requireAdmin(s.handleAdminResourceRevoke))
 	mux.HandleFunc("GET /admin/muse/accounts", s.requireAdmin(s.handleAdminMuseList))
 	mux.HandleFunc("POST /admin/muse/accounts", s.requireAdmin(s.handleAdminMuseCreate))
 	mux.HandleFunc("PATCH /admin/muse/accounts/{id}", s.requireAdmin(s.handleAdminMusePatch))
@@ -748,6 +767,10 @@ type heartbeatReq struct {
 	// against; 0 falls back to prompt_version, then the server's current.
 	MemoryReconciled string `json:"memory_reconciled"`
 	MemoryVersion    int    `json:"memory_version"`
+	// ResourcesRev is the resource-hub manifest digest the assistant last
+	// applied (ADR 0004); "none" after syncing an empty manifest, "" = not
+	// reporting (never clobbers).
+	ResourcesRev string `json:"resources_rev"`
 }
 
 const maxMemoryNoteRunes = 500
@@ -782,6 +805,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.presence.BeatClientRev(peer.ID, req.ClientRev, now)
+	if rr := strings.TrimSpace(req.ResourcesRev); rr != "" && len(rr) <= 80 {
+		_ = s.st.UpdatePeerResourcesRev(peer.ID, rr, now)
+	}
 	if note := strings.TrimSpace(req.MemoryReconciled); note != "" {
 		if r := []rune(note); len(r) > maxMemoryNoteRunes {
 			note = string(r[:maxMemoryNoteRunes])
@@ -837,6 +863,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Resource hub nudge (ADR 0004): same channel as prompt_update.
+	s.resourceHeartbeat(p2, resp)
 	// Profile refresh nudge (§8.7): never-set or older than
 	// profile_refresh_days. Same channel as prompt_update; the assistant
 	// rewrites its intro from memory and confirms via the next heartbeat.
@@ -860,10 +888,11 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "peers failed")
 		return
 	}
-	// AdminNote is operator-only: strip it on the agent-facing endpoint.
-	// The admin console reads the same shape from GET /admin/peers.
+	// AdminNote and the resource-hub receipt are operator-only: strip them on
+	// the agent-facing endpoint. The console reads GET /admin/peers.
 	for _, v := range views {
 		v.AdminNote = ""
+		v.ResourcesRev, v.ResourcesUpdatedAt = "", 0
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "peers": views})
 }
@@ -1099,6 +1128,7 @@ func (s *Server) handleAdminListPeers(w http.ResponseWriter, r *http.Request) {
 	// Operator-only Muse summary (DESIGN §4.9). Agent-facing /peers never
 	// calls this, so the authorization state stays in the admin trust domain.
 	s.attachMuse(views)
+	s.attachResourceStatus(views)
 	// Facets are computed over the unfiltered set so filter chips can show
 	// "全部 N / 在线 M" regardless of the current selection.
 	facets := map[string]int{"all": len(views)}

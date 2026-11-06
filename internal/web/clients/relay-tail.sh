@@ -12,6 +12,7 @@
 #   ~/workspace/task-relay/.prompt_version  confirmed worker-instruction rev (§8.6)
 #   ~/workspace/task-relay/prompt-update.md  latest pulled instructions (if any)
 #   ~/workspace/task-relay/prompt-changes.json  upgrade guide (§8.6 changes)
+#   ~/workspace/task-relay/.resources_rev    confirmed resource manifest digest (§4.12)
 #
 # Behaviour:
 #   1. curl -N holds /messages/stream?for=<id>&since=<seq> open; the stream is
@@ -24,7 +25,9 @@
 #   2. A background heartbeat runs every 60s: reports prompt_version, pulls
 #      /prompts/current on prompt_update, stages prompt-update.md +
 #      prompt-changes.json + .prompt_version.staged, and prints a
-#      {prompt_update:{...}} wake line (with the changes summary).
+#      {prompt_update:{...}} wake line (with the changes summary). On
+#      resources_update it stages .resources_rev.staged and prints a
+#      {resources_update:true, resources_rev:...} wake line (§4.12).
 #   3. Disconnects back off exponentially (1s → 60s max) and resume with the
 #      persisted cursor — the server replays the backlog, nothing lost.
 #      A stream that delivered wakes reconnects promptly (no backoff).
@@ -40,6 +43,7 @@ SEQ_FILE="$BASE/.last_seq"
 PROMPT_VER_FILE="$BASE/.prompt_version"
 PROMPT_UPDATE_FILE="$BASE/prompt-update.md"
 PROMPT_CHANGES_FILE="$BASE/prompt-changes.json"
+RESOURCES_REV_FILE="$BASE/.resources_rev"
 EMITTED_FLAG="$BASE/.tail_emitted"
 
 # Sandbox tunnel proxy (Muse sandbox quirk): if HTTPS_PROXY is set, the
@@ -70,24 +74,30 @@ read_seq() {
   printf '%s' "$s"
 }
 
-# heartbeat_once — one heartbeat round: report prompt_version, stage prompt
-# updates, print a prompt_update wake event when staged. Mirrors the
+# heartbeat_once — one heartbeat round: report prompt_version + resources_rev,
+# stage prompt updates, print one wake line per staged event. Mirrors the
 # relay-poll.sh logic so both scripts confirm identically.
 # The `changes` upgrade guide (§8.6) is saved to prompt-changes.json and
 # summarized into the wake event.
 heartbeat_once() {
-  local prompt_ver hb new_ver pu_json body changes_sum
+  local prompt_ver resources_rev hb
   prompt_ver="$(cat "$PROMPT_VER_FILE" 2>/dev/null || echo 0)"
   [[ "$prompt_ver" =~ ^[0-9]+$ ]] || prompt_ver=0
+  resources_rev="$(tr -d '[:space:]' < "$RESOURCES_REV_FILE" 2>/dev/null || true)"
   hb="$(curl --fail --silent --max-time 10 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} \
     -H "Authorization: Bearer $token" \
     -X POST "$RELAY/heartbeat" \
     -H 'Content-Type: application/json' \
-    -d "{\"id\":\"$ident\",\"prompt_version\":$prompt_ver}" 2>/dev/null || true)"
+    -d "$(jq -nc --arg id "$ident" --argjson pv "$prompt_ver" --arg rr "$resources_rev" \
+          '{id: $id, prompt_version: $pv, resources_rev: $rr}')" 2>/dev/null || true)"
   [[ -n "$hb" ]] || return 0
-  if ! echo "$hb" | jq -e '.prompt_update == true' >/dev/null 2>&1; then
-    return 0
-  fi
+  stage_prompt_update "$hb" "$prompt_ver"
+  stage_resources_update "$hb"
+}
+
+stage_prompt_update() {
+  local hb="$1" prompt_ver="$2" new_ver staged_ver pu_json body changes_sum
+  echo "$hb" | jq -e '.prompt_update == true' >/dev/null 2>&1 || return 0
   new_ver="$(echo "$hb" | jq -r '.prompt_version // 0' 2>/dev/null || echo 0)"
   staged_ver="$(cat "$PROMPT_VER_FILE.staged" 2>/dev/null || echo 0)"
   # Dedup: already-staged version wakes only once, not every 60s round.
@@ -105,6 +115,18 @@ heartbeat_once() {
     changes_sum="$(jq -r '[.[].summary] | join(" | ")' "$PROMPT_CHANGES_FILE" 2>/dev/null || true)"
     jq -nc --arg v "$new_ver" --arg c "$changes_sum" '{prompt_update: true, version: ($v | tonumber), changes: $c}'
   fi
+}
+
+# stage_resources_update — resource hub nudge (§4.12): wake once per digest.
+# The worker syncs, then confirms with mv .resources_rev.staged .resources_rev.
+stage_resources_update() {
+  local hb="$1" rev
+  echo "$hb" | jq -e '.resources_update == true' >/dev/null 2>&1 || return 0
+  rev="$(echo "$hb" | jq -r '.resources_rev // ""' 2>/dev/null || true)"
+  [[ -n "$rev" ]] || return 0
+  [[ "$(tr -d '[:space:]' < "$RESOURCES_REV_FILE.staged" 2>/dev/null || true)" != "$rev" ]] || return 0
+  printf '%s' "$rev" > "$RESOURCES_REV_FILE.staged"
+  jq -nc --arg r "$rev" '{resources_update: true, resources_rev: $r}'
 }
 
 # parse_stream — incremental SSE parser. Reads frames from stdin; for each

@@ -74,6 +74,7 @@ canonical_event() {
     layer0_ack_failed|layer0_no_token) printf 'ack.layer0_failed' ;;
     prompt_update_pending) printf 'update.prompt_pending' ;;
     client_update_pending) printf 'update.client_pending' ;;
+    resources_update_pending) printf 'update.resources_pending' ;;
     messages_pending) printf 'spool.drained' ;;
     worker_started_notify) printf 'worker.started' ;;
     wake_lock_expired) printf 'wake.lock_expired' ;;
@@ -335,13 +336,15 @@ out=""
 if [ "$total" -gt "$offset" ]; then
   newlines="$(mktemp)"
   tail -n +"$((offset + 1))" "$SPOOL" > "$newlines"
-  # 合并多行事件：tasks 拼接；prompt_update / client_update 只取最后一个
+  # 合并多行事件：tasks 拼接；prompt_update / client_update / resources_update 只取最后一个
   out="$(jq -cs '
     {tasks: [.[] | .tasks // [] | .[]]}
     + ((([.[] | select(has("prompt_update"))] | last) as $pu
         | if $pu == null then {} else {prompt_update: {prompt_update: true, version: ($pu.version // "?"), changes: ($pu.changes // "")}} end)
        + (([.[] | select(has("client_update"))] | last) as $cu
-        | if $cu == null then {} else {client_update: {client_update: true, version: ($cu.version // "?"), rev: ($cu.rev // ""), download: ($cu.download // "")}} end))
+        | if $cu == null then {} else {client_update: {client_update: true, version: ($cu.version // "?"), rev: ($cu.rev // ""), download: ($cu.download // "")}} end)
+       + (([.[] | select(.resources_update == true)] | last) as $ru
+        | if $ru == null then {} else {resources_update: true, resources_rev: ($ru.resources_rev // "")} end))
   ' "$newlines" 2>/dev/null || true)"
   rm -f "$newlines"
   # offset 只在解析成功后推进：坏行不推进，下一轮重跑（at-least-once）
@@ -477,12 +480,15 @@ final_payload="$(printf '%s' "$out" | jq -c '{
   tasks: [.tasks[]? | {id, from, kind, in_reply_to,
     payload_preview: ((.payload // "" | tostring)[0:120])}],
   prompt_update: .prompt_update,
-  client_update: .client_update
+  client_update: .client_update,
+  resources_update: .resources_update,
+  resources_rev: .resources_rev
 }' 2>/dev/null || echo '{}')"
 if [ -z "$final_payload" ] || [ "$final_payload" = "null" ]; then
   final_payload='{"tasks":[]}'
 fi
-if [ "$msg_count" = "0" ] && [ "$has_pu" != "true" ] && [ "$has_cu" != "true" ]; then
+has_ru="$(printf '%s' "$out" | jq -r '.resources_update == true' 2>/dev/null || echo false)"
+if [ "$msg_count" = "0" ] && [ "$has_pu" != "true" ] && [ "$has_cu" != "true" ] && [ "$has_ru" != "true" ]; then
   silent "无新消息"
   exit 0
 fi
@@ -498,6 +504,11 @@ if [ "$has_cu" = "true" ]; then
   cu_rev="$(printf '%s' "$out" | jq -r '.client_update.rev // ""' 2>/dev/null || echo "")"
   reasons+=("服务端有新版 Go 接收端 v${cu_ver#v}${cu_rev:+ (rev $cu_rev)}")  # 只有 rev 变了才会走到这里
   log "client_update_pending" "$(printf '{"version":%s}' "$(printf '%s' "$cu_ver" | jq -Rs .)")"
+fi
+if [ "$has_ru" = "true" ]; then
+  ru_rev="$(printf '%s' "$out" | jq -r '.resources_rev // ""' 2>/dev/null || echo "")"
+  reasons+=("资源中心清单有更新（rev ${ru_rev:0:12}）")
+  log "resources_update_pending" "$(jq -nc --arg r "$ru_rev" '{rev:$r}' 2>/dev/null || echo '{}')"
 fi
 if [ "$msg_count" != "0" ]; then
   reasons+=("收到 $msg_count 条新消息")

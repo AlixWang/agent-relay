@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/presence"
 	"github.com/AlixWang/agent-relay/internal/prompts"
 	"github.com/AlixWang/agent-relay/internal/queue"
+	"github.com/AlixWang/agent-relay/internal/resources"
 	"github.com/AlixWang/agent-relay/internal/retention"
 	"github.com/AlixWang/agent-relay/internal/store"
 	"github.com/AlixWang/agent-relay/internal/stream"
@@ -106,6 +108,21 @@ func main() {
 		log.Printf("WARN: prompt revisions: %v", err)
 	}
 	q := queue.New(st, g)
+
+	// Resource hub (§4.12). A key failure disables only the hub: routes
+	// answer 503 and heartbeat stays silent about resources. It also owns
+	// secret redaction for message text and agent logs (P4).
+	var resSvc *resources.Service
+	if svc, err := resources.New(st, cfg.DataDir); err != nil {
+		log.Printf("WARN: resource hub disabled: %v", err)
+	} else {
+		resSvc = svc
+		redactor := svc.Redactor()
+		q.SetRedactor(redactor.Redact, func(sender string, names []string, now int64) {
+			_ = st.AppendAudit(sender, "secret.redacted",
+				fmt.Sprintf("secret=%s where=message", strings.Join(names, ",")), now)
+		})
+	}
 	p := presence.New(st, int64(cfg.OnlineTimeoutSecs), cfg.OfflineWebhookURL)
 	v := verify.New(st, int64(cfg.VerifyTimeoutSecs))
 
@@ -150,6 +167,13 @@ func main() {
 	// SSE fan-out (DESIGN §4.4b): in-memory wake-ups, DB stays authoritative.
 	gw.SetStream(stream.New(cfg.StreamMaxPerPeer, 500))
 	gw.SetMuse(museSvc)
+	if resSvc != nil {
+		gw.SetResources(resSvc)
+		gw.AgentLogs().SetRedactor(resSvc.Redactor().Redact, func(peerID string, names []string) {
+			_ = st.AppendAudit(peerID, "secret.redacted",
+				fmt.Sprintf("secret=%s where=logs", strings.Join(names, ",")), time.Now().Unix())
+		})
+	}
 	if cfg.AdminPasswordHash != "" {
 		gw.SetAdminHash([]byte(cfg.AdminPasswordHash))
 	} else {

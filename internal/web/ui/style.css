@@ -266,6 +266,7 @@ input:focus-visible, select:focus-visible { outline: none; border-color: var(--a
   font-size: var(--fs-sm); line-height: 1.5; min-height: 96px; resize: vertical;
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
+.modal textarea.mono { font-family: var(--mono); font-size: var(--fs-xs); }
 .modal textarea:hover { border-color: var(--muted-2); }
 .modal textarea:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .modal textarea::placeholder { color: var(--muted-2); }
@@ -291,6 +292,8 @@ input[type="checkbox"] { height: auto; accent-color: var(--accent); }
 .switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* segmented */
+.grant-list { display: flex; flex-direction: column; gap: var(--s-2); max-height: 50vh; overflow-y: auto; padding: var(--s-2) 0; border-top: 1px solid var(--border); }
+.grant-row small { margin-left: var(--s-1); }
 .seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-lg); }
 .seg button {
   display: inline-flex; align-items: center; gap: var(--s-2); border: 0; background: transparent; color: var(--muted);

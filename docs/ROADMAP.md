@@ -59,6 +59,22 @@ reassign + lease 到期回收 + `waiting|ready|failed|dropped`（dropped 终态�
   下一步接入通知类副作用与更完整的重试操作面板。
 - **Prompt**：已有模板 revision/hash、`base_revision` 与 diff 查询接口；编辑器级差异 UI 仍是后续。
 
+## 6. 资源中心（密钥 / MCP / Skill / Prompt）
+
+**设计：** DESIGN §4.12、ADR-0004（清单）、ADR-0005（拉取）。relay 只登记、授权、下发，
+不代理 MCP、不执行 skill。
+
+- [x] **P1** 表结构、`secrets.key` 加密、secret 资源、按 peer / `*` 授权、
+  `GET /resources/current`、`GET /resources/secrets/{name}`、heartbeat `resources_update` /
+  `resources_rev` 回执、控制台「资源中心」密钥页
+- [x] **P2** `mcp` / `prompt` 资源；MCP 中立格式校验；`GET /resources/mcp/{name}`
+  解析 `${secret:}`，缺授权 409；授权 MCP 时提示缺少的依赖密钥
+- [x] **P3** 接收端（relay-tail、relay-poll.sh、relay-tail.sh、两份 relay-watch.sh、Hermes supervisor）
+  转发 `resources_update`、heartbeat 带 `.resources_rev`、`.resources_rev.staged` 去重（`receiver_rev` 会变）；
+  四个模板加「资源同步」一节，`PromptVersion` 18；成员页显示同步状态
+- [x] **P3b** `skill` 上传/校验/下载（tar.gz，`SKILL.md` frontmatter，≤1 MiB 解压，防路径穿越/链接/gzip 炸弹）
+- [x] **P4** Guard / `POST /logs` 入站密钥明文打码为 `[secret:NAME]`，审计 `secret.redacted`
+
 ## P2 polish 状态（本版已含）
 
 - [x] Store 接口隔离（`internal/store.Store`），Postgres 可 drop-in（见 POSTGRES.md）
