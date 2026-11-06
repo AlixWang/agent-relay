@@ -280,7 +280,15 @@ prompt snippets configured by hand on each. The hub lets the operator
 - **Kinds** (closed set): `secret` (external API key), `mcp` (neutral config,
   may reference `${secret:NAME}`), `skill` (`SKILL.md` directory as tar.gz),
   `prompt` (business prompt snippet; unrelated to `prompt_revisions`, §8.6).
-  `secret`, `mcp` and `prompt` have shipped; `skill` is rejected with 400 until it does.
+  All four kinds have shipped.
+- **Skill archives:** uploaded as multipart `POST /admin/resources/skill`
+  (field `archive`, optional `description` override); the name comes from
+  `SKILL.md` frontmatter (`name`, `description`), never the URL. Accepted:
+  gzip'd tar of regular files + directories only, `SKILL.md` at the root or
+  under one wrapper directory, printable-ASCII relative paths, no `..`, no
+  absolute paths, no links/devices, no duplicates, ≤256 files, ≤1 MiB
+  unpacked (read with a hard cap, so gzip bombs stop early). Stored and served
+  byte-for-byte; the relay never unpacks it on disk or executes it.
 - **MCP neutral format:** `{transport: "stdio"|"http", command, args[], env{},
   url, headers{}}` — stdio takes command/args/env, http takes an absolute
   http(s) url + headers. `${secret:NAME}` is allowed in `args`, `env` values,
@@ -314,8 +322,9 @@ prompt snippets configured by hand on each. The hub lets the operator
   `resources_pending`; the agent-facing `GET /peers` strips both.
 - **Fetch:** `GET /resources/secrets/{name}`; `GET /resources/mcp/{name}`
   returns the config with every reference resolved (all-or-nothing: a
-  reference the peer is not granted → 409 + `missing_secrets`); later
-  `/resources/skills/{name}`. Granting an MCP config whose secrets the peer
+  reference the peer is not granted → 409 + `missing_secrets`);
+  `GET /resources/skills/{name}` serves the archive (`application/gzip`,
+  `no-store`, no audit row — it carries no secret). Granting an MCP config whose secrets the peer
   lacks succeeds but the admin response lists `missing_secrets`. Missing and not-granted are both 404. Responses
   carrying plaintext are `Cache-Control: no-store` and write one `secret.fetch`
   audit row per secret revealed (actor = peer).
@@ -575,6 +584,7 @@ All endpoints require `Authorization: Bearer <token>` unless noted.
 | `POST /verify/smoke` | Trigger onboarding verification | Server creates a smoke task addressed to the requester; see §9.4. |
 | `GET /resources/current` | Resource hub manifest (§4.12, ADR 0004) | Only resources granted to the caller (directly or via `*`); `manifest_rev` digest. Heartbeat carries `resources_rev` both ways. |
 | `GET /resources/secrets/{name}` | Fetch one secret (ADR 0005) | `{name, value}`; 404 when missing or not granted; `no-store`; audited as `secret.fetch`. |
+| `GET /resources/skills/{name}` | Download a skill archive (ADR 0005) | The uploaded tar.gz byte-for-byte; 404 when missing or not granted; `no-store`. |
 | `GET /resources/mcp/{name}` | Fetch a resolved MCP config (ADR 0005) | `{name, config}` with `${secret:}` filled in; 409 + `missing_secrets` when a referenced secret is not granted; `no-store`; one `secret.fetch` row per secret revealed. |
 
 Admin (session cookie, separate from agent tokens):
@@ -590,6 +600,7 @@ Admin (session cookie, separate from agent tokens):
 | `GET /admin/logs/export` | Agent runtime log export as NDJSON, same filters. |
 | `POST /admin/prompts` | Generate an onboarding prompt for a chosen agent type (§9.3). |
 | `GET /admin/resources?kind=` · `GET/PUT/DELETE /admin/resources/{kind}/{name}` | Resource hub (§4.12): list, history, create/overwrite (secret value write-only; empty value keeps it), delete. |
+| `POST /admin/resources/skill` | Upload a skill archive (multipart `archive` + optional `description`); name from `SKILL.md`. |
 | `POST /admin/resources/{kind}/{name}/grants` · `DELETE …/grants/{peer}` | Grant to a peer or `*`; revoke (secret revocation answers with a rotate-upstream warning). |
 | `GET/POST /admin/muse/accounts` · `PATCH/DELETE /admin/muse/accounts/:id` | Optional Muse account authorization (§4.9): write-only cookie binding, enable/auto-wake switches, revoke. |
 | `POST /admin/muse/accounts/:id/keepalive` · `/wake` · `POST /admin/muse/keepalive` · `GET /admin/muse/status` | Manual session renewal / VM wake / all-account sweep / loop status. |
@@ -1136,7 +1147,8 @@ path; no agent-facing endpoint was added.
 
 `#resources`（`ui/js/resources.js`）登记与授权共享资源（§4.12）：
 
-- 四个 tab：密钥 / MCP / Skill / Prompt；Skill 尚未上线，显示「即将支持」。
+- 四个 tab：密钥 / MCP / Skill / Prompt。Skill 用文件选择上传 .tar.gz，名称取自包内 SKILL.md；
+  「更新」时若包里的 name 变了，会另存为新 skill 并提示。
 - MCP 用 JSON 编辑中立格式（新建时预填示例），列表显示依赖的密钥；授权 MCP 时若对方缺少
   依赖密钥，toast 提示缺哪些（授权照样生效，拉取会 409）。Prompt 是纯文本。
 - 密钥只写不读：新建或覆盖时输入框在请求发出前清空；编辑时留空即保留原值。

@@ -565,6 +565,7 @@ func TestResourceSyncDocumented(t *testing.T) {
 				"资源同步", "resources_update", "/resources/current", ".resources_rev.staged",
 				"mv ~/workspace/task-relay/.resources_rev.staged ~/workspace/task-relay/.resources_rev",
 				"missing_secrets", "${secret:NAME}", "chmod 600",
+				"kind=skill", "resources/skills/<name>/", "SKILL.md",
 			} {
 				if !strings.Contains(out, needle) {
 					t.Fatalf("%s (reconfigure=%v): resource sync section missing %q", typ, reconf, needle)

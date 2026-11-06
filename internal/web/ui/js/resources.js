@@ -14,13 +14,27 @@ export const resState = {
 };
 
 const RES_ROOT = '/admin/resources';
+const SKILL_UPLOAD = '/admin/resources/skill';
+export const MAX_SKILL_UPLOAD = 4 << 20;
+
+// checkSkillFile rejects obviously wrong uploads before they leave the
+// browser; the server does the real validation (frontmatter, paths, size).
+export function checkSkillFile(file) {
+  if (!file) return '请选择 skill 压缩包（.tar.gz / .tgz）';
+  if (!/\.(tar\.gz|tgz)$/i.test(file.name)) return '只支持 .tar.gz / .tgz（包内含 SKILL.md）';
+  if (file.size > MAX_SKILL_UPLOAD) return '压缩包超过 4 MiB';
+  return '';
+}
+
+export const humanSize = (n) => (n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + ' MiB'
+  : n >= 1024 ? Math.round(n / 1024) + ' KiB' : n + ' B');
 export const ALL_PEERS = '*';
 
 // Kinds the hub can store in this build. Others render as "即将支持".
 export const RES_KINDS = [
   { kind: 'secret', label: '密钥', ready: true },
   { kind: 'mcp', label: 'MCP', ready: true },
-  { kind: 'skill', label: 'Skill', ready: false },
+  { kind: 'skill', label: 'Skill', ready: true },
   { kind: 'prompt', label: 'Prompt', ready: true },
 ];
 
@@ -138,7 +152,7 @@ function renderResources() {
   tbody.innerHTML = list.map((r) => {
     const g = grantSummary(r.grants);
     return `<tr>
-      <td><code>${esc(r.name)}</code>${(r.requires_secrets || []).length ? `<br><small class="muted">依赖密钥：${r.requires_secrets.map(esc).join(', ')}</small>` : ''}</td>
+      <td><code>${esc(r.name)}</code>${(r.requires_secrets || []).length ? `<br><small class="muted">依赖密钥：${r.requires_secrets.map(esc).join(', ')}</small>` : ''}${r.kind === 'skill' && r.size ? `<br><small class="muted">${esc(humanSize(r.size))}</small>` : ''}</td>
       <td class="muted">${esc(r.description || '—')}</td>
       <td><span class="badge ${g.tone === 'muted' ? '' : g.tone}">${esc(g.text)}</span></td>
       <td><div class="time-cell"><span>${fmtTime(r.updated_at)}</span><small>${esc(ago(r.updated_at))}</small></div></td>
@@ -166,15 +180,22 @@ function openEditor(r = null) {
   const kind = resState.kind;
   const label = kindLabel(kind);
   const isSecret = kind === 'secret';
-  $('resDlgTitle').textContent = editing ? `编辑${label} ${r.name}` : `新建${label}`;
+  const isSkill = kind === 'skill';
+  $('resDlgTitle').textContent = editing ? `${isSkill ? '更新' : '编辑'}${label} ${r.name}` : `${isSkill ? '上传' : '新建'}${label}`;
   $('resDlgDesc').textContent = isSecret ? '服务端 AES-GCM 加密存储，永不回显'
     : kind === 'mcp' ? '中立格式：transport 为 stdio（command/args/env）或 http（url/headers）；值里可用 ${secret:NAME} 引用密钥'
+    : isSkill ? 'SKILL.md 所在目录打成 .tar.gz（≤1 MiB 解压后）；名称取自 SKILL.md 的 name，描述默认取 description'
     : '下发给助手的业务 Prompt 片段（与 relay 自身的工作指令无关）';
   $('resName').value = editing ? r.name : '';
   $('resName').readOnly = editing;
+  $('resNameField').hidden = isSkill;
+  $('resName').required = !isSkill;
   $('resDesc').value = editing ? (r.description || '') : '';
+  $('resDesc').placeholder = isSkill ? '留空则使用 SKILL.md 里的 description' : '用途、来源账号、轮换周期';
   $('resValueField').hidden = !isSecret;
-  $('resContentField').hidden = isSecret;
+  $('resContentField').hidden = isSecret || isSkill;
+  $('resFileField').hidden = !isSkill;
+  $('resFile').value = '';
   $('resValue').value = '';
   $('resValue').placeholder = editing ? '留空则保留原值；填写即覆盖' : '粘贴密钥明文';
   const content = $('resContent');
@@ -190,6 +211,7 @@ async function submitEditor(e) {
   const name = $('resName').value.trim();
   const err = $('resDlgErr');
   const fail = (m) => { err.textContent = m; err.hidden = false; };
+  if (resState.kind === 'skill') return submitSkill(fail);
   if (!NAME_RE.test(name)) return fail('名称只能用字母、数字、_ . -，以字母或数字开头，最多 64 个字符');
   const kind = resState.kind;
   const value = $('resValue').value;
@@ -205,6 +227,32 @@ async function submitEditor(e) {
     await api(resURL(kind, name), { method: 'PUT', body: JSON.stringify(body) });
     const verb = resState.editing ? (kind === 'secret' && !value ? '已更新' : '已保存') : '已登记';
     toast(`${verb} ${name}`, 'ok');
+    $('resDlg').close();
+    refreshResources();
+  } catch (e2) {
+    fail(e2.message);
+  }
+}
+
+async function submitSkill(fail) {
+  const file = $('resFile').files?.[0];
+  const bad = checkSkillFile(file);
+  if (bad) return fail(bad);
+  const form = new FormData();
+  form.append('archive', file);
+  const desc = $('resDesc').value.trim();
+  if (desc) form.append('description', desc);
+  try {
+    // multipart: no JSON content type (the browser sets the boundary).
+    const r = await fetch(SKILL_UPLOAD, { method: 'POST', body: form });
+    const body = await r.json().catch(() => null);
+    if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
+    const v = body.resource;
+    if (resState.editing && v.name !== resState.editing.name) {
+      toast(`压缩包里的 SKILL.md 名为 ${v.name}，已另存为新 skill（不是更新 ${resState.editing.name}）`, 'warn', 7000);
+    } else {
+      toast(`已上传 skill ${v.name}`, 'ok');
+    }
     $('resDlg').close();
     refreshResources();
   } catch (e2) {

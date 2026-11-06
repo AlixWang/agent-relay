@@ -1,7 +1,12 @@
 package gateway
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -183,9 +188,6 @@ func TestResourceHubWildcardAndAuth(t *testing.T) {
 	if c, _ := f.doCookie(t, "PUT", "/admin/resources/secret/bad%20name", map[string]any{"value": "v"}, admin); c != 400 {
 		t.Fatalf("bad name: %d", c)
 	}
-	if c, out := f.doCookie(t, "PUT", "/admin/resources/skill/review", map[string]any{"value": "x"}, admin); c != 400 || !strings.Contains(out["error"].(string), "unsupported") {
-		t.Fatalf("skill not yet supported should 400: %d %+v", c, out)
-	}
 	if c, _ := f.doCookie(t, "PUT", "/admin/resources/bogus/x", map[string]any{"value": "v"}, admin); c != 400 {
 		t.Fatalf("bogus kind: %d", c)
 	}
@@ -311,5 +313,109 @@ func TestResourceSyncStatusIsOperatorOnly(t *testing.T) {
 	_, out = f.do(t, "GET", "/peers", nil, f.tok["bob"])
 	if a := peerRow(out, "alice"); a["resources_rev"] != nil || a["resources_pending"] != nil {
 		t.Fatalf("agent /peers leaked another peer's receipt: %+v", a)
+	}
+}
+
+func skillArchive(t *testing.T, skillMD string, extra map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	files := map[string]string{"code-review/SKILL.md": skillMD}
+	for k, v := range extra {
+		files[k] = v
+	}
+	for name, body := range files {
+		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg})
+		_, _ = tw.Write([]byte(body))
+	}
+	_ = tw.Close()
+	_ = gz.Close()
+	return buf.Bytes()
+}
+
+func (f *fixture) uploadSkill(t *testing.T, cookie string, archive []byte, desc string) (int, map[string]any) {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, _ := mw.CreateFormFile("archive", "skill.tar.gz")
+	_, _ = fw.Write(archive)
+	if desc != "" {
+		_ = mw.WriteField("description", desc)
+	}
+	_ = mw.Close()
+	req := httptest.NewRequest("POST", "/admin/resources/skill", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: cookie})
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out
+}
+
+func TestResourceHubSkill(t *testing.T) {
+	f := newResourceFixture(t)
+	admin := f.adminLogin(t)
+	md := "---\nname: code-review\ndescription: Review code changes\n---\n# body\n"
+	archive := skillArchive(t, md, map[string]string{"code-review/scripts/run.sh": "echo hi\n"})
+
+	c, out := f.uploadSkill(t, admin, archive, "")
+	res, _ := out["resource"].(map[string]any)
+	if c != 200 || res["name"] != "code-review" || res["description"] != "Review code changes" {
+		t.Fatalf("upload: %d %+v", c, out)
+	}
+	// Hostile archive → 400 with a reason, nothing stored.
+	evil := skillArchive(t, md, map[string]string{"../../etc/cron.d/x": "* * * * * root rm -rf /\n"})
+	if c, out := f.uploadSkill(t, admin, evil, ""); c != 400 || !strings.Contains(fmt.Sprint(out["error"]), "traversal") {
+		t.Fatalf("evil upload: %d %+v", c, out)
+	}
+	// Name comes from SKILL.md, so PUT by URL is refused.
+	if c, _ := f.doCookie(t, "PUT", "/admin/resources/skill/code-review", map[string]any{"value": "x"}, admin); c != 400 {
+		t.Fatalf("PUT skill should 400, got %d", c)
+	}
+	// Missing file field.
+	req := httptest.NewRequest("POST", "/admin/resources/skill", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "agent_relay_admin", Value: admin})
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("non-multipart upload: %d", rec.Code)
+	}
+
+	if c, _ := f.do(t, "GET", "/resources/skills/code-review", nil, f.tok["alice"]); c != 404 {
+		t.Fatalf("ungranted download: %d", c)
+	}
+	f.doCookie(t, "POST", "/admin/resources/skill/code-review/grants", map[string]any{"peer_id": "alice"}, admin)
+
+	// Manifest: fetch_url + file count, no archive bytes inline.
+	_, out = f.do(t, "GET", "/resources/current", nil, f.tok["alice"])
+	e := out["resources"].([]any)[0].(map[string]any)
+	if e["kind"] != "skill" || e["fetch_url"] != "/resources/skills/code-review" || e["content"].(map[string]any)["files"] != float64(2) {
+		t.Fatalf("manifest skill entry: %+v", e)
+	}
+	// Download: exact bytes, gzip, attachment name.
+	req = httptest.NewRequest("GET", "/resources/skills/code-review", nil)
+	req.Header.Set("Authorization", "Bearer "+f.tok["alice"])
+	rec = httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || !bytes.Equal(rec.Body.Bytes(), archive) {
+		t.Fatalf("download: %d len=%d", rec.Code, rec.Body.Len())
+	}
+	if rec.Header().Get("Content-Type") != "application/gzip" || !strings.Contains(rec.Header().Get("Content-Disposition"), "code-review.tar.gz") {
+		t.Fatalf("download headers: %+v", rec.Header())
+	}
+	// Re-upload with new content → digest moves → nudge.
+	rev := f.heartbeat(t, "alice", nil)["resources_rev"].(string)
+	f.heartbeat(t, "alice", map[string]any{"resources_rev": rev})
+	f.uploadSkill(t, admin, skillArchive(t, md+"v2\n", nil), "团队规范")
+	hb := f.heartbeat(t, "alice", nil)
+	if hb["resources_update"] != true || hb["resources_rev"] == rev {
+		t.Fatalf("re-upload did not nudge: %+v", hb)
+	}
+	_, out = f.doCookie(t, "GET", "/admin/resources/skill/code-review", nil, admin)
+	if r := out["resource"].(map[string]any); r["description"] != "团队规范" || len(out["revisions"].([]any)) != 2 {
+		t.Fatalf("admin view after re-upload: %+v", out)
 	}
 }

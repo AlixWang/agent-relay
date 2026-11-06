@@ -27,7 +27,18 @@ Rules shared by all three:
   `Cache-Control: no-store` and write one `secret.fetch` audit row per secret
   revealed, with actor = the peer id;
 - an MCP config that references a secret the peer is not granted answers 409
-  with the missing names — never a half-substituted config.
+  with the missing names — never a half-substituted config;
+- the skill archive is served byte-for-byte as uploaded (`no-store`, no audit
+  row: it carries no secret material).
+
+Skills are uploaded with their own console call, `POST /admin/resources/skill`
+(multipart, field `archive`, optional `description`). The tenant name comes
+from the archive's `SKILL.md` frontmatter rather than the URL, so the stored
+name and the skill's own metadata cannot disagree; `PUT
+/admin/resources/skill/{name}` is therefore refused. The relay validates the
+archive (regular files only, one directory, no traversal/links, 1 MiB
+unpacked, capped read to stop gzip bombs) but never unpacks it for use and
+never executes it.
 
 The console side lives under `/admin/resources*` and is write-only for secret
 values: no admin response ever contains secret plaintext.

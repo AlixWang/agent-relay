@@ -145,6 +145,7 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /resources/current", s.handleResourcesCurrent)
 	mux.HandleFunc("GET /resources/secrets/{name}", s.handleResourceSecret)
 	mux.HandleFunc("GET /resources/mcp/{name}", s.handleResourceMCP)
+	mux.HandleFunc("GET /resources/skills/{name}", s.handleResourceSkill)
 
 	mux.HandleFunc("POST /admin/login", s.handleAdminLogin)
 	mux.HandleFunc("POST /admin/logout", s.handleAdminLogout)
@@ -179,6 +180,7 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /admin/resources", s.requireAdmin(s.handleAdminResourcesList))
 	mux.HandleFunc("GET /admin/resources/{kind}/{name}", s.requireAdmin(s.handleAdminResourceGet))
 	mux.HandleFunc("PUT /admin/resources/{kind}/{name}", s.requireAdmin(s.handleAdminResourcePut))
+	mux.HandleFunc("POST /admin/resources/skill", s.requireAdmin(s.handleAdminResourceSkillUpload))
 	mux.HandleFunc("DELETE /admin/resources/{kind}/{name}", s.requireAdmin(s.handleAdminResourceDelete))
 	mux.HandleFunc("POST /admin/resources/{kind}/{name}/grants", s.requireAdmin(s.handleAdminResourceGrant))
 	mux.HandleFunc("DELETE /admin/resources/{kind}/{name}/grants/{peer}", s.requireAdmin(s.handleAdminResourceRevoke))

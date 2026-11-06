@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -128,6 +129,64 @@ func (s *Server) handleResourceSecret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "name": name, "value": v})
 }
 
+// handleResourceSkill serves a granted skill's tar.gz (ADR 0005). No secret
+// material is involved, so no audit row; still no-store, since the archive
+// is per-peer and changes over time.
+func (s *Server) handleResourceSkill(w http.ResponseWriter, r *http.Request) {
+	peer, _ := s.authed(w, r)
+	if peer == nil || !s.checkVersion(w, peer) || !s.resourcesReady(w) {
+		return
+	}
+	name := r.PathValue("name")
+	res, err := s.resources.SkillArchive(peer.ID, name)
+	if err != nil {
+		resourceError(w, err)
+		return
+	}
+	noStore(w)
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".tar.gz"))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(res.Content)
+}
+
+// handleAdminResourceSkillUpload takes a multipart skill archive: the file
+// field is "archive", the optional "description" field overrides the
+// frontmatter description. The resource name comes from SKILL.md.
+func (s *Server) handleAdminResourceSkillUpload(w http.ResponseWriter, r *http.Request) {
+	if !s.resourcesReady(w) {
+		return
+	}
+	limit := int64(s.cfg.MaxBodyBytes)
+	if limit < 2<<20 {
+		limit = 2 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := r.ParseMultipartForm(limit); err != nil {
+		writeErr(w, 400, "expected multipart form with an 'archive' file")
+		return
+	}
+	f, _, err := r.FormFile("archive")
+	if err != nil {
+		writeErr(w, 400, "missing 'archive' file field")
+		return
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, 4<<20))
+	if err != nil {
+		writeErr(w, 400, "could not read archive")
+		return
+	}
+	v, err := s.resources.PutSkill(raw, r.FormValue("description"))
+	if err != nil {
+		resourceError(w, err)
+		return
+	}
+	s.auditResource("resource.put",
+		fmt.Sprintf("kind=skill name=%s revision=%s bytes=%d", v.Name, v.RevisionID, len(raw)))
+	writeJSON(w, 200, map[string]any{"ok": true, "resource": v})
+}
+
 // handleResourceMCP returns the MCP config with ${secret:} resolved. It
 // reveals secrets, so it follows the secret-fetch rules (ADR 0005).
 func (s *Server) handleResourceMCP(w http.ResponseWriter, r *http.Request) {
@@ -230,6 +289,9 @@ func (s *Server) handleAdminResourcePut(w http.ResponseWriter, r *http.Request) 
 		} else {
 			v, err = s.resources.PutPrompt(name, req.Description, text)
 		}
+	case resources.KindSkill:
+		// The skill's name comes from its SKILL.md frontmatter, not the URL.
+		err = fmt.Errorf("%w: upload skills as multipart to /admin/resources/skill", resources.ErrInvalid)
 	default:
 		err = resources.CheckKind(kind)
 		if err == nil {

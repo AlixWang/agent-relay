@@ -235,14 +235,8 @@ func TestDeletePeerDropsGrants(t *testing.T) {
 	}
 }
 
-func TestUnsupportedKindsRejectedForNow(t *testing.T) {
-	if enabledKind(KindSkill) {
-		t.Skip("skill enabled; this guard is obsolete")
-	}
-	if err := CheckKind(KindSkill); !errors.Is(err, ErrUnsupportedKind) {
-		t.Fatalf("skill: %v", err)
-	}
-	for _, k := range []string{KindSecret, KindMCP, KindPrompt} {
+func TestKindsAllEnabled(t *testing.T) {
+	for _, k := range []string{KindSecret, KindMCP, KindSkill, KindPrompt} {
 		if err := CheckKind(k); err != nil {
 			t.Fatalf("%s should be enabled: %v", k, err)
 		}

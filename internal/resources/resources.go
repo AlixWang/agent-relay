@@ -73,7 +73,7 @@ func knownKind(kind string) bool {
 }
 
 // enabledKind gates kinds whose validation/distribution has shipped.
-func enabledKind(kind string) bool { return kind != KindSkill && knownKind(kind) }
+func enabledKind(kind string) bool { return knownKind(kind) }
 
 // Service owns validation, secret encryption and manifest computation.
 type Service struct {
@@ -223,6 +223,33 @@ func decodeContent(kind string, b []byte) (any, []string) {
 		return string(b), nil
 	}
 	return nil, nil
+}
+
+// PutSkill validates an uploaded tar.gz, then stores it under the name its
+// SKILL.md frontmatter declares. The operator cannot pick the name: the
+// archive and its metadata must agree. description overrides the
+// frontmatter's when non-empty.
+func (s *Service) PutSkill(raw []byte, description string) (*View, error) {
+	meta, err := ParseSkill(raw)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(description) == "" {
+		description = meta.Description
+	}
+	return s.putPlain(KindSkill, meta.Name, description, raw)
+}
+
+// SkillArchive returns a granted skill's tar.gz bytes for download.
+func (s *Service) SkillArchive(peerID, name string) (*store.Resource, error) {
+	r, err := s.granted(peerID, KindSkill, name)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, ErrNotFound
+	}
+	return r, nil
 }
 
 // PutMCP creates or overwrites an MCP config (canonicalized before storing).
@@ -525,6 +552,12 @@ func (s *Service) Manifest(peerID string) (*Manifest, error) {
 			e.FetchURL = "/resources/mcp/" + r.Name
 		case KindPrompt:
 			e.Content, _ = decodeContent(r.Kind, r.Content)
+		case KindSkill:
+			// Archive size only; the archive itself is a separate fetch.
+			e.FetchURL = "/resources/skills/" + r.Name
+			if m, err := ParseSkill(r.Content); err == nil {
+				e.Content = map[string]any{"files": m.Files, "size": m.Size}
+			}
 		}
 		m.Resources = append(m.Resources, e)
 	}
