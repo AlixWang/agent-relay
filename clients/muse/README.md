@@ -86,6 +86,7 @@ bin/relay-tail           Go 二进制
 spool/wake.jsonl         daemon 事件行（append-only）
 spool/relay-tail.err     daemon stderr（401/426 判读）
 spool/pending.log        无 hook 体系时的待处理事件（wake 默认实现）
+relay-context.md         只读背景：本批次群作用域最近消息（refresh_context 生成，无群作用域时不生成；唤醒时只以指针 {file, room, bytes} 并进唤醒交接，worker 按指针读文件）
 relay-tail.pid           daemon pidfile（单实例锁）
 .spool_offset            已消费行数
 .last_seq                游标（daemon 原子写入）
