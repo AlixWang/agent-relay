@@ -447,7 +447,7 @@ func TestApplyRenewKeepsErrorScopesSeparate(t *testing.T) {
 
 func TestListPromotesLegacyWakeError(t *testing.T) {
 	env := newTestEnv(t, true)
-	a := env.authorize(t, "alice")
+	env.authorize(t, "alice")
 	row, err := env.st.GetMuseAccountByPeer("alice")
 	if err != nil || row == nil {
 		t.Fatalf("get account: %v %+v", err, row)
