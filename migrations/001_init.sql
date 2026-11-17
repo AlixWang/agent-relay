@@ -281,6 +281,7 @@ CREATE TABLE IF NOT EXISTS muse_accounts (
     session_status    TEXT DEFAULT '',
     vm_id             TEXT DEFAULT '',
     vm_state          TEXT DEFAULT '',
+    vm_state_at       INTEGER DEFAULT 0,
     auth_state        TEXT DEFAULT 'unverified',
     last_error        TEXT DEFAULT '',
     last_keepalive_at INTEGER DEFAULT 0,

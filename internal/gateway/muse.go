@@ -356,7 +356,7 @@ func (s *Server) attachMuse(views []*presence.PeerView) {
 			continue
 		}
 		v.Muse = &presence.PeerMuseView{
-			AccountID: a.ID, AuthState: a.AuthState, VMState: a.VMState,
+			AccountID: a.ID, AuthState: a.AuthState, VMState: a.VMState, VMStateAt: a.VMStateAt,
 			ExpiresAt: a.ExpiresAt, LastKeepaliveAt: a.LastKeepaliveAt,
 			LastWakeAt: a.LastWakeAt, LastAttemptOK: a.LastAttemptOK,
 			LastError: a.LastError, Enabled: a.Enabled, AutoWake: a.AutoWake,

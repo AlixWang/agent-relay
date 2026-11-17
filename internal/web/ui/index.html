@@ -262,7 +262,7 @@
           </div>
           <p class="hint" id="museStatus"><svg class="icon xs"><use href="#i-info"/></svg><span>尚未运行</span></p>
         </div>
-        <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg>授权后只调用 muse.ai 的 /api/session 与 /api/hatch/vm/wake：按配置周期续期 Cookie、保持沙盒 VM 热备，成员离线时自动唤醒。不会读取聊天内容，也不会代发消息。唤醒成功但节点未上线时，检查沙盒里的 Hatch hook 是否仍在跑 relay-watch.sh。</p>
+        <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg>授权后只调用 muse.ai 的 /api/session 与 /api/hatch/vm/wake：按配置周期续期 Cookie、保持沙盒 VM 热备，成员离线时自动唤醒。不会读取聊天内容，也不会代发消息。唤醒请求被接受但 /api/session 仍未确认 RUNNING 时，检查沙盒里的 Hatch hook 是否仍在跑 relay-watch.sh。</p>
       </section>
 
       <!-- ---------- 消息线程 ---------- -->

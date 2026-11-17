@@ -10,7 +10,7 @@ func TestMuseAccountsCRUDAndCascades(t *testing.T) {
 	a := &MuseAccount{
 		ID: "ma_1", PeerID: "alice", Label: "a@example.com",
 		CookiesEnc: "ciphertext", CookiesExp: `{"hatch_vml":1900000000}`,
-		SessionStatus: "assigned", VMID: "vm-1", VMState: "RUNNING",
+		SessionStatus: "assigned", VMID: "vm-1", VMState: "RUNNING", VMStateAt: 99,
 		AuthState: "ok", LastError: "",
 		LastKeepaliveAt: 100, LastAttemptAt: 101, LastAttemptOK: true,
 		LastWakeAt: 102, LastWakeOK: true,
@@ -25,9 +25,9 @@ func TestMuseAccountsCRUDAndCascades(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: %+v (%v)", got, err)
 	}
-	if got.PeerID != "alice" || got.CookiesEnc != "ciphertext" || !got.LastAttemptOK ||
-		!got.LastWakeOK || got.LastWakeState != "running" || got.LastWakeError != "" ||
-		!got.AutoWake || !got.Enabled {
+	if got.PeerID != "alice" || got.CookiesEnc != "ciphertext" || got.VMStateAt != 99 ||
+		!got.LastAttemptOK || !got.LastWakeOK || got.LastWakeState != "running" ||
+		got.LastWakeError != "" || !got.AutoWake || !got.Enabled {
 		t.Fatalf("round-trip: %+v", got)
 	}
 	byPeer, err := st.GetMuseAccountByPeer("alice")
@@ -54,6 +54,8 @@ func TestMuseAccountsCRUDAndCascades(t *testing.T) {
 	got.LastWakeOK = false
 	got.LastWakeState = "unconfirmed"
 	got.LastWakeError = "wake not confirmed"
+	got.VMState = "UNKNOWN"
+	got.VMStateAt = 222
 	got.UpdatedAt = 200
 	if err := st.SaveMuseAccount(got); err != nil {
 		t.Fatalf("save: %v", err)
@@ -61,7 +63,8 @@ func TestMuseAccountsCRUDAndCascades(t *testing.T) {
 	got2, _ := st.GetMuseAccount("ma_1")
 	if got2.Label != "renamed" || got2.Enabled || got2.AutoWake || got2.LastAttemptOK ||
 		got2.LastWakeOK || got2.LastWakeState != "unconfirmed" ||
-		got2.LastWakeError != "wake not confirmed" || got2.UpdatedAt != 200 {
+		got2.LastWakeError != "wake not confirmed" || got2.VMState != "UNKNOWN" ||
+		got2.VMStateAt != 222 || got2.UpdatedAt != 200 {
 		t.Fatalf("save round-trip: %+v", got2)
 	}
 	if got2.AuthorizedAt != 90 {

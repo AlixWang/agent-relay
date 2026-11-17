@@ -176,6 +176,23 @@ func mergeSetCookies(cookies map[string]string, exp map[string]int64, set []*htt
 	}
 }
 
+// cookieSetRotated reports whether a response changed a non-empty cookie
+// value. Deletions and metadata-only updates are not rotations.
+func cookieSetRotated(old map[string]string, set []*http.Cookie, now int64) bool {
+	for _, c := range set {
+		if c == nil || c.Name == "" || c.Value == "" {
+			continue
+		}
+		if c.MaxAge < 0 || (c.MaxAge == 0 && !c.Expires.IsZero() && c.Expires.Before(time.Unix(now, 0))) {
+			continue
+		}
+		if old[c.Name] != c.Value {
+			return true
+		}
+	}
+	return false
+}
+
 func minEssentialExpiry(exp map[string]int64) int64 {
 	var min int64
 	for _, name := range expiryNames {

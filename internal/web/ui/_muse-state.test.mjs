@@ -13,6 +13,7 @@ const mod = await import(pathToFileURL(path.join(here, 'js', 'muse.js')).href);
 const {
   museURL, museAuthTone, museAuthLabel, museExpiryText, museExpiryTone, museVMTone,
   museSessionOK, museWakeUnconfirmed, museWakeTone, museWakeLabel,
+  museVMText, museVMTitle,
 } = mod;
 
 const assert = (cond, msg) => {
@@ -73,5 +74,17 @@ assert(museVMTone('RUNNING') === 'ok', 'running vm');
 assert(museVMTone('DISABLED') === 'muted', 'disabled vm');
 assert(museVMTone('SUSPENDED') === 'warn', 'suspended vm');
 assert(museVMTone('') === 'muted', 'unknown vm');
+assert(museVMTone('UNKNOWN') === 'muted', 'explicit unknown vm');
+
+assert(museVMText({ vm_state: 'RUNNING' }) === 'RUNNING', 'running vm text');
+assert(museVMText({ vm_state: 'SUSPENDED' }) === 'SUSPENDED', 'suspended vm text');
+assert(museVMText({ vm_state: 'UNKNOWN' }) === '未知（休眠/未分配）', 'unknown vm text');
+assert(museVMText({ vm_state: '' }) === '未知（休眠/未分配）', 'missing vm text');
+assert(museVMText({}) === '未知（休眠/未分配）', 'absent vm text');
+const vmTip = museVMTitle({ vm_state: 'UNKNOWN', vm_state_at: now });
+assert(vmTip.includes('原始值: UNKNOWN'), 'tooltip keeps raw vm value');
+assert(vmTip.includes('确认于') && vmTip.includes('2030'), 'tooltip shows confirmation time');
+assert(museVMTitle({ vm_state: '' }).includes('原始值: (空)'), 'tooltip marks empty raw value');
+assert(museVMTitle({ vm_state: 'UNKNOWN' }).includes('尚无确认时间'), 'tooltip handles missing timestamp');
 
 console.log('PASS: muse URL/state helpers');

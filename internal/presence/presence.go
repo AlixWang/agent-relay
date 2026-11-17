@@ -72,6 +72,7 @@ type PeerMuseView struct {
 	AccountID       string `json:"account_id"`
 	AuthState       string `json:"auth_state"`
 	VMState         string `json:"vm_state,omitempty"`
+	VMStateAt       int64  `json:"vm_state_at"`
 	ExpiresAt       int64  `json:"expires_at,omitempty"`
 	LastKeepaliveAt int64  `json:"last_keepalive_at,omitempty"`
 	LastWakeAt      int64  `json:"last_wake_at,omitempty"`

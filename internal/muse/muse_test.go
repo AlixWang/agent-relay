@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +31,13 @@ type fakeMuse struct {
 	lastWakeBody map[string]any
 	firstCookie  string
 	lastCookie   string
+
+	// Test-only overrides for rotation/error fixtures.
+	sessionStatus  string
+	sessionSet     []string
+	errorSetCookie string
+	retryAfter     string
+	wakeSet        []string
 }
 
 func (f *fakeMuse) counts() (sessions, wakes, other int) {
@@ -96,6 +105,16 @@ func newFakeMuse(t *testing.T) (*fakeMuse, *httptest.Server) {
 		if f.wakes > 0 {
 			state = f.verifyState
 		}
+		if state == "" {
+			state = f.verifyState
+		}
+		status := f.sessionStatus
+		if status == "" {
+			status = "assigned"
+		}
+		customSet := append([]string(nil), f.sessionSet...)
+		errSet := f.errorSetCookie
+		retryAfter := f.retryAfter
 		f.lastCookie = r.Header.Get("Cookie")
 		f.mu.Unlock()
 		if redirect {
@@ -103,6 +122,12 @@ func newFakeMuse(t *testing.T) (*fakeMuse, *httptest.Server) {
 			return
 		}
 		if code != 0 {
+			if errSet != "" {
+				w.Header().Add("Set-Cookie", errSet)
+			}
+			if retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
+			}
 			w.WriteHeader(code)
 			return
 		}
@@ -110,9 +135,12 @@ func newFakeMuse(t *testing.T) (*fakeMuse, *httptest.Server) {
 			http.SetCookie(w, &http.Cookie{Name: "hatch_vml", Value: "renewed-vml", Path: "/", MaxAge: 172800})
 			http.SetCookie(w, &http.Cookie{Name: "hatch_sess", Value: "renewed-sess", Path: "/", MaxAge: 2592000})
 		}
+		for _, c := range customSet {
+			w.Header().Add("Set-Cookie", c)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "assigned", "vm_id": "vm-1", "vm_state": state,
+			"status": status, "vm_id": "vm-1", "vm_state": state,
 		})
 	})
 	mux.HandleFunc("/api/hatch/vm/wake", func(w http.ResponseWriter, r *http.Request) {
@@ -125,10 +153,14 @@ func newFakeMuse(t *testing.T) (*fakeMuse, *httptest.Server) {
 			f.lastWakeVM = s
 		}
 		code := f.wakeCode
+		wakeSet := append([]string(nil), f.wakeSet...)
 		f.mu.Unlock()
 		if code != 0 {
 			w.WriteHeader(code)
 			return
+		}
+		for _, c := range wakeSet {
+			w.Header().Add("Set-Cookie", c)
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"accepted":true}`))
@@ -320,8 +352,16 @@ func TestTransientFailureKeepsCookiesAndAuth(t *testing.T) {
 	if res.OK || res.AuthState != "ok" || !strings.Contains(res.Error, "403") {
 		t.Fatalf("transient result: %+v", res)
 	}
+	if !strings.Contains(res.Error, "访问被拒绝") {
+		t.Fatalf("403 hint missing: %q", res.Error)
+	}
+	if res.VMState != "RUNNING" || res.VMStateAt != 1_900_000_000 {
+		t.Fatalf("transient result lost confirmed VM state: %+v", res)
+	}
 	row, _ := env.st.GetMuseAccountByPeer("alice")
-	if row.AuthState != "ok" || row.LastAttemptOK || row.LastKeepaliveAt != 1_900_000_000 {
+	if row.AuthState != "ok" || !row.LastAttemptOK || row.LastError != "" ||
+		row.LastKeepaliveAt != 1_900_000_000 || row.LastAttemptAt != 1_900_000_100 ||
+		row.VMState != "RUNNING" || row.VMStateAt != 1_900_000_000 {
 		t.Fatalf("transient clobbered state: %+v", row)
 	}
 	cookies, err := env.svc.openCookies(row)
@@ -717,3 +757,378 @@ func waitFor(t *testing.T, fn func() bool) {
 // OKOrValid is a tiny test helper: the account is usable when the first
 // renewal confirmed the session.
 func (a *Account) OKOrValid() bool { return a.AuthState == "ok" }
+
+func TestUnassignedSessionReturnsRotatedCookies(t *testing.T) {
+	env := newTestEnv(t, false)
+	env.fake.mu.Lock()
+	env.fake.setCookies = false
+	env.fake.sessionStatus = "unassigned"
+	env.fake.sessionSet = []string{"hatch_sess=new-sess; Path=/; Max-Age=2592000"}
+	env.fake.mu.Unlock()
+
+	res, err := env.svc.renew(context.Background(),
+		map[string]string{"hatch_sess": "old-sess"}, map[string]int64{"hatch_sess": env.clock + 10}, false)
+	if err == nil {
+		t.Fatal("unassigned session was treated as success")
+	}
+	var unavailable *MuseSessionUnavailable
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("error type: %T (%v)", err, err)
+	}
+	if unavailable.Status != "unassigned" || !unavailable.Rotated {
+		t.Fatalf("typed error: %+v", unavailable)
+	}
+	if unavailable.Cookies["hatch_sess"] != "new-sess" {
+		t.Fatalf("rotated cookies missing from typed error: %+v", unavailable.Cookies)
+	}
+	if unavailable.CookiesExp["hatch_sess"] != env.clock+2592000 {
+		t.Fatalf("cookie expiry missing from typed error: %+v", unavailable.CookiesExp)
+	}
+	if res.CookiesEnc == "" || !res.Rotated || res.Transient {
+		t.Fatalf("result must seal the rotated jar and stay a confirmed failure: %+v", res)
+	}
+}
+
+func TestUnassignedSessionPersistsRotatedCookies(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	env.fake.mu.Lock()
+	env.fake.setCookies = false
+	env.fake.sessionStatus = "unassigned"
+	env.fake.sessionSet = []string{"hatch_sess=rotated-on-unassigned; Path=/; Max-Age=2592000"}
+	env.fake.mu.Unlock()
+	env.clock += 10
+	res, err := env.svc.Keepalive(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("keepalive: %v", err)
+	}
+	if res.OK || !strings.Contains(res.Error, "not assigned") {
+		t.Fatalf("result: %+v", res)
+	}
+	row, _ := env.st.GetMuseAccountByPeer("alice")
+	if row.AuthState != "ok" || row.LastAttemptOK || row.LastError == "" {
+		t.Fatalf("confirmed session failure not recorded: %+v", row)
+	}
+	// A non-assigned response says nothing about the VM; keep the last
+	// confirmed value and its timestamp.
+	if row.VMState != "RUNNING" || row.VMStateAt != 1_900_000_000 {
+		t.Fatalf("vm state overwritten by unassigned response: %+v", row)
+	}
+	cookies, err := env.svc.openCookies(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookies["hatch_sess"] != "rotated-on-unassigned" {
+		t.Fatalf("rotated cookie not persisted on failure: %+v", cookies)
+	}
+}
+
+func TestWakeCookieIsUsedByVerification(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	env.fake.mu.Lock()
+	env.fake.setCookies = false
+	env.fake.wakeSet = []string{"hatch_sess=wake-rotated; Path=/; Max-Age=2592000"}
+	env.fake.mu.Unlock()
+	env.clock += 10
+	res, err := env.svc.Keepalive(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("keepalive: %v", err)
+	}
+	if !res.WakeRequested || !res.WakeOK {
+		t.Fatalf("wake did not verify: %+v", res)
+	}
+	if !strings.Contains(env.fake.lastCookie, "hatch_sess=wake-rotated") {
+		t.Fatalf("verification used stale cookies: %q", env.fake.lastCookie)
+	}
+	row, _ := env.st.GetMuseAccountByPeer("alice")
+	cookies, err := env.svc.openCookies(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookies["hatch_sess"] != "wake-rotated" {
+		t.Fatalf("wake-rotated cookie not persisted: %+v", cookies)
+	}
+}
+
+func TestRejectedSessionDoesNotMergeSetCookies(t *testing.T) {
+	for _, code := range []int{http.StatusUnauthorized, http.StatusInternalServerError} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			env := newTestEnv(t, true)
+			a := env.authorize(t, "alice")
+			env.fake.mu.Lock()
+			env.fake.setCookies = false
+			env.fake.sessionCode = code
+			env.fake.errorSetCookie = "hatch_sess=evil; Path=/; Max-Age=2592000"
+			env.fake.mu.Unlock()
+			env.clock += 10
+			if _, err := env.svc.Keepalive(context.Background(), a.ID); err != nil {
+				t.Fatalf("keepalive: %v", err)
+			}
+			row, _ := env.st.GetMuseAccountByPeer("alice")
+			cookies, err := env.svc.openCookies(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cookies["hatch_sess"] != "renewed-sess" {
+				t.Fatalf("HTTP %d merged Set-Cookie: %+v", code, cookies)
+			}
+		})
+	}
+}
+
+func TestSessionVMStateRecorded(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"running", "RUNNING", "RUNNING"},
+		{"suspended", "SUSPENDED", "SUSPENDED"},
+		{"explicit unknown", "UNKNOWN", "UNKNOWN"},
+		{"missing", "", "UNKNOWN"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t, true)
+			env.fake.mu.Lock()
+			env.fake.vmState = tc.raw
+			env.fake.verifyState = tc.raw
+			env.fake.mu.Unlock()
+			a := env.authorize(t, "alice")
+			if a.VMState != tc.want || a.VMStateAt != env.clock {
+				t.Fatalf("account vm state: got %q at %d, want %q at %d", a.VMState, a.VMStateAt, tc.want, env.clock)
+			}
+			row, _ := env.st.GetMuseAccountByPeer("alice")
+			if row.VMState != tc.want || row.VMStateAt != env.clock {
+				t.Fatalf("stored vm state: %+v", row)
+			}
+		})
+	}
+}
+
+func TestAssignedMissingVMStateRefreshesTimestamp(t *testing.T) {
+	env := newTestEnv(t, true)
+	env.fake.mu.Lock()
+	env.fake.vmState = ""
+	env.fake.verifyState = ""
+	env.fake.mu.Unlock()
+	a := env.authorize(t, "alice")
+	if a.VMState != "UNKNOWN" || a.VMStateAt != env.clock {
+		t.Fatalf("initial unknown state: %+v", a)
+	}
+	env.clock += 100
+	res, err := env.svc.Keepalive(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("keepalive: %v", err)
+	}
+	if !res.OK || res.VMState != "UNKNOWN" || res.VMStateAt != env.clock {
+		t.Fatalf("keepalive result: %+v", res)
+	}
+	row, _ := env.st.GetMuseAccountByPeer("alice")
+	if row.VMState != "UNKNOWN" || row.VMStateAt != env.clock {
+		t.Fatalf("assigned-but-missing did not refresh UNKNOWN: %+v", row)
+	}
+}
+
+func TestRateLimitBacksOffNextKeepalive(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	env.fake.mu.Lock()
+	env.fake.sessionCode = http.StatusTooManyRequests
+	env.fake.retryAfter = "120"
+	env.fake.mu.Unlock()
+	env.clock += 10
+	res, err := env.svc.Keepalive(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("keepalive: %v", err)
+	}
+	if res.OK || !strings.Contains(res.Error, "429") || !strings.Contains(res.Error, "请求被限流") {
+		t.Fatalf("429 result: %+v", res)
+	}
+	if got := env.svc.retryAt(a.ID); got != env.clock+120 {
+		t.Fatalf("backoff: got %d want %d", got, env.clock+120)
+	}
+	row, _ := env.st.GetMuseAccountByPeer("alice")
+	if row.AuthState != "ok" || !row.LastAttemptOK || row.LastError != "" ||
+		row.LastKeepaliveAt != 1_900_000_000 || row.VMState != "RUNNING" || row.VMStateAt != 1_900_000_000 {
+		t.Fatalf("429 clobbered confirmed state: %+v", row)
+	}
+	before, _, _ := env.fake.counts()
+	sum, err := env.svc.KeepaliveAll(context.Background(), false)
+	if err != nil {
+		t.Fatalf("all: %v", err)
+	}
+	if sum.Skipped != 1 || len(sum.SkippedAccounts) != 1 || sum.SkippedAccounts[0] != "alice" {
+		t.Fatalf("background did not honor Retry-After: %+v", sum)
+	}
+	if after, _, _ := env.fake.counts(); after != before {
+		t.Fatalf("rate-limited account was probed again: %d -> %d", before, after)
+	}
+	sum, err = env.svc.KeepaliveAll(context.Background(), true)
+	if err != nil {
+		t.Fatalf("force all: %v", err)
+	}
+	if sum.Failed != 0 || sum.Skipped != 1 {
+		t.Fatalf("force all must still honor the upstream 429 window: %+v", sum)
+	}
+	env.fake.mu.Lock()
+	env.fake.sessionCode = 0
+	env.fake.retryAfter = ""
+	env.fake.mu.Unlock()
+	env.clock += 121
+	sum, err = env.svc.KeepaliveAll(context.Background(), false)
+	if err != nil {
+		t.Fatalf("all after expiry: %v", err)
+	}
+	if sum.OK != 1 || sum.Skipped != 0 {
+		t.Fatalf("expired backoff was not cleared: %+v", sum)
+	}
+	if got := env.svc.retryAt(a.ID); got != 0 {
+		t.Fatalf("backoff not cleared after success: %d", got)
+	}
+}
+
+func TestServiceUnavailablePreservesConfirmedState(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	env.fake.mu.Lock()
+	env.fake.sessionCode = http.StatusServiceUnavailable
+	env.fake.mu.Unlock()
+	env.clock += 10
+	res, err := env.svc.Keepalive(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("keepalive: %v", err)
+	}
+	if res.OK || !strings.Contains(res.Error, "503") {
+		t.Fatalf("503 result: %+v", res)
+	}
+	if got := env.svc.retryAt(a.ID); got != 0 {
+		t.Fatalf("503 must not create a Retry-After backoff: %d", got)
+	}
+	row, _ := env.st.GetMuseAccountByPeer("alice")
+	if row.AuthState != "ok" || !row.LastAttemptOK || row.LastError != "" ||
+		row.LastKeepaliveAt != 1_900_000_000 || row.VMState != "RUNNING" || row.VMStateAt != 1_900_000_000 {
+		t.Fatalf("503 clobbered confirmed state: %+v", row)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0).UTC()
+	if got := parseRetryAfter("120", now); got != 120*time.Second {
+		t.Fatalf("seconds: %v", got)
+	}
+	if got := parseRetryAfter(now.Add(90*time.Second).Format(http.TimeFormat), now); got != 90*time.Second {
+		t.Fatalf("http-date: %v", got)
+	}
+	if got := parseRetryAfter("not-a-date", now); got != 0 {
+		t.Fatalf("invalid: %v", got)
+	}
+}
+
+func TestReauthorizeKeepsAuthorizedAtOnTransient(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	old := a.AuthorizedAt
+	env.clock += 10
+	env.fake.mu.Lock()
+	env.fake.sessionCode = http.StatusServiceUnavailable
+	env.fake.mu.Unlock()
+	res, err := env.svc.Reauthorize(context.Background(), a.ID, "hatch_sess=new")
+	if err != nil {
+		t.Fatalf("reauthorize: %v", err)
+	}
+	if !res.LastAttemptOK || res.LastError != "" || res.AuthState != "ok" {
+		t.Fatalf("transient reauthorize reported failure: %+v", res)
+	}
+	row, _ := env.st.GetMuseAccount(a.ID)
+	if row.AuthorizedAt != old {
+		t.Fatalf("transient reauthorize refreshed AuthorizedAt: got %d want %d", row.AuthorizedAt, old)
+	}
+	if row.AuthState != "ok" || !row.LastAttemptOK || row.LastError != "" {
+		t.Fatalf("transient reauthorize clobbered state: %+v", row)
+	}
+	env.fake.mu.Lock()
+	env.fake.sessionCode = 0
+	env.fake.mu.Unlock()
+	env.clock += 10
+	if _, err := env.svc.Reauthorize(context.Background(), a.ID, "hatch_sess=new"); err != nil {
+		t.Fatalf("reauthorize success: %v", err)
+	}
+	row, _ = env.st.GetMuseAccount(a.ID)
+	if row.AuthorizedAt != env.clock {
+		t.Fatalf("successful reauthorize did not refresh AuthorizedAt: %+v", row)
+	}
+}
+
+func TestKeepaliveAllLogsOneVerdictPerAccount(t *testing.T) {
+	env := newTestEnv(t, true)
+	// The acceptance case is a full 11-account round where every successful
+	// session reports an empty vm_state. Every row must still produce one
+	// verdict with the exact same UNKNOWN/wake-error diagnosis.
+	const accounts = 11
+	peers := []string{"alice", "bob"}
+	for i, want := 0, accounts-len(peers); i < want; i++ {
+		id := "peer-" + strconv.Itoa(i)
+		if err := env.st.CreatePeer(&store.Peer{ID: id, AgentType: "muse", Status: "active", CreatedAt: 1}); err != nil {
+			t.Fatalf("peer %s: %v", id, err)
+		}
+		peers = append(peers, id)
+	}
+	env.fake.mu.Lock()
+	env.fake.vmState = ""
+	env.fake.verifyState = ""
+	env.fake.mu.Unlock()
+	ids := make([]string, 0, accounts)
+	for _, peer := range peers {
+		ids = append(ids, env.authorize(t, peer).ID)
+	}
+
+	var buf strings.Builder
+	oldWriter, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	})
+
+	env.clock += 10
+	sum, err := env.svc.KeepaliveAll(context.Background(), false)
+	if err != nil {
+		t.Fatalf("all: %v", err)
+	}
+	if sum.Total != accounts || sum.OK != accounts || sum.Failed != 0 || sum.WakeOK != 0 {
+		t.Fatalf("summary: %+v", sum)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != accounts {
+		t.Fatalf("want one verdict per account, got %d: %s", len(lines), buf.String())
+	}
+	wantWakeError := "wake_error=wake not confirmed (vm_state=UNKNOWN)"
+	if got := strings.Count(buf.String(), wantWakeError); got != accounts {
+		t.Fatalf("UNKNOWN wake error distribution: got %d/%d %q: %s", got, accounts, wantWakeError, buf.String())
+	}
+	for _, id := range ids {
+		var line string
+		for _, candidate := range lines {
+			if strings.Contains(candidate, "account="+id+" ") {
+				line = candidate
+			}
+		}
+		if line == "" {
+			t.Fatalf("missing verdict for %s: %s", id, buf.String())
+		}
+		for _, want := range []string{
+			"ok=true", "auth=ok", "vm_state=UNKNOWN", "vm_state_at=" + strconv.FormatInt(env.clock, 10),
+			"wake_requested=true", "wake_ok=false", "wake_state=unconfirmed", wantWakeError,
+		} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("verdict missing %q: %s", want, line)
+			}
+		}
+		if strings.Contains(line, "hatch_sess") || strings.Contains(line, "hatch_vml") {
+			t.Fatalf("verdict leaked cookies: %s", line)
+		}
+	}
+}

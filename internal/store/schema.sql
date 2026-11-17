@@ -301,6 +301,7 @@ CREATE TABLE IF NOT EXISTS muse_accounts (
     session_status    TEXT DEFAULT '',
     vm_id             TEXT DEFAULT '',
     vm_state          TEXT DEFAULT '',
+    vm_state_at       INTEGER DEFAULT 0,
     auth_state        TEXT DEFAULT 'unverified',
     last_error        TEXT DEFAULT '',
     last_keepalive_at INTEGER DEFAULT 0,
@@ -317,6 +318,7 @@ CREATE TABLE IF NOT EXISTS muse_accounts (
 );
 ALTER TABLE muse_accounts ADD COLUMN last_wake_error TEXT DEFAULT '';
 ALTER TABLE muse_accounts ADD COLUMN last_wake_state TEXT DEFAULT '';
+ALTER TABLE muse_accounts ADD COLUMN vm_state_at INTEGER DEFAULT 0;
 -- Resource hub (§4.12, ADR 0004/0005): register once, grant per peer, distribute.
 -- resource_revisions is append-only history; resources points each (kind,name)
 -- at its live revision. content is AES-GCM ciphertext for kind='secret' (key in
