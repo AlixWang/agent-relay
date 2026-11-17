@@ -371,14 +371,15 @@ func TestWakeUsesFreshVMIDAndVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wake: %v", err)
 	}
-	if !res.OK || !res.WakeRequested || !res.WakeOK || res.VMState != "RUNNING" {
+	if !res.OK || !res.WakeRequested || !res.WakeOK || res.VMState != "RUNNING" ||
+		res.Error != "" || res.WakeError != "" || res.WakeState != "running" {
 		t.Fatalf("wake result: %+v", res)
 	}
 	if env.fake.lastWakeVMID() != "vm-1" {
 		t.Fatalf("wake used stale vm_id: %q", env.fake.lastWakeVMID())
 	}
 	row, _ = env.st.GetMuseAccountByPeer("alice")
-	if row.LastWakeAt == 0 || !row.LastWakeOK {
+	if row.LastWakeAt == 0 || !row.LastWakeOK || row.LastWakeError != "" || row.LastWakeState != "running" {
 		t.Fatalf("wake not recorded: %+v", row)
 	}
 }
@@ -396,8 +397,106 @@ func TestWakeNotConfirmedIsNotSuccess(t *testing.T) {
 	if !res.OK || !res.WakeRequested || res.WakeOK {
 		t.Fatalf("unconfirmed wake must be OK but WakeOK=false: %+v", res)
 	}
-	if !strings.Contains(res.Error, "not confirmed") {
-		t.Fatalf("missing diagnostic: %+v", res)
+	if res.Error != "" {
+		t.Fatalf("wake failure leaked into session error: %+v", res)
+	}
+	if !strings.Contains(res.WakeError, "not confirmed") || res.WakeState != "unconfirmed" {
+		t.Fatalf("missing wake diagnostic: %+v", res)
+	}
+	row, _ := env.st.GetMuseAccountByPeer("alice")
+	if row.LastError != "" {
+		t.Fatalf("wake failure marked session broken: %+v", row)
+	}
+	if row.LastWakeAt == 0 || row.LastWakeOK || row.LastWakeState != "unconfirmed" ||
+		!strings.Contains(row.LastWakeError, "not confirmed") {
+		t.Fatalf("wake diagnosis not persisted separately: %+v", row)
+	}
+}
+
+func TestApplyRenewKeepsErrorScopesSeparate(t *testing.T) {
+	a := &store.MuseAccount{}
+	applyRenew(a, &renewResult{
+		OK: true, AuthState: "ok", At: 10,
+		WakeOK: false, WakeState: "unconfirmed",
+		WakeError: "wake not confirmed (vm_state=UNKNOWN)",
+	}, 10, true)
+	if a.LastError != "" || a.LastAttemptOK != true ||
+		a.LastWakeState != "unconfirmed" || a.LastWakeError == "" || a.LastWakeOK {
+		t.Fatalf("wake-only failure applied wrong: %+v", a)
+	}
+	if a.LastWakeAt != 10 {
+		t.Fatalf("wake timestamp not recorded: %+v", a)
+	}
+
+	// A session failure does not erase the last wake diagnosis, and it must
+	// not pretend a wake ran when the attempt stopped before that step.
+	applyRenew(a, &renewResult{OK: false, Error: "muse session HTTP 500", At: 20}, 20, false)
+	if a.LastError != "muse session HTTP 500" || a.LastWakeState != "unconfirmed" ||
+		a.LastWakeError == "" || a.LastWakeAt != 10 || a.LastWakeOK {
+		t.Fatalf("session failure clobbered wake scope: %+v", a)
+	}
+
+	applyRenew(a, &renewResult{
+		OK: true, AuthState: "ok", At: 30, WakeOK: true, WakeState: "running",
+	}, 30, true)
+	if a.LastError != "" || !a.LastWakeOK || a.LastWakeError != "" ||
+		a.LastWakeState != "running" || a.LastWakeAt != 30 {
+		t.Fatalf("successful wake did not clear wake error: %+v", a)
+	}
+}
+
+func TestListPromotesLegacyWakeError(t *testing.T) {
+	env := newTestEnv(t, true)
+	env.authorize(t, "alice")
+	row, err := env.st.GetMuseAccountByPeer("alice")
+	if err != nil || row == nil {
+		t.Fatalf("get account: %v %+v", err, row)
+	}
+	const legacy = "wake not confirmed (vm_state=UNKNOWN)"
+	row.AuthState = "ok"
+	row.LastAttemptOK = true
+	row.LastError = legacy
+	row.LastWakeError = ""
+	row.LastWakeState = ""
+	row.LastWakeOK = true // stale success from before the failed wake
+	if err := env.st.SaveMuseAccount(row); err != nil {
+		t.Fatalf("save legacy account: %v", err)
+	}
+	list, err := env.svc.List()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list: %v %+v", err, list)
+	}
+	got := list[0]
+	if got.LastError != "" {
+		t.Fatalf("legacy wake text still marks session broken: %+v", got)
+	}
+	if got.LastWakeError != legacy || got.LastWakeState != "unconfirmed" || got.LastWakeOK {
+		t.Fatalf("legacy wake text was not preserved in wake scope: %+v", got)
+	}
+
+	// Genuine session errors must not be reclassified.
+	genuine := &store.MuseAccount{LastError: "muse session HTTP 500"}
+	promoteLegacyWakeError(genuine)
+	if genuine.LastError != "muse session HTTP 500" || genuine.LastWakeError != "" {
+		t.Fatalf("session error was reclassified: %+v", genuine)
+	}
+}
+
+func TestManualWakeSessionFailureClearsStaleSuccess(t *testing.T) {
+	a := &store.MuseAccount{
+		LastWakeAt: 10, LastWakeOK: true, LastWakeState: "running",
+	}
+	res := &renewResult{Error: "muse session HTTP 500", At: 20}
+	applyRenew(a, res, 20, true)
+	if a.LastError != "muse session HTTP 500" || a.LastAttemptOK {
+		t.Fatalf("session error not recorded: %+v", a)
+	}
+	if a.LastWakeAt != 20 || a.LastWakeOK || a.LastWakeState != "unconfirmed" ||
+		a.LastWakeError == "" {
+		t.Fatalf("failed manual wake left stale success: %+v", a)
+	}
+	if res.WakeState != "unconfirmed" || res.WakeError == "" {
+		t.Fatalf("result did not expose skipped wake: %+v", res)
 	}
 }
 

@@ -221,10 +221,16 @@ needs two things the relay cannot infer: a valid Muse session cookie and the
   guards). The hook returns immediately; the wake runs in its own goroutine.
 - **Failure semantics:** 401 marks `needs_reauth` and preserves the old cookie;
   403/429/5xx/timeouts/non-JSON are transient and preserve the last confirmed
-  state; a wake that is not confirmed RUNNING is reported as `wake_ok=false`, not
-  success. This mirrors the reference implementation
-  (`czg86389-hub/muse2api`) and avoids the two field failures: stale `vm_id`
-  reuse and “wake 200 = success”.
+  state; a wake that is not confirmed RUNNING is reported as `wake_ok=false` and
+  stored in `last_wake_error`/`last_wake_state=unconfirmed`, never as a session
+  failure (`last_error` stays empty when the session itself is healthy). Only a
+  confirmed wake followed by a heartbeat is `wake_recovered`; a later heartbeat
+  does not upgrade a failed wake to “已上线”. This mirrors the reference
+  implementation (`czg86389-hub/muse2api`) and avoids the field failures: stale
+  `vm_id` reuse, “wake 200 = success”, and wake errors masking healthy sessions.
+  For databases written before the split, known wake-only `last_error` values
+  are promoted to `last_wake_error` on read (never discarded) and marked
+  `last_wake_state=unconfirmed`/`last_wake_ok=false`.
 - **Out of scope:** no headless-browser/CDP chat automation, no cookie importer
   extension, no multi-account rotation. One Muse account should have one
   keepalive owner; running muse2api's keepalive on the same account will rotate
@@ -544,6 +550,8 @@ CREATE TABLE muse_accounts (
     last_attempt_ok   INTEGER DEFAULT 0,
     last_wake_at      INTEGER DEFAULT 0,
     last_wake_ok      INTEGER DEFAULT 0,
+    last_wake_error   TEXT DEFAULT '', -- wake-scoped, never a session error
+    last_wake_state   TEXT DEFAULT '', -- '' | unconfirmed | running
     auto_wake         INTEGER DEFAULT 1,
     enabled           INTEGER DEFAULT 1,
     authorized_at     INTEGER NOT NULL,

@@ -26,10 +26,14 @@ type MuseAccount struct {
 	LastAttemptOK   bool
 	LastWakeAt      int64
 	LastWakeOK      bool
-	AutoWake        bool
-	Enabled         bool
-	AuthorizedAt    int64
-	UpdatedAt       int64
+	// LastWakeError/LastWakeState are wake-scoped diagnostics; LastError stays
+	// session/auth-scoped (P0: a failed wake must not mark the account broken).
+	LastWakeError string
+	LastWakeState string
+	AutoWake      bool
+	Enabled       bool
+	AuthorizedAt  int64
+	UpdatedAt     int64
 }
 
 type rowScanner interface {
@@ -41,6 +45,7 @@ const museAccountColumns = `id,peer_id,COALESCE(label,''),COALESCE(cookies_enc,'
 	COALESCE(auth_state,'unverified'),COALESCE(last_error,''),
 	COALESCE(last_keepalive_at,0),COALESCE(last_attempt_at,0),COALESCE(last_attempt_ok,0),
 	COALESCE(last_wake_at,0),COALESCE(last_wake_ok,0),
+	COALESCE(last_wake_error,''),COALESCE(last_wake_state,''),
 	COALESCE(auto_wake,1),COALESCE(enabled,1),authorized_at,updated_at`
 
 func scanMuseAccount(sc rowScanner) (*MuseAccount, error) {
@@ -49,7 +54,8 @@ func scanMuseAccount(sc rowScanner) (*MuseAccount, error) {
 	err := sc.Scan(&a.ID, &a.PeerID, &a.Label, &a.CookiesEnc, &a.CookiesExp,
 		&a.SessionStatus, &a.VMID, &a.VMState, &a.AuthState, &a.LastError,
 		&a.LastKeepaliveAt, &a.LastAttemptAt, &attemptOK,
-		&a.LastWakeAt, &wakeOK, &autoWake, &enabled, &a.AuthorizedAt, &a.UpdatedAt)
+		&a.LastWakeAt, &wakeOK, &a.LastWakeError, &a.LastWakeState,
+		&autoWake, &enabled, &a.AuthorizedAt, &a.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -64,12 +70,13 @@ func (s *sqliteStore) CreateMuseAccount(a *MuseAccount) error {
 	_, err := s.db.Exec(`INSERT INTO muse_accounts(
 		id,peer_id,label,cookies_enc,cookies_exp,session_status,vm_id,vm_state,
 		auth_state,last_error,last_keepalive_at,last_attempt_at,last_attempt_ok,
-		last_wake_at,last_wake_ok,auto_wake,enabled,authorized_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		last_wake_at,last_wake_ok,last_wake_error,last_wake_state,
+		auto_wake,enabled,authorized_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.PeerID, a.Label, a.CookiesEnc, a.CookiesExp, a.SessionStatus, a.VMID, a.VMState,
 		a.AuthState, a.LastError, a.LastKeepaliveAt, a.LastAttemptAt, boolToInt(a.LastAttemptOK),
-		a.LastWakeAt, boolToInt(a.LastWakeOK), boolToInt(a.AutoWake), boolToInt(a.Enabled),
-		a.AuthorizedAt, a.UpdatedAt)
+		a.LastWakeAt, boolToInt(a.LastWakeOK), a.LastWakeError, a.LastWakeState,
+		boolToInt(a.AutoWake), boolToInt(a.Enabled), a.AuthorizedAt, a.UpdatedAt)
 	return err
 }
 
@@ -119,12 +126,13 @@ func (s *sqliteStore) SaveMuseAccount(a *MuseAccount) error {
 	res, err := s.db.Exec(`UPDATE muse_accounts SET
 		peer_id=?,label=?,cookies_enc=?,cookies_exp=?,session_status=?,vm_id=?,vm_state=?,
 		auth_state=?,last_error=?,last_keepalive_at=?,last_attempt_at=?,last_attempt_ok=?,
-		last_wake_at=?,last_wake_ok=?,auto_wake=?,enabled=?,authorized_at=?,updated_at=?
+		last_wake_at=?,last_wake_ok=?,last_wake_error=?,last_wake_state=?,
+		auto_wake=?,enabled=?,authorized_at=?,updated_at=?
 		WHERE id=?`,
 		a.PeerID, a.Label, a.CookiesEnc, a.CookiesExp, a.SessionStatus, a.VMID, a.VMState,
 		a.AuthState, a.LastError, a.LastKeepaliveAt, a.LastAttemptAt, boolToInt(a.LastAttemptOK),
-		a.LastWakeAt, boolToInt(a.LastWakeOK), boolToInt(a.AutoWake), boolToInt(a.Enabled),
-		a.AuthorizedAt, a.UpdatedAt, a.ID)
+		a.LastWakeAt, boolToInt(a.LastWakeOK), a.LastWakeError, a.LastWakeState,
+		boolToInt(a.AutoWake), boolToInt(a.Enabled), a.AuthorizedAt, a.UpdatedAt, a.ID)
 	if err != nil {
 		return err
 	}

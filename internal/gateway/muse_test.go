@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/AlixWang/agent-relay/internal/muse"
+	"github.com/AlixWang/agent-relay/internal/store"
 )
 
 type fakeMuseAPI struct {
@@ -197,6 +199,96 @@ func TestMuseAuthorizeListPeersAndStats(t *testing.T) {
 	m := cfg["muse"].(map[string]any)
 	if m["enabled"] != true || m["keepalive_secs"] != float64(900) || m["auto_wake"] != true {
 		t.Fatalf("config: %+v", m)
+	}
+}
+
+func TestMuseFacetsMatchRowWakeBadge(t *testing.T) {
+	f := newFixture(t)
+	_, srv := newFakeMuseAPI(t)
+	f.enableMuse(t, srv.URL)
+	admin := f.adminLogin(t)
+	now := time.Now().Unix()
+	for i := 0; i < 11; i++ {
+		id := fmt.Sprintf("peer-%02d", i)
+		f.registerPeer(t, id, "muse")
+		if err := f.srv.st.CreateMuseAccount(&store.MuseAccount{
+			ID: "ma-" + id, PeerID: id, AuthState: "ok",
+			LastAttemptAt: now, LastAttemptOK: true,
+			LastWakeAt: now, LastWakeOK: false, LastWakeState: "unconfirmed",
+			LastWakeError: "wake not confirmed (vm_state=UNKNOWN)",
+			AutoWake:      true, Enabled: true, AuthorizedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	code, out := f.doAuth(t, "GET", "/admin/muse/accounts", nil, admin)
+	if code != 200 {
+		t.Fatalf("list: %d %+v", code, out)
+	}
+	facets := out["facets"].(map[string]any)
+	if facets["total"] != float64(11) || facets["ok"] != float64(0) ||
+		facets["wake_unconfirmed"] != float64(11) {
+		t.Fatalf("facets must match row badges: %+v", facets)
+	}
+	for _, x := range out["accounts"].([]any) {
+		row := x.(map[string]any)
+		lastError, _ := row["last_error"].(string)
+		if row["auth_state"] != "ok" || lastError != "" ||
+			row["wake_state"] != "unconfirmed" || row["wake_unconfirmed"] != true ||
+			row["wake_recovered"] != false {
+			t.Fatalf("row badge scope: %+v", row)
+		}
+	}
+}
+
+func TestMuseWakeRecoveredNeedsConfirmedWake(t *testing.T) {
+	f := newFixture(t)
+	_, srv := newFakeMuseAPI(t)
+	f.enableMuse(t, srv.URL)
+	f.registerPeer(t, "alice", "muse")
+	admin := f.adminLogin(t)
+	now := time.Now().Unix()
+
+	acct := &store.MuseAccount{
+		ID: "ma-alice", PeerID: "alice", AuthState: "ok",
+		LastAttemptAt: now, LastAttemptOK: true,
+		LastWakeAt: now - 10, LastWakeOK: false, LastWakeState: "unconfirmed",
+		LastWakeError: "wake not confirmed (vm_state=UNKNOWN)",
+		AutoWake:      true, Enabled: true, AuthorizedAt: now, UpdatedAt: now,
+	}
+	if err := f.srv.st.CreateMuseAccount(acct); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := func() {
+		t.Helper()
+		if code, out := f.do(t, "POST", "/heartbeat", map[string]any{"id": "alice"}, f.tok["alice"]); code != 200 {
+			t.Fatalf("heartbeat: %d %+v", code, out)
+		}
+	}
+	get := func() map[string]any {
+		code, out := f.doAuth(t, "GET", "/admin/muse/accounts", nil, admin)
+		if code != 200 {
+			t.Fatalf("list: %d %+v", code, out)
+		}
+		return out["accounts"].([]any)[0].(map[string]any)
+	}
+	heartbeat()
+	row := get()
+	if row["wake_state"] != "unconfirmed" || row["wake_recovered"] != false {
+		t.Fatalf("heartbeat upgraded failed wake: %+v", row)
+	}
+
+	// Only a wake that verified RUNNING plus a later heartbeat is recovered.
+	acct.LastWakeOK = true
+	acct.LastWakeState = "running"
+	acct.LastWakeError = ""
+	if err := f.srv.st.SaveMuseAccount(acct); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat()
+	row = get()
+	if row["wake_state"] != "recovered" || row["wake_recovered"] != true {
+		t.Fatalf("confirmed wake not recovered: %+v", row)
 	}
 }
 

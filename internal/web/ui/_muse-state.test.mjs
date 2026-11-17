@@ -10,7 +10,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const mod = await import(pathToFileURL(path.join(here, 'js', 'muse.js')).href);
-const { museURL, museAuthTone, museAuthLabel, museExpiryText, museExpiryTone, museVMTone } = mod;
+const {
+  museURL, museAuthTone, museAuthLabel, museExpiryText, museExpiryTone, museVMTone,
+  museSessionOK, museWakeUnconfirmed, museWakeTone, museWakeLabel,
+} = mod;
 
 const assert = (cond, msg) => {
   if (!cond) {
@@ -23,17 +26,40 @@ assert(museURL('ma_1') === '/admin/muse/accounts/ma_1', 'account URL');
 assert(museURL('ma 1', 'wake') === '/admin/muse/accounts/ma%201/wake', 'encoded action URL');
 assert(museURL('ma_1', 'keepalive') === '/admin/muse/accounts/ma_1/keepalive', 'keepalive URL');
 
+const now = 1_900_000_000;
+const wakeFailed = {
+  enabled: true, auth_state: 'ok', last_attempt_ok: true,
+  last_wake_at: now, last_wake_ok: false, last_wake_state: 'unconfirmed',
+  last_wake_error: 'wake not confirmed (vm_state=UNKNOWN)',
+};
 assert(museAuthTone({ enabled: true, auth_state: 'ok', last_attempt_ok: true }) === 'ok', 'ok tone');
-assert(museAuthTone({ enabled: true, auth_state: 'ok', last_attempt_ok: true, last_error: 'wake pending' }) === 'warn', 'warning tone');
+assert(museAuthTone({ enabled: true, auth_state: 'ok', last_attempt_ok: true, last_error: 'session HTTP 500' }) === 'warn', 'session warning tone');
 assert(museAuthTone({ enabled: true, auth_state: 'ok', last_attempt_ok: false }) === 'warn', 'stale tone');
 assert(museAuthTone({ enabled: true, auth_state: 'needs_reauth' }) === 'bad', 'reauth tone');
 assert(museAuthTone({ enabled: false, auth_state: 'ok', last_attempt_ok: true }) === 'muted', 'disabled tone');
+assert(museAuthTone(wakeFailed) === 'warn', 'wake failure tone');
 assert(museAuthLabel({ enabled: true, auth_state: 'ok', last_attempt_ok: true }) === '正常', 'ok label');
-assert(museAuthLabel({ enabled: true, auth_state: 'ok', last_attempt_ok: true, last_error: 'wake pending' }) === '有告警', 'warning label');
+assert(museAuthLabel({ enabled: true, auth_state: 'ok', last_attempt_ok: true, last_error: 'session HTTP 500' }) === '有告警', 'session warning label');
 assert(museAuthLabel({ enabled: true, auth_state: 'needs_reauth' }) === '待重新授权', 'reauth label');
 assert(museAuthLabel({ enabled: false, auth_state: 'ok' }) === '已停用', 'disabled label');
+assert(museAuthLabel(wakeFailed) === '唤醒未确认', 'wake failure label');
+assert(museAuthLabel({ ...wakeFailed, last_error: 'session HTTP 500' }) === '有告警', 'session error outranks wake error');
 
-const now = 1_900_000_000;
+assert(museSessionOK({ enabled: true, auth_state: 'ok', last_attempt_ok: true }), 'healthy session');
+assert(!museSessionOK({ enabled: true, auth_state: 'ok', last_attempt_ok: true, last_error: 'session HTTP 500' }), 'session error is unhealthy');
+assert(!museSessionOK({ enabled: false, auth_state: 'ok', last_attempt_ok: true }), 'disabled is not healthy');
+assert(museWakeUnconfirmed(wakeFailed), 'wake failure is unconfirmed');
+assert(!museWakeUnconfirmed({ ...wakeFailed, wake_state: 'running', last_wake_error: '' }), 'confirmed wake clears stale failure');
+assert(!museWakeUnconfirmed({ enabled: true, auth_state: 'ok', last_attempt_ok: true }), 'no wake event is not unconfirmed');
+assert(museWakeTone(wakeFailed) === 'warn', 'wake failure tone');
+assert(museWakeLabel(wakeFailed) === '唤醒未确认', 'wake failure label');
+assert(museWakeLabel({ last_wake_at: now, last_wake_ok: true, wake_state: 'recovered' }) === '已上线', 'recovered label');
+assert(museWakeLabel({ wake_state: 'pending' }) === '唤醒中', 'pending label');
+assert(museWakeLabel({ wake_state: 'running' }) === '已唤醒', 'running label');
+assert(museWakeLabel({}) === '未上线', 'no wake label');
+assert(museWakeTone({ wake_state: 'recovered' }) === 'ok', 'recovered tone');
+assert(museWakeTone({ wake_state: 'pending' }) === 'info', 'pending tone');
+
 assert(museExpiryText(0, now) === '未知', 'unknown expiry');
 assert(museExpiryText(now - 1, now) === '已过期', 'expired expiry');
 assert(museExpiryText(now + 600, now) === '10 分钟后', 'minutes expiry');

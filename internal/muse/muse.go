@@ -71,14 +71,20 @@ type Account struct {
 	LastError       string `json:"last_error,omitempty"`
 	LastWakeAt      int64  `json:"last_wake_at"`
 	LastWakeOK      bool   `json:"last_wake_ok"`
-	AutoWake        bool   `json:"auto_wake"`
-	Enabled         bool   `json:"enabled"`
-	AuthorizedAt    int64  `json:"authorized_at"`
-	UpdatedAt       int64  `json:"updated_at"`
+	// LastWakeError/LastWakeState describe only the wake step. They must not
+	// leak into LastError, which stays session/auth-scoped.
+	LastWakeError string `json:"last_wake_error,omitempty"`
+	LastWakeState string `json:"last_wake_state,omitempty"`
+	AutoWake      bool   `json:"auto_wake"`
+	Enabled       bool   `json:"enabled"`
+	AuthorizedAt  int64  `json:"authorized_at"`
+	UpdatedAt     int64  `json:"updated_at"`
 }
 
 // Result is one keepalive/wake attempt. OK means the Muse session was valid;
-// WakeOK separately proves the VM reached RUNNING.
+// WakeOK separately proves the VM reached RUNNING. Error is session/auth/HTTP
+// scoped; WakeError is wake scoped, so a failed wake does not turn a healthy
+// session result into a general failure.
 type Result struct {
 	ID            string `json:"id"`
 	PeerID        string `json:"peer_id"`
@@ -92,6 +98,8 @@ type Result struct {
 	WakeOK        bool   `json:"wake_ok"`
 	ExpiresAt     int64  `json:"expires_at"`
 	Error         string `json:"error,omitempty"`
+	WakeError     string `json:"wake_error,omitempty"`
+	WakeState     string `json:"wake_state,omitempty"`
 	At            int64  `json:"at"`
 }
 
@@ -465,12 +473,15 @@ func (s *Service) Wake(ctx context.Context, id string) (*Result, error) {
 		a.LastAttemptOK = false
 		a.LastWakeAt = now
 		a.LastWakeOK = false
+		a.LastWakeState = "unconfirmed"
+		a.LastWakeError = truncate("wake skipped: "+oerr.Error(), 500)
 		a.UpdatedAt = now
 		if err := s.st.SaveMuseAccount(a); err != nil {
 			return nil, err
 		}
 		return &Result{ID: a.ID, PeerID: a.PeerID, Label: a.Label, OK: false,
-			AuthState: a.AuthState, Error: a.LastError, At: now}, nil
+			AuthState: a.AuthState, Error: a.LastError,
+			WakeState: a.LastWakeState, WakeError: a.LastWakeError, At: now}, nil
 	}
 	res, rerr := s.renew(ctx, cookies, exp, true)
 	if res == nil {
@@ -611,8 +622,8 @@ func (s *Service) autoWake(accountID, peerID string) {
 	if err != nil {
 		detail += " error=" + err.Error()
 	} else {
-		detail = fmt.Sprintf("peer=%s account=%s ok=%v vm=%s wake_ok=%v error=%s",
-			peerID, accountID, res.OK, res.VMState, res.WakeOK, res.Error)
+		detail = fmt.Sprintf("peer=%s account=%s ok=%v vm=%s wake_ok=%v wake_state=%s error=%s wake_error=%s",
+			peerID, accountID, res.OK, res.VMState, res.WakeOK, res.WakeState, res.Error, res.WakeError)
 	}
 	_ = s.st.AppendAudit("system", "muse.auto_wake", truncate(detail, 500), now)
 	log.Printf("muse: auto-wake %s", truncate(detail, 300))
@@ -663,7 +674,44 @@ func (s *Service) openCookies(a *store.MuseAccount) (map[string]string, error) {
 	return cookies, nil
 }
 
+// promoteLegacyWakeError moves pre-split wake messages out of LastError. Older
+// builds wrote a failed wake into the account-level error; the text is kept in
+// LastWakeError (never discarded) so an upgrade does not keep showing a
+// session alert for a healthy session.
+func promoteLegacyWakeError(a *store.MuseAccount) {
+	if a == nil || a.LastError == "" {
+		return
+	}
+	legacy := false
+	for _, prefix := range []string{
+		"wake not confirmed (",
+		"wake verification failed:",
+		"muse wake HTTP ",
+		"muse session has no vm_id; wake skipped",
+		"muse VM is DISABLED; wake skipped",
+	} {
+		if strings.HasPrefix(a.LastError, prefix) {
+			legacy = true
+			break
+		}
+	}
+	if !legacy {
+		return
+	}
+	if a.LastWakeError == "" {
+		a.LastWakeError = a.LastError
+	}
+	if a.LastWakeState == "" {
+		a.LastWakeState = "unconfirmed"
+	}
+	// A legacy wake failure must not inherit an earlier successful wake's
+	// LastWakeOK, or wake_recovered would claim "已上线" for it.
+	a.LastWakeOK = false
+	a.LastError = ""
+}
+
 func (s *Service) toAccount(a *store.MuseAccount) *Account {
+	promoteLegacyWakeError(a)
 	v := &Account{
 		ID: a.ID, PeerID: a.PeerID, Label: a.Label,
 		AuthState: a.AuthState, SessionStatus: a.SessionStatus,
@@ -671,6 +719,7 @@ func (s *Service) toAccount(a *store.MuseAccount) *Account {
 		LastKeepaliveAt: a.LastKeepaliveAt, LastAttemptAt: a.LastAttemptAt,
 		LastAttemptOK: a.LastAttemptOK, LastError: a.LastError,
 		LastWakeAt: a.LastWakeAt, LastWakeOK: a.LastWakeOK,
+		LastWakeError: a.LastWakeError, LastWakeState: a.LastWakeState,
 		AutoWake: a.AutoWake, Enabled: a.Enabled,
 		AuthorizedAt: a.AuthorizedAt, UpdatedAt: a.UpdatedAt,
 	}
@@ -690,6 +739,7 @@ func (s *Service) toAccount(a *store.MuseAccount) *Account {
 }
 
 func applyRenew(a *store.MuseAccount, res *renewResult, now int64, recordWake bool) {
+	promoteLegacyWakeError(a)
 	if res.CookiesEnc != "" {
 		a.CookiesEnc = res.CookiesEnc
 	}
@@ -714,9 +764,25 @@ func applyRenew(a *store.MuseAccount, res *renewResult, now int64, recordWake bo
 	if res.OK {
 		a.LastKeepaliveAt = res.At
 	}
+	// A manual Wake is a recorded event even when the session check fails
+	// before the wake request: it must not leave an older successful wake
+	// looking current. Keepalives only touch wake diagnostics when they
+	// actually reach the wake step.
 	if recordWake {
 		a.LastWakeAt = res.At
 		a.LastWakeOK = res.WakeOK
+		if res.WakeState == "" {
+			res.WakeState = "unconfirmed"
+			if res.WakeError == "" {
+				res.WakeError = "wake skipped: session check failed"
+			}
+		}
+	}
+	// Wake diagnostics are scoped to the wake step, so a session failure does
+	// not erase the last known wake diagnosis (and vice versa).
+	if res.WakeState != "" {
+		a.LastWakeState = res.WakeState
+		a.LastWakeError = truncate(res.WakeError, 500)
 	}
 	a.UpdatedAt = now
 }
@@ -731,7 +797,8 @@ func toResult(a *store.MuseAccount, res *renewResult) *Result {
 		OK: res.OK, AuthState: auth,
 		SessionStatus: res.SessionStatus, VMID: res.VMID, VMState: res.VMState,
 		WakeRequested: res.WakeRequested, WakeOK: res.WakeOK,
-		ExpiresAt: minEssentialExpiry(res.Exp), Error: res.Error, At: res.At,
+		ExpiresAt: minEssentialExpiry(res.Exp), Error: res.Error,
+		WakeError: res.WakeError, WakeState: res.WakeState, At: res.At,
 	}
 }
 

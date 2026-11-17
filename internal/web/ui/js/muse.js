@@ -28,11 +28,48 @@ const MUSE_KEEPALIVE_ALL = '/admin/muse/keepalive';
 export const museURL = (id, action = '') =>
   MUSE_ACCOUNTS + '/' + encodeURIComponent(id) + (action ? '/' + action : '');
 
+// Session health is deliberately narrower than auth_state: it also requires the
+// last keepalive to have succeeded without a session-scoped error. "正常" means
+// the session itself is healthy; wake health is shown separately.
+export function museSessionOK(a) {
+  if (!a) return false;
+  return a.enabled !== false && a.auth_state === 'ok' &&
+    !!a.last_attempt_ok && !a.last_error;
+}
+
+// A failed wake stays unconfirmed even if the peer heartbeat later returns.
+// wake_recovered is only meaningful when the wake itself verified RUNNING.
+export function museWakeUnconfirmed(a) {
+  if (!a) return false;
+  if (a.wake_unconfirmed || a.wake_state === 'unconfirmed' || a.last_wake_error) return true;
+  // Older list payloads lack wake_state; only then fall back to the recorded
+  // wake booleans. A newer keepalive may clear a failed manual wake without
+  // rewriting last_wake_at, so wake_state is authoritative when present.
+  if (a.wake_state) return false;
+  return a.last_wake_at > 0 && a.last_wake_ok === false;
+}
+
+export function museWakeTone(a) {
+  if (museWakeUnconfirmed(a)) return 'warn';
+  if (a && (a.wake_recovered || a.wake_state === 'recovered')) return 'ok';
+  if (a && (a.wake_pending || a.wake_state === 'pending' || a.wake_state === 'running')) return 'info';
+  return 'warn';
+}
+
+export function museWakeLabel(a) {
+  if (!a) return '—';
+  if (museWakeUnconfirmed(a)) return '唤醒未确认';
+  if (a.wake_recovered || a.wake_state === 'recovered') return '已上线';
+  if (a.wake_pending || a.wake_state === 'pending') return '唤醒中';
+  if (a.wake_state === 'running') return '已唤醒';
+  return '未上线';
+}
+
 export function museAuthTone(a) {
   if (!a) return 'muted';
   if (!a.enabled) return 'muted';
   if (a.auth_state === 'needs_reauth') return 'bad';
-  if (a.auth_state === 'ok') return a.last_attempt_ok && !a.last_error ? 'ok' : 'warn';
+  if (museSessionOK(a)) return museWakeUnconfirmed(a) ? 'warn' : 'ok';
   return 'warn';
 }
 
@@ -41,7 +78,7 @@ export function museAuthLabel(a) {
   if (!a.enabled) return '已停用';
   if (a.auth_state === 'needs_reauth') return '待重新授权';
   if (a.auth_state === 'unverified') return '未验证';
-  if (a.auth_state === 'ok' && a.last_attempt_ok && !a.last_error) return '正常';
+  if (museSessionOK(a)) return museWakeUnconfirmed(a) ? '唤醒未确认' : '正常';
   if (a.auth_state === 'ok' && a.last_attempt_ok) return '有告警';
   return '最近检查失败';
 }
@@ -73,7 +110,15 @@ export function museVMTone(vm) {
 const toneClass = (tone) => (tone && tone !== 'muted' ? ' ' + tone : '');
 
 const authBadge = (a) => {
-  const tip = [a.auth_state, a.vm_state, a.last_error].filter(Boolean).join(' · ');
+  const wakeNote = a.last_wake_error
+    ? '唤醒: ' + a.last_wake_error
+    : (museWakeUnconfirmed(a) ? '唤醒未确认' : '');
+  const tip = [
+    a.auth_state,
+    a.vm_state,
+    a.last_error ? '会话: ' + a.last_error : '',
+    wakeNote,
+  ].filter(Boolean).join(' · ');
   return `<span class="badge${toneClass(museAuthTone(a))}" title="${esc(tip)}">${esc(museAuthLabel(a))}</span>`;
 };
 
@@ -83,13 +128,14 @@ const vmBadge = (a) => {
 };
 
 const wakeCell = (a) => {
-  if (!a.last_wake_at) return '<span class="muted xs">—</span>';
-  let tone = 'warn';
-  let label = '未上线';
-  if (a.wake_recovered) { tone = 'ok'; label = '已上线'; }
-  else if (a.wake_pending) { tone = 'info'; label = '唤醒中'; }
-  return `<div class="ver-stack"><span class="badge ${tone}">${label}</span>` +
-    `<small class="muted xs" title="${esc(fmtTime(a.last_wake_at))}">${esc(ago(a.last_wake_at))}</small></div>`;
+  const unconfirmed = museWakeUnconfirmed(a);
+  if (!a.last_wake_at && !unconfirmed) return '<span class="muted xs">—</span>';
+  const tone = museWakeTone(a);
+  const tip = a.last_wake_error || (unconfirmed ? '唤醒后尚未确认 VM 进入 RUNNING' : '');
+  const when = a.last_wake_at
+    ? `<small class="muted xs" title="${esc(fmtTime(a.last_wake_at))}">${esc(ago(a.last_wake_at))}</small>`
+    : '';
+  return `<div class="ver-stack"><span class="badge ${tone}"${tip ? ` title="${esc(tip)}"` : ''}>${esc(museWakeLabel(a))}</span>${when}</div>`;
 };
 
 const memberCell = (a) => `<div class="who">
@@ -156,11 +202,12 @@ function renderError(tbody, message) {
 function filteredAccounts() {
   const q = museState.q.toLowerCase();
   return museState.accounts.filter((a) => {
-    if (museState.filter === 'ok' && !(a.auth_state === 'ok' && a.last_attempt_ok)) return false;
+    if (museState.filter === 'ok' && !(museSessionOK(a) && !museWakeUnconfirmed(a))) return false;
+    if (museState.filter === 'wake_unconfirmed' && !(museSessionOK(a) && museWakeUnconfirmed(a))) return false;
     if (museState.filter === 'needs_reauth' && a.auth_state !== 'needs_reauth') return false;
     if (museState.filter === 'offline' && a.peer_online) return false;
     if (q) {
-      const hay = `${a.peer_id} ${a.label || ''} ${a.last_error || ''}`.toLowerCase();
+      const hay = `${a.peer_id} ${a.label || ''} ${a.last_error || ''} ${a.last_wake_error || ''}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -183,6 +230,7 @@ function renderMuse() {
   set('museAuto', f.auto_wake ?? 0);
   set('museFcAll', total);
   set('museFcOK', f.ok ?? 0);
+  set('museFcWake', f.wake_unconfirmed ?? 0);
   set('museFcReauth', f.needs_reauth ?? 0);
   set('museFcOffline', f.offline ?? 0);
   const nav = $('navMuse');
