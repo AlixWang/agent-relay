@@ -30,7 +30,7 @@ func TestBeatAndList(t *testing.T) {
 	}
 	s := New(st, 300, "")
 	now := int64(2000)
-	if err := s.Beat("a", 1, `{"shell":true}`, 0, "", "", now); err != nil {
+	if err := s.Beat("a", 1, `{"shell":true}`, 0, "", "", "", "", now); err != nil {
 		t.Fatalf("beat: %v", err)
 	}
 	views, err := s.List(now, nil)
@@ -129,7 +129,7 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 		t.Fatal("duplicate audit")
 	}
 	// Heartbeat then sweep: online again, no event; next drop fires again.
-	if err := s.Beat("a", 0, "", 0, "", "", 2500); err != nil {
+	if err := s.Beat("a", 0, "", 0, "", "", "", "", 2500); err != nil {
 		t.Fatal(err)
 	}
 	s.Sweep(2550)
@@ -155,7 +155,7 @@ func TestPromptVersionForwardOnly(t *testing.T) {
 	}
 	s := New(st, 300, "")
 	now := int64(3000)
-	if err := s.Beat("a", 0, "", 2, "", "", now); err != nil {
+	if err := s.Beat("a", 0, "", 2, "", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := st.GetPeer("a")
@@ -163,7 +163,7 @@ func TestPromptVersionForwardOnly(t *testing.T) {
 		t.Fatalf("prompt not recorded: %+v", p)
 	}
 	// Stale replay must not clobber.
-	if err := s.Beat("a", 0, "", 1, "", "", now+10); err != nil {
+	if err := s.Beat("a", 0, "", 1, "", "", "", "", now+10); err != nil {
 		t.Fatal(err)
 	}
 	p, _ = st.GetPeer("a")
@@ -171,7 +171,7 @@ func TestPromptVersionForwardOnly(t *testing.T) {
 		t.Fatalf("stale clobbered: %+v", p)
 	}
 	// Zero means "not reporting": untouched.
-	if err := s.Beat("a", 0, "", 0, "", "", now+20); err != nil {
+	if err := s.Beat("a", 0, "", 0, "", "", "", "", now+20); err != nil {
 		t.Fatal(err)
 	}
 	p, _ = st.GetPeer("a")
@@ -193,7 +193,7 @@ func TestProfileViaBeat(t *testing.T) {
 	s := New(st, 300, "")
 	now := int64(4000)
 	// Non-empty overwrites with timestamp.
-	if err := s.Beat("a", 0, "", 0, "做巡检", "", now); err != nil {
+	if err := s.Beat("a", 0, "", 0, "做巡检", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := st.GetPeer("a")
@@ -201,7 +201,7 @@ func TestProfileViaBeat(t *testing.T) {
 		t.Fatalf("profile: %+v", p)
 	}
 	// Empty keeps the stored value.
-	if err := s.Beat("a", 0, "", 0, "", "", now+10); err != nil {
+	if err := s.Beat("a", 0, "", 0, "", "", "", "", now+10); err != nil {
 		t.Fatal(err)
 	}
 	p, _ = st.GetPeer("a")
@@ -223,10 +223,10 @@ func TestTransportMarksLive(t *testing.T) {
 	}
 	s := New(st, 300, "")
 	now := int64(5000)
-	if err := s.Beat("a", 0, "", 0, "", "", now); err != nil {
+	if err := s.Beat("a", 0, "", 0, "", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Beat("b", 0, "", 0, "", "", now); err != nil {
+	if err := s.Beat("b", 0, "", 0, "", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 	views, _ := s.List(now, map[string]bool{"a": true})
@@ -254,14 +254,14 @@ func TestClientVersionViaBeat(t *testing.T) {
 	s := New(st, 300, "")
 	now := int64(3000)
 	// Empty = not reporting (shell scripts): untouched.
-	if err := s.Beat("a", 0, "", 0, "", "", now); err != nil {
+	if err := s.Beat("a", 0, "", 0, "", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := st.GetPeer("a"); p.ClientVersion != "" {
 		t.Fatalf("empty clobbered: %+v", p)
 	}
 	// Non-empty overwrites unconditionally (opaque tags, no ordering).
-	if err := s.Beat("a", 0, "", 0, "", "v0.7.0", now+10); err != nil {
+	if err := s.Beat("a", 0, "", 0, "", "v0.7.0", "", "", now+10); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := st.GetPeer("a")
@@ -269,7 +269,7 @@ func TestClientVersionViaBeat(t *testing.T) {
 		t.Fatalf("client not recorded: %+v", p)
 	}
 	// Downgrade tag also overwrites (no forward-only gate for clients).
-	if err := s.Beat("a", 0, "", 0, "", "v0.6.0", now+20); err != nil {
+	if err := s.Beat("a", 0, "", 0, "", "v0.6.0", "", "", now+20); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := st.GetPeer("a"); p.ClientVersion != "v0.6.0" {

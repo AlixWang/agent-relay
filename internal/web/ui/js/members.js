@@ -2,7 +2,7 @@
 import { api } from './api.js';
 import { $, esc, icon, ago, fmtTime, avatar, toast, confirmAction, renderPager } from './utils.js';
 import { currentRoute } from './router.js';
-import { serverPromptVersion, serverClientVersion, serverReceiverRev, refreshStats } from './auth.js';
+import { serverPromptVersion, serverClientVersion, serverReceiverRev, serverScriptVersion, refreshStats } from './auth.js';
 import { openMuseAuth, wakeMuseAccount, museAuthTone, museAuthLabel } from './muse.js';
 
 export const peerState = {
@@ -61,6 +61,22 @@ const clientBadge = (p) => {
     return `<span class="badge warn mono" title="上报于 ${esc(when)} → 最新 ${esc(serverClientVersion)}（未上报 rev）">${esc(v)} → 新版</span>`;
   }
   return `<span class="badge warn mono" title="上报于 ${esc(when)} · rev ${esc(rev)}">${esc(v)}</span>`;
+};
+
+// Watch-layer script self-report (§8.9b). Unknown (old script) renders as
+// "脚本 —" and is never nudged; a mismatch with the server's embedded
+// WATCH_VERSION renders as a warn badge with the target version.
+const scriptBadge = (p) => {
+  const v = p.script_version || '';
+  if (!v) {
+    return '<span class="badge" title="未上报脚本版本（旧脚本；服务端不会催更）">脚本 —</span>';
+  }
+  const kind = p.script_kind || 'muse-watch';
+  const when = p.script_updated_at ? fmtTime(p.script_updated_at) : '未知';
+  if (serverScriptVersion && v !== serverScriptVersion && kind === 'muse-watch') {
+    return `<span class="badge warn mono" title="上报于 ${esc(when)} → 最新 v${esc(serverScriptVersion)}">脚本 v${esc(v)} → v${esc(serverScriptVersion)}</span>`;
+  }
+  return `<span class="badge ok mono" title="${esc(kind)} · 上报于 ${esc(when)}">脚本 v${esc(v)}</span>`;
 };
 
 // Resource hub sync (§4.12): only shown once the peer has something to sync
@@ -271,6 +287,7 @@ export async function refreshPeers() {
             ${promptBadge(p)}
             ${memoryBadge(p)}
             ${clientBadge(p)}
+            ${scriptBadge(p)}
             ${resourcesBadge(p)}
           </div>
         </td>

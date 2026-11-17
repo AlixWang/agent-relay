@@ -448,3 +448,41 @@ func TestFindPeerFold(t *testing.T) {
 		t.Fatalf("two spellings must be ambiguous: n=%d err=%v", n, err)
 	}
 }
+
+// Script self-report (§8.9b): stored on all three peer read paths, and an
+// empty version (unknown) never clobbers a known one.
+func TestUpdatePeerScript(t *testing.T) {
+	st := openTest(t)
+	mustPeer(t, st, "p1")
+	if p, _ := st.GetPeer("p1"); p == nil || p.ScriptVersion != "" || p.ScriptKind != "" || p.ScriptUpdatedAt != 0 {
+		t.Fatalf("fresh peer should have no script report: %+v", p)
+	}
+	if err := st.UpdatePeerScript("p1", "muse-watch", "1.0.0", 42); err != nil {
+		t.Fatal(err)
+	}
+	p, err := st.GetPeer("p1")
+	if err != nil || p.ScriptKind != "muse-watch" || p.ScriptVersion != "1.0.0" || p.ScriptUpdatedAt != 42 {
+		t.Fatalf("script not stored: %+v err=%v", p, err)
+	}
+	if all, err := st.ListPeers(); err != nil || len(all) != 1 || all[0].ScriptVersion != "1.0.0" {
+		t.Fatalf("script not listed: %+v err=%v", all, err)
+	}
+	// Empty version is "not reporting": it must not erase the stored report.
+	if err := st.UpdatePeerScript("p1", "muse-watch", "", 99); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := st.GetPeer("p1"); p.ScriptVersion != "1.0.0" || p.ScriptUpdatedAt != 42 {
+		t.Fatalf("empty report clobbered: %+v", p)
+	}
+	// A new version overwrites unconditionally (opaque tags, no ordering).
+	if err := st.UpdatePeerScript("p1", "muse-watch", "1.1.0", 100); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := st.GetPeer("p1"); p.ScriptVersion != "1.1.0" || p.ScriptUpdatedAt != 100 {
+		t.Fatalf("new version not stored: %+v", p)
+	}
+	// FindPeerFold shares the same column list.
+	if p, n, err := st.FindPeerFold("P1"); err != nil || n != 1 || p.ScriptVersion != "1.1.0" {
+		t.Fatalf("fold script mismatch: p=%+v n=%d err=%v", p, n, err)
+	}
+}

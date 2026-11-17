@@ -76,6 +76,12 @@ type Config struct {
 	ResourcePendingTTLDays   int  `toml:"resource_pending_ttl_days"`
 	ResourceNotifyBatchSecs  int  `toml:"resource_notify_batch_secs"`
 
+	// Watch-layer script self-update (DESIGN §8.9b). On by default: a peer
+	// whose reported script_version differs from the server's embedded
+	// artifact gets a `script_update` event in its heartbeat response. Off is
+	// the operator kill-switch; peers still report and are still displayed.
+	ScriptsUpdateEnabled bool `toml:"scripts_update_enabled"`
+
 	// SSE push (DESIGN §4.4b): outbound-only event stream assistants can
 	// hold instead of short-polling. Zero disables the corresponding knob.
 	StreamKeepaliveSecs int `toml:"stream_keepalive_secs"`
@@ -138,6 +144,7 @@ func Default() *Config {
 		ResourceSubmitPerHour:        10,
 		ResourcePendingTTLDays:       30,
 		ResourceNotifyBatchSecs:      600,
+		ScriptsUpdateEnabled:         true,
 		StreamKeepaliveSecs:          20,
 		StreamMaxPerPeer:             3,
 		ProfileRefreshDays:           7,
@@ -183,7 +190,8 @@ func Load(path string) (*Config, error) {
 		"resource_self_registration": true, "resource_pending_max_per_peer": true,
 		"resource_live_max_per_peer": true, "resource_submit_per_hour": true,
 		"resource_pending_ttl_days": true, "resource_notify_batch_secs": true,
-		"stream_keepalive_secs": true, "stream_max_per_peer": true,
+		"scripts_update_enabled": true,
+		"stream_keepalive_secs":  true, "stream_max_per_peer": true,
 		"profile_refresh_days": true,
 		"max_room_members":     true, "room_fuse_max_messages": true,
 		"room_fuse_window_secs": true,

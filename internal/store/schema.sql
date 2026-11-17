@@ -50,6 +50,13 @@ ALTER TABLE peers ADD COLUMN resources_updated_at INTEGER DEFAULT 0;
 -- submission endpoints. 1 = allowed (subject to the global config switch),
 -- 0 = this peer may not submit resources. Admin-only; never exposed to agents.
 ALTER TABLE peers ADD COLUMN resource_submit_enabled INTEGER NOT NULL DEFAULT 1;
+-- Script self-reporting (Phase 1/2 of script versioning): which watch-layer
+-- artifact the peer runs. The server parses WATCH_VERSION from its embedded
+-- copy (single source of truth) and compares exactly. Empty = unknown (old
+-- script), never nudged. scripts_update_enabled gates the heartbeat event.
+ALTER TABLE peers ADD COLUMN script_kind TEXT DEFAULT '';
+ALTER TABLE peers ADD COLUMN script_version TEXT DEFAULT '';
+ALTER TABLE peers ADD COLUMN script_updated_at INTEGER DEFAULT 0;
 -- Reported in heartbeat as client_version; empty means "not reporting"
 -- (shell scripts have no version concept). The server nudges via heartbeat
 -- when a newer Release exists, same channel as prompt_update. Advisory

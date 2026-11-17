@@ -337,6 +337,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if rev := ReceiverRev(); rev != "" {
 		out["receiver_rev"] = rev
 	}
+	// Current embedded watch-layer artifact (§8.9b). The console reads the
+	// same value from /admin/stats; peers compare it with their own report.
+	if v := web.WatchScriptVersion(); v != "" {
+		out["script_kind"] = web.MuseWatchKind
+		out["script_version"] = v
+	}
 	writeJSON(w, 200, out)
 }
 
@@ -794,6 +800,13 @@ type heartbeatReq struct {
 	// update nudge compares: a release that only touches the server, docs
 	// or prompt templates leaves it unchanged, so nobody gets nagged.
 	ClientRev string `json:"client_rev"`
+	// ScriptKind/ScriptVersion are the watch-layer script self-report
+	// (§8.9b): e.g. muse-watch / 1.0.0. Empty version = not reporting (an
+	// old script) and the server never nudges it. The value is stored on the
+	// peer and compared exactly with the version parsed from the embedded
+	// artifact; a mismatch yields a `script_update` event in the response.
+	ScriptKind    string `json:"script_kind"`
+	ScriptVersion string `json:"script_version"`
 	// MemoryReconciled is the assistant's one-line summary of the relay
 	// rules it purged or rewrote in its own memory while applying a
 	// prompt_update (§8.6). MemoryVersion is the revision it reconciled
@@ -833,7 +846,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		caps = peer.Capabilities
 	}
 	now := time.Now().Unix()
-	if err := s.presence.Beat(peer.ID, pv, caps, req.PromptVersion, req.Profile, req.ClientVersion, now); err != nil {
+	if err := s.presence.Beat(peer.ID, pv, caps, req.PromptVersion, req.Profile, req.ClientVersion, req.ScriptKind, req.ScriptVersion, now); err != nil {
 		writeErr(w, 500, "heartbeat failed")
 		return
 	}
@@ -898,6 +911,23 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Resource hub nudge (ADR 0004): same channel as prompt_update.
 	s.resourceHeartbeat(p2, resp)
+	// Watch-layer script nudge (§8.9b): a NEW event type, never client_update
+	// — the latter means "replace the receiver binary" and old prompts would
+	// act on it. Empty reported version = unknown (old script): never nudge.
+	// The kind guard keeps a future Hermes watch from being offered the Muse
+	// artifact; an empty kind is treated as Muse for the MVP (one watch layer
+	// per peer). scripts_update_enabled is the operator kill-switch.
+	if s.cfg.ScriptsUpdateEnabled && p2 != nil && p2.ScriptVersion != "" {
+		cur := web.WatchScriptVersion()
+		if cur != "" && cur != p2.ScriptVersion &&
+			(p2.ScriptKind == "" || p2.ScriptKind == web.MuseWatchKind) {
+			resp["script_update"] = true
+			resp["script_kind"] = web.MuseWatchKind
+			resp["script_version"] = cur
+			resp["script_sha256"] = web.WatchScriptSHA256()
+			resp["download"] = web.MuseWatchPath
+		}
+	}
 	// Profile refresh nudge (§8.7): never-set or older than
 	// profile_refresh_days. Same channel as prompt_update; the assistant
 	// rewrites its intro from memory and confirms via the next heartbeat.
@@ -1735,6 +1765,10 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		"prompt_version": prompts.PromptVersion,
 		"client_version": web.BinaryVersion(),
 		"receiver_rev":   ReceiverRev(),
+		// Embedded watch-layer artifact + delivery kill-switch (§8.9b).
+		"script_kind":            web.MuseWatchKind,
+		"script_version":         web.WatchScriptVersion(),
+		"scripts_update_enabled": s.cfg.ScriptsUpdateEnabled,
 	}
 	// Console nav badge (§9.5): replies waiting for the operator.
 	unread, _ := s.inboxUnread()

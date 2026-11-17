@@ -4,7 +4,8 @@ Auth: `Authorization: Bearer <per-identity token>`，除 `GET /health` 外全部
 统一错误形：`{"ok": false, "error": "..."}`。Body 上限 1 MiB（`max_body_bytes`）。
 
 ```
-GET    /health                       → { ok, version: 2, protocol: 1, min_client: 1 }（免鉴权）（含 receiver_rev，见 §8.9）
+GET    /health                       → { ok, version: 2, protocol: 1, min_client: 1,
+                                         receiver_rev?, script_kind?, script_version? }（免鉴权）（§8.9 / §8.9b）
 POST   /register    { code, id, agent_type, protocol_version, capabilities }
                                    → { ok, peer_id, token }  （token 只显示这一次）
 POST   /messages    { id, to, from, kind, in_reply_to, requires_approval, payload }
@@ -18,13 +19,17 @@ GET    /messages/stream?for=<id>&since=<seq>   （SSE，§4.4b 推送：backlog 
                                    → text/event-stream，帧 `id/event: message/retry/data`，保活 `: ping`
 POST   /ack         { message_id, by } | { ids: [...], by }   → { ok, acked, skipped? }
 POST   /heartbeat   { id, protocol_version?, capabilities?, prompt_version?, profile?,
-                      client_version?, client_rev?, memory_reconciled?, memory_version? }
+                      client_version?, client_rev?, script_kind?, script_version?,
+                      memory_reconciled?, memory_version? }
                                    → { ok, template_revision?, receiver_rev?, prompt_update?, prompt_version?,
-                                       client_update?, client_version?, profile_refresh? }
+                                       client_update?, client_version?, profile_refresh?,
+                                       script_update?, script_kind?, script_version?, script_sha256?, download? }
                                      （prompt_update=指令新版；client_update 只在 client_rev 与
-                                       服务端 receiver_rev 不同时返回，§8.9；memory_reconciled
-                                       是升级时清理 memory 的一句话摘要，≤500 字，按 memory_version
-                                       只进不退，§8.6）
+                                       服务端 receiver_rev 不同时返回，§8.9；script_version 是
+                                       watch 脚本自报的语义版本，仅当非空且与服务端内嵌脚本
+                                       WATCH_VERSION 不同时返回 script_update=true，见 §8.9b；
+                                       memory_reconciled 是升级时清理 memory 的一句话摘要，
+                                       ≤500 字，按 memory_version 只进不退，§8.6）
 POST   /logs         { version:1, client:{version?,rev?}, events:[{
                          id, ts?, level, source, event, message?, task_id?, thread?, fields? }] }
                                    → { ok, accepted, duplicates, rejected } | 400 | 413 | 429
@@ -42,6 +47,7 @@ GET    /clients/relay-tail?arch=<amd64|arm64> → Go 接收端（302 跳转到 R
 GET    /peers                         → { ok, peers: [{ id, display_name, agent_type, status,
                                             online, last_seen, protocol_version, capabilities,
                                             prompt_version, profile, client_version, client_rev,
+                                            script_kind, script_version, script_updated_at,
                                             memory_version, memory_note, transport }] }
 POST   /verify/smoke (as self)        → { ok, seq, smoke_id }
 ```

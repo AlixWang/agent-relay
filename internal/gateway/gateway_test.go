@@ -18,6 +18,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/store"
 	"github.com/AlixWang/agent-relay/internal/stream"
 	"github.com/AlixWang/agent-relay/internal/verify"
+	"github.com/AlixWang/agent-relay/internal/web"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -1516,6 +1517,145 @@ func TestHeartbeatClientVersion(t *testing.T) {
 	}
 	if p, _ := f.srv.st.GetPeer("alice"); p.ClientVersion != "v0.7.0" {
 		t.Fatalf("empty clobbered: %+v", p)
+	}
+}
+
+// Script self-report merge (§8.9b): the script's version-only heartbeat is
+// stored without disturbing prompt_version/client_version, empty version is
+// "unknown" and never clobbers, and all three read paths expose the fields.
+func TestHeartbeatScriptMerge(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	beat := func(m map[string]any) map[string]any {
+		t.Helper()
+		code, out := f.do(t, "POST", "/heartbeat", m, f.tok["alice"])
+		if code != 200 {
+			t.Fatalf("beat: %d %+v", code, out)
+		}
+		return out
+	}
+
+	// A combined heartbeat establishes the daemon-owned fields.
+	beat(map[string]any{
+		"id": "alice", "prompt_version": 3, "client_version": "v0.9.0",
+		"script_kind": "muse-watch", "script_version": "1.2.3",
+	})
+	p, _ := f.srv.st.GetPeer("alice")
+	if p == nil || p.PromptVersion != 3 || p.ClientVersion != "v0.9.0" ||
+		p.ScriptKind != "muse-watch" || p.ScriptVersion != "1.2.3" || p.ScriptUpdatedAt == 0 {
+		t.Fatalf("combined beat not merged: %+v", p)
+	}
+	firstScriptAt := p.ScriptUpdatedAt
+
+	// The script reports alone (no prompt_version/client_version): the
+	// zero/absent fields must leave the daemon's values untouched.
+	beat(map[string]any{"id": "alice", "script_kind": "muse-watch", "script_version": "1.2.3"})
+	p, _ = f.srv.st.GetPeer("alice")
+	if p.PromptVersion != 3 || p.ClientVersion != "v0.9.0" || p.ScriptUpdatedAt < firstScriptAt {
+		t.Fatalf("script-only beat disturbed other fields: %+v", p)
+	}
+
+	// Empty script_version = unknown; it must not erase the report.
+	beat(map[string]any{"id": "alice", "script_kind": "muse-watch", "script_version": ""})
+	if p, _ := f.srv.st.GetPeer("alice"); p.ScriptVersion != "1.2.3" || p.ScriptKind != "muse-watch" {
+		t.Fatalf("unknown report clobbered: %+v", p)
+	}
+
+	// Agent-facing /peers carries the fields.
+	_, out := f.do(t, "GET", "/peers", nil, f.tok["alice"])
+	peers, _ := out["peers"].([]any)
+	if len(peers) != 1 {
+		t.Fatalf("peers: %+v", out)
+	}
+	view := peers[0].(map[string]any)
+	if view["script_version"] != "1.2.3" || view["script_kind"] != "muse-watch" || view["script_updated_at"] == nil {
+		t.Fatalf("/peers missing script fields: %+v", view)
+	}
+
+	// Admin JSON, /health and /admin/stats expose the server-side version.
+	admin := f.adminLogin(t)
+	_, out = f.doAuth(t, "GET", "/admin/peers", nil, admin)
+	adminPeers, _ := out["peers"].([]any)
+	if len(adminPeers) != 1 {
+		t.Fatalf("admin peers: %+v", out)
+	}
+	if av := adminPeers[0].(map[string]any); av["script_version"] != "1.2.3" {
+		t.Fatalf("/admin/peers missing script version: %+v", av)
+	}
+	_, health := f.do(t, "GET", "/health", nil, "")
+	if health["script_version"] != web.WatchScriptVersion() || health["script_kind"] != web.MuseWatchKind {
+		t.Fatalf("/health script version: %+v", health)
+	}
+	_, stats := f.doAuth(t, "GET", "/admin/stats", nil, admin)
+	if stats["script_version"] != web.WatchScriptVersion() || stats["scripts_update_enabled"] != true {
+		t.Fatalf("/admin/stats script version/switch: %+v", stats)
+	}
+}
+
+// Script delivery (§8.9b): exact-match comparison, empty=unknown never
+// nudged, a Hermes report is not offered the Muse artifact, and the config
+// switch is a real kill-switch (reporting/display still work).
+func TestHeartbeatScriptNudge(t *testing.T) {
+	cur := web.WatchScriptVersion()
+	if cur == "" {
+		t.Fatal("server has no parsed WATCH_VERSION")
+	}
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	beat := func(m map[string]any) map[string]any {
+		t.Helper()
+		code, out := f.do(t, "POST", "/heartbeat", m, f.tok["alice"])
+		if code != 200 {
+			t.Fatalf("beat: %d %+v", code, out)
+		}
+		return out
+	}
+
+	old := "0.0.1"
+	if old == cur {
+		old = "0.0.2"
+	}
+	out := beat(map[string]any{"id": "alice", "script_kind": "muse-watch", "script_version": old})
+	if out["script_update"] != true {
+		t.Fatalf("stale script must be nudged: %+v", out)
+	}
+	if out["script_version"] != cur || out["script_kind"] != web.MuseWatchKind ||
+		out["download"] != web.MuseWatchPath || out["script_sha256"] != web.WatchScriptSHA256() {
+		t.Fatalf("bad script_update payload: %+v", out)
+	}
+	if sha, _ := out["script_sha256"].(string); len(sha) != 64 {
+		t.Fatalf("script_sha256 not 64 hex chars: %q", sha)
+	}
+	if p, _ := f.srv.st.GetPeer("alice"); p.ScriptVersion != old || p.ScriptKind != "muse-watch" {
+		t.Fatalf("report not stored: %+v", p)
+	}
+
+	// Current version -> no nudge. Unknown (old script) -> never nudge.
+	if out := beat(map[string]any{"id": "alice", "script_kind": "muse-watch", "script_version": cur}); out["script_update"] == true {
+		t.Fatalf("current script must not be nudged: %+v", out)
+	}
+	f.registerPeer(t, "bob", "generic")
+	if _, out := f.do(t, "POST", "/heartbeat", map[string]any{"id": "bob"}, f.tok["bob"]); out["script_update"] == true {
+		t.Fatalf("unknown script must not be nudged: %+v", out)
+	}
+
+	// A Hermes watch report must not be offered the Muse artifact.
+	f.registerPeer(t, "carol", "hermes")
+	if _, out := f.do(t, "POST", "/heartbeat",
+		map[string]any{"id": "carol", "script_kind": "hermes-watch", "script_version": old}, f.tok["carol"]); out["script_update"] == true {
+		t.Fatalf("hermes report must not get the muse artifact: %+v", out)
+	}
+
+	// Kill-switch: no delivery, but the report is still stored and displayed.
+	f2 := newFixtureWithConfig(t, func(cfg *config.Config) { cfg.ScriptsUpdateEnabled = false })
+	f2.registerPeer(t, "dave", "muse")
+	code, out := f2.do(t, "POST", "/heartbeat",
+		map[string]any{"id": "dave", "script_kind": "muse-watch", "script_version": old}, f2.tok["dave"])
+	if code != 200 || out["script_update"] == true {
+		t.Fatalf("disabled switch delivered: %d %+v", code, out)
+	}
+	if p, _ := f2.srv.st.GetPeer("dave"); p.ScriptVersion != old {
+		t.Fatalf("disabled switch must still store the report: %+v", p)
 	}
 }
 

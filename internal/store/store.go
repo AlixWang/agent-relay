@@ -34,6 +34,14 @@ type Peer struct {
 	ClientVersion    string // receiver client version tag (§8.9); "" = not reporting
 	ClientUpdatedAt  int64  // when the client version was last reported
 	ClientRev        string // receiver source revision (§8.9); "" = not reporting
+	// Script version self-report (§8.9b): which watch-layer artifact the
+	// peer runs. Kind is scoped (muse-watch / hermes-watch / …) because one
+	// peer has at most one watch layer. Version "" = unknown (old script),
+	// never nudged. The server's own version is parsed from the embedded
+	// artifact at runtime, never stored here.
+	ScriptKind      string
+	ScriptVersion   string
+	ScriptUpdatedAt int64
 	// Memory reconciliation (§8.6, prompt v11): the assistant's own summary
 	// of which relay rules it purged from memory, and for which revision.
 	MemoryNote         string
@@ -187,6 +195,10 @@ type Store interface {
 	// overwrites unconditionally — client builds are opaque tags, not
 	// ordered revisions, so no forward-only gate.
 	UpdatePeerClient(id, clientVersion string, ts int64) error
+	// UpdatePeerScript records the watch-layer script self-report (§8.9b):
+	// kind + semantic version + when it was reported. Empty version means
+	// "not reporting" and must not clobber a stored value.
+	UpdatePeerScript(id, kind, version string, ts int64) error
 	// UpdatePeerMemory records the assistant's memory-reconciliation report
 	// (§8.6). Forward-only on version, same rule as UpdatePeerPrompt.
 	UpdatePeerMemory(id, note string, version int, ts int64) error
@@ -665,11 +677,13 @@ func (s *sqliteStore) GetPeer(id string) (*Peer, error) {
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
+		COALESCE(script_kind,''),COALESCE(script_version,''),COALESCE(script_updated_at,0),
 		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,''),
 		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0),COALESCE(resource_submit_enabled,1) FROM peers WHERE id=?`, id).
 		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
+			&p.ScriptKind, &p.ScriptVersion, &p.ScriptUpdatedAt,
 			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote,
 			&p.ResourcesRev, &p.ResourcesUpdatedAt, &p.ResourceSubmitEnabled)
 	if err == sql.ErrNoRows {
@@ -694,12 +708,14 @@ func (s *sqliteStore) FindPeerFold(id string) (*Peer, int, error) {
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
+		COALESCE(script_kind,''),COALESCE(script_version,''),COALESCE(script_updated_at,0),
 		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,''),
 		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0),COALESCE(resource_submit_enabled,1)
 		FROM peers WHERE id = ? COLLATE NOCASE ORDER BY id LIMIT 1`, id).
 		Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
+			&p.ScriptKind, &p.ScriptVersion, &p.ScriptUpdatedAt,
 			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote,
 			&p.ResourcesRev, &p.ResourcesUpdatedAt, &p.ResourceSubmitEnabled)
 	if err != nil {
@@ -713,6 +729,7 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 		COALESCE(prompt_version,0),COALESCE(prompt_updated_at,0),
 		COALESCE(profile,''),COALESCE(profile_updated_at,0),
 		COALESCE(client_version,''),COALESCE(client_updated_at,0),COALESCE(client_rev,''),
+		COALESCE(script_kind,''),COALESCE(script_version,''),COALESCE(script_updated_at,0),
 		COALESCE(memory_note,''),COALESCE(memory_version,0),COALESCE(memory_reconciled_at,0),COALESCE(admin_note,''),
 		COALESCE(resources_rev,''),COALESCE(resources_updated_at,0),COALESCE(resource_submit_enabled,1) FROM peers ORDER BY id`)
 	if err != nil {
@@ -725,6 +742,7 @@ func (s *sqliteStore) ListPeers() ([]*Peer, error) {
 		if err := rows.Scan(&p.ID, &p.DisplayName, &p.AgentType, &p.ProtocolVer, &p.Capabilities, &p.Status, &p.CreatedAt, &p.LastSeen,
 			&p.PromptVersion, &p.PromptUpdatedAt, &p.Profile, &p.ProfileUpdatedAt,
 			&p.ClientVersion, &p.ClientUpdatedAt, &p.ClientRev,
+			&p.ScriptKind, &p.ScriptVersion, &p.ScriptUpdatedAt,
 			&p.MemoryNote, &p.MemoryVersion, &p.MemoryReconciledAt, &p.AdminNote,
 			&p.ResourcesRev, &p.ResourcesUpdatedAt, &p.ResourceSubmitEnabled); err != nil {
 			return nil, err
@@ -776,6 +794,15 @@ func (s *sqliteStore) UpdatePeerClient(id, clientVersion string, ts int64) error
 func (s *sqliteStore) UpdatePeerClientRev(id, clientRev string, ts int64) error {
 	_, err := s.db.Exec(`UPDATE peers SET client_rev=?, client_updated_at=? WHERE id=?`,
 		clientRev, ts, id)
+	return err
+}
+
+func (s *sqliteStore) UpdatePeerScript(id, kind, version string, ts int64) error {
+	// Version is the identity; kind is descriptive and may be empty on an
+	// older/foreign reporter. Callers guard empty version (unknown), but the
+	// SQL guard keeps a direct caller from erasing a known version.
+	_, err := s.db.Exec(`UPDATE peers SET script_kind=?, script_version=?, script_updated_at=?
+		WHERE id=? AND ? <> ''`, kind, version, ts, id, version)
 	return err
 }
 

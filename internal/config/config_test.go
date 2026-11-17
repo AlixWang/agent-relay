@@ -16,6 +16,26 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+// Script self-update delivery is on by default (so a new server can nudge
+// outdated watch scripts immediately) and can be killed via TOML.
+func TestScriptsUpdateEnabled(t *testing.T) {
+	if !Default().ScriptsUpdateEnabled {
+		t.Fatal("scripts_update_enabled must default to true")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("scripts_update_enabled = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.ScriptsUpdateEnabled {
+		t.Fatal("scripts_update_enabled=false not applied")
+	}
+}
+
 func TestLoadRoundTrip(t *testing.T) {
 	cfg := Default()
 	cfg.Port = 18790

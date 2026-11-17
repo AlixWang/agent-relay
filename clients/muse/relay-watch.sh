@@ -14,12 +14,22 @@
 # ============ CONFIG（按你的环境改这里） ============
 RELAY_URL="${RELAY_URL:-<RELAY_URL>}"      # 中继地址，如 https://relay.example.com
 BASE="${BASE:-$HOME/workspace/task-relay}" # 工作目录
+# 脚本自身版本：服务端从内嵌副本解析同一个常量作为唯一事实来源。
+# 发布脚本时手动 bump；比对用精确相等（不做 semver 大小比较）。
+WATCH_VERSION="1.0.0"
+SCRIPT_KIND="muse-watch"
 # 身份与 token 由 daemon 直接读取，本脚本不碰 token：
 #   $BASE/identity   单行身份，如 <YOUR_IDENTITY>
 #   $BASE/.token     个人 token，chmod 600
 # ====================================================
 #
 set -euo pipefail
+
+# SCRIPT_AUTO_UPDATE=0 disables silent self-update; the update is still
+# reported once per target version so a worker can apply it manually.
+SCRIPT_AUTO_UPDATE="${SCRIPT_AUTO_UPDATE:-1}"
+SELF="$(readlink -f "$0" 2>/dev/null || true)"
+[ -n "$SELF" ] || SELF="$0"
 
 BIN="$BASE/bin/relay-tail"
 SPOOL_DIR="$BASE/spool"
@@ -31,6 +41,10 @@ AUTH_FAIL_MARKER="$BASE/.relay_auth_failed"
 PROMPT_VER_FILE="$BASE/.prompt_version"
 CLIENT_VER_FILE="$BASE/.client_version"
 CLIENT_REV_FILE="$BASE/.client_rev"
+SCRIPT_VER_FILE="$BASE/.script_version"
+SCRIPT_REPORT_TS="$BASE/.script_reported_at"
+SCRIPT_REPORT_VER="$BASE/.script_reported_version"
+SCRIPT_NOTIFY_FILE="$BASE/.script_update_notified"
 AGENT_LOG_FILE="$SPOOL_DIR/agent-log.jsonl"
 AGENT_LOG_OFFSET="$BASE/.agent_log_offset"
 TAIL_ERR_OFFSET="$BASE/.relay-tail-err.offset"
@@ -217,6 +231,216 @@ log() {
 }
 silent() { :; }  # 无事发生；调用处随后 exit 0
 
+# ---------- 脚本版本自报 / 自更新 ----------
+# The server parses WATCH_VERSION from the embedded copy and compares it with
+# the version this peer reports. Report-on-change is not enough (a lost
+# heartbeat would silence a node forever), so an unchanged version is also
+# re-reported once an hour. `.script_version` is written only after the server
+# confirms the report; `.script_reported_at`/`.script_reported_version` gate
+# retries so a broken link cannot turn the 5s watchdog into a request storm.
+sha256_of_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+script_notify_once() {
+  # Wake/log once per target version: hourly re-checks must not spam a worker
+  # when auto-update is disabled or a local permission problem is persistent.
+  local key="$1"
+  [ "$(cat "$SCRIPT_NOTIFY_FILE" 2>/dev/null || true)" = "$key" ] && return 1
+  printf '%s' "$key" > "$SCRIPT_NOTIFY_FILE" 2>/dev/null || true
+  return 0
+}
+
+script_update_failed() {
+  # $1 = target version, $2 = target sha256, $3 = human reason. The wake
+  # reason is self-contained: a worker without prompt §7.6b must still know
+  # what failed, where the script lives, and what to do next.
+  local ver="$1" sha="$2" reason="$3" fields
+  fields="$(jq -cn --arg from "$WATCH_VERSION" --arg to "$ver" --arg sha "$sha" \
+    --arg reason "$reason" --arg path "$SELF" \
+    '{from:$from,to:$to,sha256:$sha,reason:$reason,path:$path}' 2>/dev/null || echo '{}')"
+  log_event error "script.update_failed" "脚本自动更新失败，未应用" "$fields"
+  script_notify_once "failed:$ver" || return 0
+  if ! wake "中继脚本自动更新失败（$reason），当前仍运行 v$WATCH_VERSION。请手动下载 $RELAY_URL/clients/relay-watch.sh 覆盖 $SELF（chmod +x），或修复后等下一次自动重试。" \
+    "$(jq -cn --arg from "$WATCH_VERSION" --arg to "$ver" --arg reason "$reason" --arg path "$SELF" \
+      '{script_update_failed:true,from:$from,to:$to,reason:$reason,path:$path}' 2>/dev/null || echo '{}')"; then
+    log_event error "script.wake_failed" "脚本更新失败通知未能交给 worker" "$fields"
+  fi
+  return 0
+}
+
+script_update_disabled() {
+  local ver="$1" download="$2" fields url
+  case "$download" in
+    http://*|https://*) url="$download" ;;
+    /*) url="$RELAY_URL$download" ;;
+    *) url="$RELAY_URL/clients/relay-watch.sh" ;;
+  esac
+  fields="$(jq -cn --arg from "$WATCH_VERSION" --arg to "$ver" --arg path "$SELF" \
+    '{from:$from,to:$to,path:$path,reason:"SCRIPT_AUTO_UPDATE=0"}' 2>/dev/null || echo '{}')"
+  log_event info "script.update_disabled" "脚本有新版本，但自动更新已关闭" "$fields"
+  script_notify_once "disabled:$ver" || return 0
+  if ! wake "中继脚本有新版本 v$ver，但本机 SCRIPT_AUTO_UPDATE=0，未自动更新。请手动下载 $url 覆盖 $SELF（chmod +x）；或设置 SCRIPT_AUTO_UPDATE=1 后等下一次检查。" \
+    "$(jq -cn --arg from "$WATCH_VERSION" --arg to "$ver" --arg path "$SELF" \
+      '{script_update_available:true,auto_update_disabled:true,from:$from,to:$to,path:$path}' 2>/dev/null || echo '{}')"; then
+    log_event error "script.wake_failed" "脚本更新通知未能交给 worker" "$fields"
+  fi
+  return 0
+}
+
+script_apply_update() {
+  # Download to a temp file in the script's own directory, verify sha256 and
+  # syntax, keep a rollback copy, then rename over $SELF. rename (not
+  # in-place overwrite) is required: a running bash keeps reading the old
+  # inode and finishes this tick on the old code, while the next tick starts
+  # on the new file. No restart is needed.
+  local want_ver="$1" want_sha="$2" download="$3"
+  local dir tmp url got got_ver
+  SCRIPT_APPLY_ERR=""
+  case "$want_sha" in
+    ''|*[!0-9a-f]*) SCRIPT_APPLY_ERR="sha256 格式非法"; return 1 ;;
+  esac
+  if [ "${#want_sha}" -ne 64 ]; then
+    SCRIPT_APPLY_ERR="sha256 长度不是 64 位"; return 1
+  fi
+  case "$download" in
+    http://*|https://*) url="$download" ;;
+    /*) url="$RELAY_URL$download" ;;
+    *) SCRIPT_APPLY_ERR="下载地址非法"; return 1 ;;
+  esac
+  if [ ! -f "$SELF" ]; then
+    SCRIPT_APPLY_ERR="$SELF 不是普通文件"; return 1
+  fi
+  if [ ! -w "$SELF" ]; then
+    SCRIPT_APPLY_ERR="$SELF 不可写"; return 1
+  fi
+  dir="$(dirname "$SELF")"
+  if [ ! -w "$dir" ]; then
+    SCRIPT_APPLY_ERR="$dir 不可写，无法原子替换"; return 1
+  fi
+  tmp="$(mktemp "$dir/.relay-watch.XXXXXX" 2>/dev/null || true)"
+  if [ -z "$tmp" ]; then
+    SCRIPT_APPLY_ERR="无法在 $dir 创建临时文件"; return 1
+  fi
+  if ! curl -fsSL --max-time 30 "$url" -o "$tmp" 2>/dev/null; then
+    SCRIPT_APPLY_ERR="下载失败"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  got="$(sha256_of_file "$tmp" 2>/dev/null || true)"
+  if [ "$got" != "$want_sha" ]; then
+    SCRIPT_APPLY_ERR="sha256 校验失败（期望 ${want_sha:0:12}…，实际 ${got:0:12}…）"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! bash -n "$tmp" 2>/dev/null; then
+    SCRIPT_APPLY_ERR="bash -n 语法检查失败"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  got_ver="$(sed -n 's/^WATCH_VERSION="\([^"]*\)"$/\1/p' "$tmp" 2>/dev/null | head -n 1 || true)"
+  if [ "$got_ver" != "$want_ver" ]; then
+    SCRIPT_APPLY_ERR="新文件版本号 ${got_ver:-?} 与下发版本 v$want_ver 不一致"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! chmod +x "$tmp" 2>/dev/null; then
+    SCRIPT_APPLY_ERR="chmod +x 失败"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! cp -p "$SELF" "$SELF.rollback" 2>/dev/null; then
+    SCRIPT_APPLY_ERR="无法保留回滚副本 $SELF.rollback"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -f "$tmp" "$SELF" 2>/dev/null; then
+    SCRIPT_APPLY_ERR="原子替换 $SELF 失败"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+script_update_check() {
+  [ -f "$BASE/.token" ] || return 0
+  [ "$ME_IDENTITY" != "unknown" ] || return 0
+  local token now confirmed last_ts last_ver need body resp ok
+  local update_kind update_ver update_sha download
+  token="$(cat "$BASE/.token" 2>/dev/null || true)"
+  [ -n "$token" ] || return 0
+  now="$(date +%s)"
+  confirmed="$(cat "$SCRIPT_VER_FILE" 2>/dev/null || true)"
+  last_ts="$(as_uint "$(cat "$SCRIPT_REPORT_TS" 2>/dev/null || echo 0)")"
+  last_ver="$(cat "$SCRIPT_REPORT_VER" 2>/dev/null || true)"
+  need=0
+  [ "$confirmed" != "$WATCH_VERSION" ] && need=1
+  if [ "$((now - last_ts))" -ge 3600 ]; then
+    need=1
+  fi
+  [ "$need" = "1" ] || return 0
+  # One attempt per version per hour. A successful swap changes WATCH_VERSION
+  # in the next tick's process, so the new version bypasses this gate and
+  # confirms immediately; a failed attempt waits for the hourly retry.
+  if [ "$last_ver" = "$WATCH_VERSION" ] && [ "$((now - last_ts))" -lt 3600 ]; then
+    return 0
+  fi
+  printf '%s' "$now" > "$SCRIPT_REPORT_TS" 2>/dev/null || true
+  printf '%s' "$WATCH_VERSION" > "$SCRIPT_REPORT_VER" 2>/dev/null || true
+  body="$(jq -cn --arg id "$ME_IDENTITY" --arg kind "$SCRIPT_KIND" --arg ver "$WATCH_VERSION" \
+    '{id:$id,script_kind:$kind,script_version:$ver}' 2>/dev/null || true)"
+  [ -n "$body" ] || return 0
+  resp="$(curl -sS --max-time 6 -X POST "$RELAY_URL/heartbeat" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -H 'User-Agent: RelayClient/1.0' \
+    -d "$body" 2>/dev/null || true)"
+  ok="$(printf '%s' "$resp" | jq -r '.ok == true' 2>/dev/null || echo false)"
+  if [ "$ok" != "true" ]; then
+    log_event warn "script.report_failed" "脚本版本上报失败" \
+      "$(jq -cn --arg ver "$WATCH_VERSION" --arg resp "$(printf '%s' "$resp" | head -c 200)" \
+        '{version:$ver,response:$resp}' 2>/dev/null || echo '{}')"
+    return 0
+  fi
+  # Confirmed only after the server accepted the report (requirement: write
+  # the sidecar file only on success).
+  printf '%s' "$WATCH_VERSION" > "$SCRIPT_VER_FILE" 2>/dev/null || true
+  update_kind="$(printf '%s' "$resp" | jq -r '.script_kind // ""' 2>/dev/null || true)"
+  update_ver="$(printf '%s' "$resp" | jq -r '.script_version // ""' 2>/dev/null || true)"
+  update_sha="$(printf '%s' "$resp" | jq -r '.script_sha256 // ""' 2>/dev/null || true)"
+  download="$(printf '%s' "$resp" | jq -r '.download // ""' 2>/dev/null || true)"
+  [ "$(printf '%s' "$resp" | jq -r '.script_update == true' 2>/dev/null || echo false)" = "true" ] || return 0
+  [ "$update_kind" = "$SCRIPT_KIND" ] || return 0
+  case "$update_ver" in
+    ''|*[!0-9A-Za-z._-]*) return 0 ;;
+  esac
+  [ "${#update_ver}" -le 64 ] || return 0
+  [ "$update_ver" != "$WATCH_VERSION" ] || return 0
+  [ -n "$download" ] || download="/clients/relay-watch.sh"
+  log_event info "script.update_available" "服务端下发新版脚本" \
+    "$(jq -cn --arg from "$WATCH_VERSION" --arg to "$update_ver" --arg sha "$update_sha" --arg path "$SELF" \
+      '{from:$from,to:$to,sha256:$sha,path:$path}' 2>/dev/null || echo '{}')"
+  if [ "$SCRIPT_AUTO_UPDATE" = "0" ]; then
+    script_update_disabled "$update_ver" "$download"
+    return 0
+  fi
+  if script_apply_update "$update_ver" "$update_sha" "$download"; then
+    log_event info "script.update_applied" "脚本已原子替换为新版，下一 tick 生效" \
+      "$(jq -cn --arg from "$WATCH_VERSION" --arg to "$update_ver" --arg sha "$update_sha" \
+        --arg path "$SELF" --arg rollback "$SELF.rollback" \
+        '{from:$from,to:$to,sha256:$sha,path:$path,rollback:$rollback}' 2>/dev/null || echo '{}')"
+  else
+    script_update_failed "$update_ver" "$update_sha" "${SCRIPT_APPLY_ERR:-未知错误}"
+  fi
+  return 0
+}
+
 flush_agent_logs() {
   # Best-effort batch upload at script exit. Never let log delivery block or
   # fail the watchdog: the local relay-watch.log remains the source of truth.
@@ -301,6 +525,10 @@ trap 'flush_agent_logs || true' EXIT
 
 mkdir -p "$SPOOL_DIR"
 touch "$SPOOL"
+
+# ---- 0. 脚本版本自报 / 自更新 ----
+# Best-effort and never fatal: a failed report must not stop the watchdog.
+script_update_check || true
 
 # ---- 1. 看门狗 ----
 daemon_alive() {
