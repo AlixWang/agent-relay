@@ -565,6 +565,9 @@ func TestKeepaliveAllSkipsAndForce(t *testing.T) {
 	if _, err := env.svc.Update(mustAccountID(t, env, "bob"), nil, nil, nil, boolPtr(false)); err != nil {
 		t.Fatal(err)
 	}
+	// Fresh authorizations are inside the 6h/36h gate; age the account so
+	// this test exercises the disabled/needs_reauth skips it is about.
+	ageKeepalive(t, env, alice.ID, 7*time.Hour)
 	sum, err := env.svc.KeepaliveAll(context.Background(), false)
 	if err != nil {
 		t.Fatalf("all: %v", err)
@@ -589,12 +592,117 @@ func TestKeepaliveAllSkipsAndForce(t *testing.T) {
 	}
 }
 
+func TestKeepaliveGateMatrix(t *testing.T) {
+	cases := []struct {
+		name          string
+		lastKeepalive time.Duration // 0 means never renewed
+		expiresIn     time.Duration
+		authState     string
+		force         bool
+		wantRun       bool
+	}{
+		{"never renewed", 0, 48 * time.Hour, "ok", false, true},
+		{"fresh under 6h, beyond 36h, ok", 1 * time.Hour, 48 * time.Hour, "ok", false, false},
+		{"stale beyond 6h, beyond 36h, ok", 7 * time.Hour, 48 * time.Hour, "ok", false, true},
+		{"fresh under 6h but cookie inside 36h", 1 * time.Hour, 10 * time.Hour, "ok", false, true},
+		{"stale beyond 6h and cookie inside 36h", 7 * time.Hour, 10 * time.Hour, "ok", false, true},
+		{"fresh cookie but account not ok", 1 * time.Hour, 48 * time.Hour, "unverified", false, true},
+		{"manual force bypasses the gate", 1 * time.Hour, 48 * time.Hour, "ok", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t, true)
+			a := env.authorize(t, "alice")
+			setEssentialExpiry(t, env, a.ID, env.clock+int64(tc.expiresIn/time.Second))
+			row, _ := env.st.GetMuseAccount(a.ID)
+			if tc.lastKeepalive == 0 {
+				row.LastKeepaliveAt = 0
+			} else {
+				row.LastKeepaliveAt = env.clock - int64(tc.lastKeepalive/time.Second)
+			}
+			row.AuthState = tc.authState
+			if err := env.st.SaveMuseAccount(row); err != nil {
+				t.Fatal(err)
+			}
+			sessionsBefore, wakesBefore, _ := env.fake.counts()
+			sum, err := env.svc.KeepaliveAll(context.Background(), tc.force)
+			if err != nil {
+				t.Fatalf("all: %v", err)
+			}
+			sessionsAfter, wakesAfter, _ := env.fake.counts()
+			if sum.Total != 1 {
+				t.Fatalf("summary: %+v", sum)
+			}
+			if tc.wantRun {
+				if sum.OK != 1 || sum.Skipped != 0 {
+					t.Fatalf("gate should have run: %+v", sum)
+				}
+				if sessionsAfter <= sessionsBefore || wakesAfter != wakesBefore+1 {
+					t.Fatalf("gate did not renew: sessions %d -> %d, wakes %d -> %d",
+						sessionsBefore, sessionsAfter, wakesBefore, wakesAfter)
+				}
+			} else {
+				if sum.OK != 0 || sum.Skipped != 1 || len(sum.Results) != 0 {
+					t.Fatalf("gate should have skipped: %+v", sum)
+				}
+				if len(sum.SkippedAccounts) != 1 || sum.SkippedAccounts[0] != "alice" {
+					t.Fatalf("skipped accounts: %+v", sum)
+				}
+				if sessionsAfter != sessionsBefore || wakesAfter != wakesBefore {
+					t.Fatalf("skipped account was renewed: sessions %d -> %d, wakes %d -> %d",
+						sessionsBefore, sessionsAfter, wakesBefore, wakesAfter)
+				}
+			}
+		})
+	}
+}
+
+func TestManualKeepaliveBypassesGate(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	// The account is healthy, just-renewed and its cookie is >36h away, so
+	// only a manual action can make it renew now.
+	sessionsBefore, wakesBefore, _ := env.fake.counts()
+	sum, err := env.svc.KeepaliveAll(context.Background(), false)
+	if err != nil {
+		t.Fatalf("background all: %v", err)
+	}
+	if sum.Skipped != 1 || sum.OK != 0 {
+		t.Fatalf("background should skip fresh account: %+v", sum)
+	}
+	if sessionsAfter, wakesAfter, _ := env.fake.counts(); sessionsAfter != sessionsBefore || wakesAfter != wakesBefore {
+		t.Fatalf("background renewed a gated account: sessions %d -> %d, wakes %d -> %d",
+			sessionsBefore, sessionsAfter, wakesBefore, wakesAfter)
+	}
+
+	// Single manual "立即保活" is not gated.
+	if _, err := env.svc.Keepalive(context.Background(), a.ID); err != nil {
+		t.Fatalf("manual keepalive: %v", err)
+	}
+	sessionsAfterManual, wakesAfterManual, _ := env.fake.counts()
+	if sessionsAfterManual <= sessionsBefore || wakesAfterManual != wakesBefore+1 {
+		t.Fatalf("manual keepalive was gated: sessions %d -> %d, wakes %d -> %d",
+			sessionsBefore, sessionsAfterManual, wakesBefore, wakesAfterManual)
+	}
+
+	// Manual "全部保活" (force=true) bypasses the gate as well.
+	sum, err = env.svc.KeepaliveAll(context.Background(), true)
+	if err != nil {
+		t.Fatalf("manual all: %v", err)
+	}
+	if sum.OK != 1 || sum.Skipped != 0 {
+		t.Fatalf("manual all did not bypass the gate: %+v", sum)
+	}
+	if _, wakesAfterForce, _ := env.fake.counts(); wakesAfterForce != wakesAfterManual+1 {
+		t.Fatalf("manual all did not renew: wakes %d -> %d", wakesAfterManual, wakesAfterForce)
+	}
+}
+
 func TestMaybeWakeOfflineGuards(t *testing.T) {
 	env := newTestEnv(t, true)
-	env.authorize(t, "alice")
-	row, _ := env.st.GetMuseAccountByPeer("alice")
-	row.LastWakeAt = env.clock
-	if err := env.st.SaveMuseAccount(row); err != nil {
+	a := env.authorize(t, "alice")
+	// An explicit/manual wake starts the offline cooldown.
+	if _, err := env.svc.Wake(context.Background(), a.ID); err != nil {
 		t.Fatal(err)
 	}
 	before := env.fake.wakeCount()
@@ -604,10 +712,8 @@ func TestMaybeWakeOfflineGuards(t *testing.T) {
 		t.Fatal("cooldown was ignored")
 	}
 
-	row.LastWakeAt = 0
-	if err := env.st.SaveMuseAccount(row); err != nil {
-		t.Fatal(err)
-	}
+	// Once the explicit-wake cooldown expires, the hook fires again.
+	env.clock += 61
 	env.svc.MaybeWakeOffline("alice", 600)
 	waitFor(t, func() bool { return env.fake.wakeCount() > before })
 
@@ -615,10 +721,7 @@ func TestMaybeWakeOfflineGuards(t *testing.T) {
 	if err := env.st.UpdatePeerStatus("alice", "suspended"); err != nil {
 		t.Fatal(err)
 	}
-	row.LastWakeAt = 0
-	if err := env.st.SaveMuseAccount(row); err != nil {
-		t.Fatal(err)
-	}
+	env.clock += 61
 	before = env.fake.wakeCount()
 	env.svc.MaybeWakeOffline("alice", 600)
 	time.Sleep(50 * time.Millisecond)
@@ -638,33 +741,78 @@ func TestAutoWakeDisabledGlobally(t *testing.T) {
 	}
 }
 
-func TestKeepaliveDoesNotRecordWake(t *testing.T) {
+func TestKeepaliveRecordedWakeDoesNotBlockOfflineWake(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	env.clock += 10
+	res, err := env.svc.Keepalive(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("keepalive: %v", err)
+	}
+	if !res.WakeRequested || !res.WakeOK {
+		t.Fatalf("keepalive did not wake: %+v", res)
+	}
+	row, _ := env.st.GetMuseAccount(a.ID)
+	if row.LastWakeAt != env.clock || !row.LastWakeOK {
+		t.Fatalf("keepalive did not record the wake: %+v", row)
+	}
+
+	// The recorded keepalive wake is recent enough to trip the old
+	// LastWakeAt-based cooldown; the offline hook must still fire because
+	// only explicit/offline wakes own that clock.
+	before := env.fake.wakeCount()
+	env.svc.MaybeWakeOffline("alice", 600)
+	waitFor(t, func() bool { return env.fake.wakeCount() > before })
+}
+
+func TestKeepaliveRecordsWakeAttempt(t *testing.T) {
 	env := newTestEnv(t, true)
 	a := env.authorize(t, "alice")
 	row, _ := env.st.GetMuseAccountByPeer("alice")
 	if row.LastWakeAt == 0 {
 		t.Fatalf("authorize wake not recorded: %+v", row)
 	}
-	// Reset the authorization's wake marker: a background keepalive must not
-	// look like a new wake event.
+	// Reset the authorization's wake marker so the next keepalive is the only
+	// possible source of a fresh wake record.
 	row.LastWakeAt = 0
 	row.LastWakeOK = false
+	row.LastWakeState = ""
+	row.LastWakeError = ""
 	if err := env.st.SaveMuseAccount(row); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.svc.Keepalive(context.Background(), a.ID); err != nil {
-		t.Fatal(err)
+	env.clock += 10
+	res, err := env.svc.Keepalive(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("keepalive: %v", err)
+	}
+	if !res.WakeRequested || !res.WakeOK {
+		t.Fatalf("keepalive did not wake/verify: %+v", res)
 	}
 	row, _ = env.st.GetMuseAccountByPeer("alice")
-	if row.LastWakeAt != 0 {
-		t.Fatalf("keepalive recorded a wake: %+v", row)
+	if row.LastWakeAt != env.clock || !row.LastWakeOK ||
+		row.LastWakeState != "running" || row.LastWakeError != "" {
+		t.Fatalf("keepalive wake record: %+v", row)
 	}
-	if _, err := env.svc.Wake(context.Background(), a.ID); err != nil {
-		t.Fatal(err)
+
+	// A failed verification is recorded as unconfirmed (and stays out of the
+	// session-scoped last_error).
+	env.fake.setVerifyState("UNKNOWN")
+	env.clock += 10
+	res, err = env.svc.Keepalive(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("keepalive: %v", err)
+	}
+	if !res.WakeRequested || res.WakeOK {
+		t.Fatalf("keepalive should record an unconfirmed wake: %+v", res)
 	}
 	row, _ = env.st.GetMuseAccountByPeer("alice")
-	if row.LastWakeAt == 0 {
-		t.Fatalf("wake not recorded: %+v", row)
+	if row.LastWakeAt != env.clock || row.LastWakeOK ||
+		row.LastWakeState != "unconfirmed" || !strings.Contains(row.LastWakeError, "not confirmed") {
+		t.Fatalf("unconfirmed keepalive wake record: %+v", row)
+	}
+	if row.LastError != "" || !row.LastAttemptOK {
+		t.Fatalf("wake failure leaked into session error: %+v", row)
 	}
 }
 
@@ -729,6 +877,37 @@ func mustAccountID(t *testing.T, env *testEnv, peer string) string {
 		t.Fatalf("account %s: %+v (%v)", peer, a, err)
 	}
 	return a.ID
+}
+
+func ageKeepalive(t *testing.T, env *testEnv, id string, age time.Duration) {
+	t.Helper()
+	row, err := env.st.GetMuseAccount(id)
+	if err != nil || row == nil {
+		t.Fatalf("account %s: %+v (%v)", id, row, err)
+	}
+	row.LastKeepaliveAt = env.clock - int64(age/time.Second)
+	if err := env.st.SaveMuseAccount(row); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setEssentialExpiry(t *testing.T, env *testEnv, id string, expiresAt int64) {
+	t.Helper()
+	row, err := env.st.GetMuseAccount(id)
+	if err != nil || row == nil {
+		t.Fatalf("account %s: %+v (%v)", id, row, err)
+	}
+	raw, err := json.Marshal(map[string]int64{
+		"hatch_sess": expiresAt,
+		"hatch_vml":  expiresAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.CookiesExp = string(raw)
+	if err := env.st.SaveMuseAccount(row); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func contains(list []string, want string) bool {
@@ -977,6 +1156,9 @@ func TestRateLimitBacksOffNextKeepalive(t *testing.T) {
 	env.fake.retryAfter = ""
 	env.fake.mu.Unlock()
 	env.clock += 121
+	// The 6h/36h cadence gate is unrelated to the expired 429 window; age the
+	// last renewal so this step still exercises backoff recovery.
+	ageKeepalive(t, env, a.ID, 7*time.Hour)
 	sum, err = env.svc.KeepaliveAll(context.Background(), false)
 	if err != nil {
 		t.Fatalf("all after expiry: %v", err)
@@ -1082,6 +1264,11 @@ func TestKeepaliveAllLogsOneVerdictPerAccount(t *testing.T) {
 	ids := make([]string, 0, accounts)
 	for _, peer := range peers {
 		ids = append(ids, env.authorize(t, peer).ID)
+	}
+	// Fresh authorizations are inside the 6h/36h gate; this test is about the
+	// verdict line for an actual sweep.
+	for _, id := range ids {
+		ageKeepalive(t, env, id, 7*time.Hour)
 	}
 
 	var buf strings.Builder
