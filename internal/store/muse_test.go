@@ -13,7 +13,9 @@ func TestMuseAccountsCRUDAndCascades(t *testing.T) {
 		SessionStatus: "assigned", VMID: "vm-1", VMState: "RUNNING",
 		AuthState: "ok", LastError: "",
 		LastKeepaliveAt: 100, LastAttemptAt: 101, LastAttemptOK: true,
-		LastWakeAt: 102, LastWakeOK: true, AutoWake: true, Enabled: true,
+		LastWakeAt: 102, LastWakeOK: true,
+		LastWakeError: "", LastWakeState: "running",
+		AutoWake: true, Enabled: true,
 		AuthorizedAt: 90, UpdatedAt: 102,
 	}
 	if err := st.CreateMuseAccount(a); err != nil {
@@ -23,7 +25,9 @@ func TestMuseAccountsCRUDAndCascades(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: %+v (%v)", got, err)
 	}
-	if got.PeerID != "alice" || got.CookiesEnc != "ciphertext" || !got.LastAttemptOK || !got.LastWakeOK || !got.AutoWake || !got.Enabled {
+	if got.PeerID != "alice" || got.CookiesEnc != "ciphertext" || !got.LastAttemptOK ||
+		!got.LastWakeOK || got.LastWakeState != "running" || got.LastWakeError != "" ||
+		!got.AutoWake || !got.Enabled {
 		t.Fatalf("round-trip: %+v", got)
 	}
 	byPeer, err := st.GetMuseAccountByPeer("alice")
@@ -47,12 +51,17 @@ func TestMuseAccountsCRUDAndCascades(t *testing.T) {
 	got.Enabled = false
 	got.AutoWake = false
 	got.LastAttemptOK = false
+	got.LastWakeOK = false
+	got.LastWakeState = "unconfirmed"
+	got.LastWakeError = "wake not confirmed"
 	got.UpdatedAt = 200
 	if err := st.SaveMuseAccount(got); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	got2, _ := st.GetMuseAccount("ma_1")
-	if got2.Label != "renamed" || got2.Enabled || got2.AutoWake || got2.LastAttemptOK || got2.UpdatedAt != 200 {
+	if got2.Label != "renamed" || got2.Enabled || got2.AutoWake || got2.LastAttemptOK ||
+		got2.LastWakeOK || got2.LastWakeState != "unconfirmed" ||
+		got2.LastWakeError != "wake not confirmed" || got2.UpdatedAt != 200 {
 		t.Fatalf("save round-trip: %+v", got2)
 	}
 	if got2.AuthorizedAt != 90 {

@@ -288,6 +288,8 @@ CREATE TABLE IF NOT EXISTS muse_accounts (
     last_attempt_ok   INTEGER DEFAULT 0,
     last_wake_at      INTEGER DEFAULT 0,
     last_wake_ok      INTEGER DEFAULT 0,
+    last_wake_error   TEXT DEFAULT '',
+    last_wake_state   TEXT DEFAULT '',
     auto_wake         INTEGER DEFAULT 1,
     enabled           INTEGER DEFAULT 1,
     authorized_at     INTEGER NOT NULL,

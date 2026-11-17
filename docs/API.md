@@ -148,7 +148,7 @@ POST /admin/muse/accounts { peer_id, label?, cookies, auto_wake?, enabled? } →
 PATCH /admin/muse/accounts/{id} { label?, peer_id?, cookies?, auto_wake?, enabled? } → { account, warning? }
 DELETE /admin/muse/accounts/{id} → { ok:true }（立即删除 Cookie 密文）
 POST /admin/muse/accounts/{id}/keepalive → { result }（Muse 失败仍 200，看 result.ok）
-POST /admin/muse/accounts/{id}/wake → { result }（同上；result.wake_ok 才是 VM RUNNING）
+POST /admin/muse/accounts/{id}/wake → { result }（Muse 失败仍 200；result.ok 只代表 session 有效，result.wake_ok 才是 VM RUNNING）
 POST /admin/muse/keepalive → { summary }；后台正在跑 → 409 muse_busy
 GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last_result} }
 ```
@@ -163,10 +163,26 @@ GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last
   403/429/5xx/超时 → 仍保存但标记 `unverified` 并返回 `warning`，下一轮保活重试。
 - `auth_state`：`ok`（最近一次 session 确认）、`needs_reauth`（401，保留旧 Cookie，后台暂停）、
   `unverified`（尚未确认）。`last_attempt_ok=false` + `last_error` 表示最近一次检查失败但保留原状态。
-- `result.ok` = session 有效；`result.wake_requested` = wake POST 已发出；`result.wake_ok` =
-  第二次 `/api/session` 复核到 `vm_state == RUNNING`。wake HTTP 200 不等于成功。
-- `account` 列表行另带 `peer_online` / `peer_last_seen` / `peer_status` /
-  `wake_recovered`（唤醒后是否收到过心跳）/ `wake_pending`。
+- `result.ok` = 本次 **session** 有效（session/auth/HTTP 成功），不包含唤醒结果；`result.error`
+  也只放 session/auth/HTTP 错误。`result.wake_requested` = wake POST 已发出；`result.wake_ok` =
+  第二次 `/api/session` 复核到 `vm_state == RUNNING`。唤醒失败单独放 `result.wake_error`，
+  `result.wake_state` 为 `unconfirmed`（未确认 RUNNING）或 `running`（已确认）；保活/授权探测未走到
+  唤醒步骤时省略，手动唤醒未走到该步时仍记为 `unconfirmed`。
+  wake HTTP 200 不等于成功：`ok=true` + `wake_ok=false` 表示“会话正常、唤醒未确认”。
+- 账号持久化同样分域：`last_error` 只记录 session/auth 错误；`last_wake_error` /
+  `last_wake_state` 单独记录最近一次唤醒诊断；手动唤醒在 session 检查阶段失败也会记为
+  `unconfirmed` + `wake skipped`，避免旧的唤醒成功看起来仍然有效。唤醒失败不会把账号标成异常。
+  升级兼容：旧版本写在 `last_error` 的已知唤醒错误会在读取账号时移入 `last_wake_error`
+  （文本不丢弃），并标记 `last_wake_state=unconfirmed`、`last_wake_ok=false`。
+- `account` 列表行另带 `peer_online` / `peer_last_seen` / `peer_status` / `wake_state` /
+  `wake_recovered` / `wake_pending` / `wake_unconfirmed`。`wake_state` 取值：
+  `none`（无唤醒记录）、`pending`（刚发出、等待心跳）、`unconfirmed`（唤醒未确认 RUNNING，
+  即使之后又收到心跳也仍是此值）、`running`（已确认 RUNNING）、`recovered`（已确认 RUNNING 且之后
+  收到过心跳）。`wake_recovered` 仅在 `wake_ok=true`、无 `last_wake_error`、状态不是 `unconfirmed`
+  且 `peer_last_seen >= last_wake_at` 时为 true。
+- 列表 `facets`：`ok` = 已启用 + `auth_state=ok` + `last_attempt_ok=true` + `last_error` 为空 +
+  非 `wake_unconfirmed`；`wake_unconfirmed` = 前四项成立但唤醒未确认。两者与行 badge
+  “正常”/“唤醒未确认”使用同一判定，因此不会同时把同一账号算作正常和异常。`disabled` 单独计数。
 - `GET /admin/peers` 的成员行带 `muse` 摘要（仅 admin）；agent-facing `GET /peers` 不返回。
 - 错误：`400` Cookie 格式/缺核心/401；`404` 成员或授权不存在；`409` 重复绑定或保活忙；
   `503` Muse 集成未启用（服务端密钥/配置问题）。

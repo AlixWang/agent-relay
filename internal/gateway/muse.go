@@ -16,11 +16,47 @@ import (
 // presence and whether a recorded wake brought the node back.
 type adminMuseAccount struct {
 	*muse.Account
-	PeerOnline    bool   `json:"peer_online"`
-	PeerLastSeen  int64  `json:"peer_last_seen"`
-	PeerStatus    string `json:"peer_status"`
-	WakeRecovered bool   `json:"wake_recovered"`
-	WakePending   bool   `json:"wake_pending"`
+	PeerOnline      bool   `json:"peer_online"`
+	PeerLastSeen    int64  `json:"peer_last_seen"`
+	PeerStatus      string `json:"peer_status"`
+	WakeState       string `json:"wake_state"`
+	WakeRecovered   bool   `json:"wake_recovered"`
+	WakePending     bool   `json:"wake_pending"`
+	WakeUnconfirmed bool   `json:"wake_unconfirmed"`
+}
+
+// museSessionOK is the single source of truth for the row's "正常" badge and
+// the "正常" facet. A disabled account has its own badge/facet, and a wake
+// problem is reported separately from session health.
+func museSessionOK(a *muse.Account) bool {
+	return a != nil && a.Enabled && a.AuthState == "ok" &&
+		a.LastAttemptOK && a.LastError == ""
+}
+
+// museWakeState derives the operator-facing wake state. A recorded failed wake
+// must stay unconfirmed even if the peer heartbeat later reappears: only a
+// wake that actually verified RUNNING may claim "已上线".
+func museWakeState(a *muse.Account, p *presence.PeerView, now int64) string {
+	if a == nil {
+		return "none"
+	}
+	if a.LastWakeError != "" || a.LastWakeState == "unconfirmed" ||
+		(a.LastWakeState == "" && a.LastWakeAt > 0 && !a.LastWakeOK) {
+		return "unconfirmed"
+	}
+	if a.LastWakeAt <= 0 {
+		if a.LastWakeState == "running" {
+			return "running"
+		}
+		return "none"
+	}
+	if a.LastWakeOK && p != nil && p.LastSeen >= a.LastWakeAt {
+		return "recovered"
+	}
+	if now-a.LastWakeAt < 120 {
+		return "pending"
+	}
+	return "running"
 }
 
 func (s *Server) museReady(w http.ResponseWriter) bool {
@@ -79,8 +115,8 @@ func (s *Server) auditMuseResult(action string, r *muse.Result) {
 	if r == nil {
 		return
 	}
-	detail := fmt.Sprintf("account=%s peer=%s ok=%v auth=%s vm=%s wake_requested=%v wake_ok=%v error=%s",
-		r.ID, r.PeerID, r.OK, r.AuthState, r.VMState, r.WakeRequested, r.WakeOK, r.Error)
+	detail := fmt.Sprintf("account=%s peer=%s ok=%v auth=%s vm=%s wake_requested=%v wake_ok=%v wake_state=%s error=%s wake_error=%s",
+		r.ID, r.PeerID, r.OK, r.AuthState, r.VMState, r.WakeRequested, r.WakeOK, r.WakeState, r.Error, r.WakeError)
 	_ = s.st.AppendAudit("admin", action, truncateRunes(detail, 500), time.Now().Unix())
 }
 
@@ -109,22 +145,34 @@ func (s *Server) handleAdminMuseList(w http.ResponseWriter, r *http.Request) {
 	for _, p := range views {
 		byPeer[p.ID] = p
 	}
-	facets := map[string]int{"total": len(accounts)}
+	// Keep the two mutually exclusive health facets present even when zero;
+	// the console and API callers read them unconditionally.
+	facets := map[string]int{"total": len(accounts), "ok": 0, "wake_unconfirmed": 0}
 	out := make([]*adminMuseAccount, 0, len(accounts))
 	for _, a := range accounts {
 		row := &adminMuseAccount{Account: a}
+		var peer *presence.PeerView
 		if p := byPeer[a.PeerID]; p != nil {
+			peer = p
 			row.PeerOnline = p.Online
 			row.PeerLastSeen = p.LastSeen
 			row.PeerStatus = p.Status
-			row.WakeRecovered = a.LastWakeAt > 0 && p.LastSeen >= a.LastWakeAt
 		}
-		row.WakePending = a.LastWakeAt > 0 && !row.WakeRecovered && now-a.LastWakeAt < 120
+		row.WakeState = museWakeState(a, peer, now)
+		row.WakeRecovered = row.WakeState == "recovered"
+		row.WakePending = row.WakeState == "pending"
+		row.WakeUnconfirmed = row.WakeState == "unconfirmed"
+		if museSessionOK(a) {
+			if row.WakeUnconfirmed {
+				facets["wake_unconfirmed"]++
+			} else {
+				facets["ok"]++
+			}
+		}
 		switch a.AuthState {
-		case "ok":
-			facets["ok"]++
 		case "needs_reauth":
 			facets["needs_reauth"]++
+		case "ok":
 		default:
 			facets["unverified"]++
 		}

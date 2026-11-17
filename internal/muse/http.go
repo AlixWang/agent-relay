@@ -35,8 +35,15 @@ type renewResult struct {
 	CookiesExpJSON string
 	WakeRequested  bool
 	WakeOK         bool
-	Error          string
-	At             int64
+	// Error is the session/auth/HTTP error for this attempt. Wake failures are
+	// kept in WakeError so they never mark an otherwise healthy account as
+	// broken.
+	Error     string
+	WakeError string
+	// WakeState is "unconfirmed" when a wake was attempted but RUNNING could
+	// not be verified, and "running" once it was. Empty means no wake attempt.
+	WakeState string
+	At        int64
 }
 
 // renew calls /api/session, optionally wakes the VM and verifies it. The
@@ -71,17 +78,21 @@ func (s *Service) renew(ctx context.Context, cookies map[string]string, exp map[
 	if wake {
 		switch {
 		case sess.VMID == "":
-			res.Error = "muse session has no vm_id; wake skipped"
+			res.WakeError = "muse session has no vm_id; wake skipped"
+			res.WakeState = "unconfirmed"
 		case sess.VMState == "DISABLED":
-			res.Error = "muse VM is DISABLED; wake skipped"
+			res.WakeError = "muse VM is DISABLED; wake skipped"
+			res.WakeState = "unconfirmed"
 		default:
 			if err := s.postWake(ctx, res.Cookies, sess.VMID); err != nil {
-				res.Error = err.Error()
+				res.WakeError = err.Error()
+				res.WakeState = "unconfirmed"
 			} else {
 				res.WakeRequested = true
 				verify, verifyCookies, verr := s.getSession(ctx, res.Cookies)
 				if verr != nil {
-					res.Error = "wake verification failed: " + verr.Error()
+					res.WakeError = "wake verification failed: " + verr.Error()
+					res.WakeState = "unconfirmed"
 				} else {
 					mergeSetCookies(res.Cookies, res.Exp, verifyCookies, now)
 					res.SessionStatus = verify.Status
@@ -89,8 +100,10 @@ func (s *Service) renew(ctx context.Context, cookies map[string]string, exp map[
 					res.VMState = verify.VMState
 					if verify.Status == "assigned" && verify.VMState == "RUNNING" {
 						res.WakeOK = true
+						res.WakeState = "running"
 					} else {
-						res.Error = fmt.Sprintf("wake not confirmed (vm_state=%s)", verify.VMState)
+						res.WakeError = fmt.Sprintf("wake not confirmed (vm_state=%s)", verify.VMState)
+						res.WakeState = "unconfirmed"
 					}
 				}
 			}
