@@ -18,8 +18,11 @@ type MuseAccount struct {
 	SessionStatus string
 	VMID          string
 	VMState       string
-	AuthState     string // unverified | ok | needs_reauth
-	LastError     string
+	// VMStateAt is when VMState was last confirmed by a successful
+	// /api/session response. Zero means the value predates this field.
+	VMStateAt int64
+	AuthState string // unverified | ok | needs_reauth
+	LastError string
 
 	LastKeepaliveAt int64
 	LastAttemptAt   int64
@@ -41,7 +44,7 @@ type rowScanner interface {
 }
 
 const museAccountColumns = `id,peer_id,COALESCE(label,''),COALESCE(cookies_enc,''),COALESCE(cookies_exp,'{}'),
-	COALESCE(session_status,''),COALESCE(vm_id,''),COALESCE(vm_state,''),
+	COALESCE(session_status,''),COALESCE(vm_id,''),COALESCE(vm_state,''),COALESCE(vm_state_at,0),
 	COALESCE(auth_state,'unverified'),COALESCE(last_error,''),
 	COALESCE(last_keepalive_at,0),COALESCE(last_attempt_at,0),COALESCE(last_attempt_ok,0),
 	COALESCE(last_wake_at,0),COALESCE(last_wake_ok,0),
@@ -52,7 +55,7 @@ func scanMuseAccount(sc rowScanner) (*MuseAccount, error) {
 	var a MuseAccount
 	var attemptOK, wakeOK, autoWake, enabled int
 	err := sc.Scan(&a.ID, &a.PeerID, &a.Label, &a.CookiesEnc, &a.CookiesExp,
-		&a.SessionStatus, &a.VMID, &a.VMState, &a.AuthState, &a.LastError,
+		&a.SessionStatus, &a.VMID, &a.VMState, &a.VMStateAt, &a.AuthState, &a.LastError,
 		&a.LastKeepaliveAt, &a.LastAttemptAt, &attemptOK,
 		&a.LastWakeAt, &wakeOK, &a.LastWakeError, &a.LastWakeState,
 		&autoWake, &enabled, &a.AuthorizedAt, &a.UpdatedAt)
@@ -68,12 +71,12 @@ func scanMuseAccount(sc rowScanner) (*MuseAccount, error) {
 
 func (s *sqliteStore) CreateMuseAccount(a *MuseAccount) error {
 	_, err := s.db.Exec(`INSERT INTO muse_accounts(
-		id,peer_id,label,cookies_enc,cookies_exp,session_status,vm_id,vm_state,
+		id,peer_id,label,cookies_enc,cookies_exp,session_status,vm_id,vm_state,vm_state_at,
 		auth_state,last_error,last_keepalive_at,last_attempt_at,last_attempt_ok,
 		last_wake_at,last_wake_ok,last_wake_error,last_wake_state,
 		auto_wake,enabled,authorized_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.PeerID, a.Label, a.CookiesEnc, a.CookiesExp, a.SessionStatus, a.VMID, a.VMState,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.PeerID, a.Label, a.CookiesEnc, a.CookiesExp, a.SessionStatus, a.VMID, a.VMState, a.VMStateAt,
 		a.AuthState, a.LastError, a.LastKeepaliveAt, a.LastAttemptAt, boolToInt(a.LastAttemptOK),
 		a.LastWakeAt, boolToInt(a.LastWakeOK), a.LastWakeError, a.LastWakeState,
 		boolToInt(a.AutoWake), boolToInt(a.Enabled), a.AuthorizedAt, a.UpdatedAt)
@@ -124,12 +127,12 @@ func (s *sqliteStore) ListMuseAccounts() ([]*MuseAccount, error) {
 // settings change.
 func (s *sqliteStore) SaveMuseAccount(a *MuseAccount) error {
 	res, err := s.db.Exec(`UPDATE muse_accounts SET
-		peer_id=?,label=?,cookies_enc=?,cookies_exp=?,session_status=?,vm_id=?,vm_state=?,
+		peer_id=?,label=?,cookies_enc=?,cookies_exp=?,session_status=?,vm_id=?,vm_state=?,vm_state_at=?,
 		auth_state=?,last_error=?,last_keepalive_at=?,last_attempt_at=?,last_attempt_ok=?,
 		last_wake_at=?,last_wake_ok=?,last_wake_error=?,last_wake_state=?,
 		auto_wake=?,enabled=?,authorized_at=?,updated_at=?
 		WHERE id=?`,
-		a.PeerID, a.Label, a.CookiesEnc, a.CookiesExp, a.SessionStatus, a.VMID, a.VMState,
+		a.PeerID, a.Label, a.CookiesEnc, a.CookiesExp, a.SessionStatus, a.VMID, a.VMState, a.VMStateAt,
 		a.AuthState, a.LastError, a.LastKeepaliveAt, a.LastAttemptAt, boolToInt(a.LastAttemptOK),
 		a.LastWakeAt, boolToInt(a.LastWakeOK), a.LastWakeError, a.LastWakeState,
 		boolToInt(a.AutoWake), boolToInt(a.Enabled), a.AuthorizedAt, a.UpdatedAt, a.ID)

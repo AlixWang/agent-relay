@@ -102,9 +102,24 @@ export function museExpiryTone(expiresAt, now = Math.floor(Date.now() / 1000)) {
 
 export function museVMTone(vm) {
   if (vm === 'RUNNING') return 'ok';
-  if (vm === 'DISABLED') return 'muted';
-  if (!vm) return 'muted';
+  if (vm === 'DISABLED' || !vm || vm === 'UNKNOWN') return 'muted';
   return 'warn';
+}
+
+// An empty/UNKNOWN vm_state is not a confirmed sandbox state: say so in words
+// instead of showing a bare "UNKNOWN" or an em dash. The tooltip keeps the raw
+// value and the confirmation time so a stale label is auditable.
+export function museVMText(a) {
+  const vm = a && a.vm_state;
+  return !vm || vm === 'UNKNOWN' ? '未知（休眠/未分配）' : vm;
+}
+
+export function museVMTitle(a) {
+  const raw = (a && a.vm_state) || '(空)';
+  const at = a && a.vm_state_at
+    ? `确认于 ${fmtTime(a.vm_state_at)}（${ago(a.vm_state_at)}）`
+    : '尚无确认时间';
+  return `原始值: ${raw} · ${at}`;
 }
 
 const toneClass = (tone) => (tone && tone !== 'muted' ? ' ' + tone : '');
@@ -122,10 +137,7 @@ const authBadge = (a) => {
   return `<span class="badge${toneClass(museAuthTone(a))}" title="${esc(tip)}">${esc(museAuthLabel(a))}</span>`;
 };
 
-const vmBadge = (a) => {
-  const vm = a.vm_state || '—';
-  return `<span class="badge${toneClass(museVMTone(a.vm_state))}">${esc(vm)}</span>`;
-};
+const vmBadge = (a) => `<span class="badge${toneClass(museVMTone(a.vm_state))}" title="${esc(museVMTitle(a))}">${esc(museVMText(a))}</span>`;
 
 const wakeCell = (a) => {
   const unconfirmed = museWakeUnconfirmed(a);

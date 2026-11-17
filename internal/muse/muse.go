@@ -59,6 +59,7 @@ type Account struct {
 	SessionStatus string `json:"session_status"`
 	VMID          string `json:"vm_id,omitempty"`
 	VMState       string `json:"vm_state,omitempty"`
+	VMStateAt     int64  `json:"vm_state_at"`
 
 	ExpiresAt   int64            `json:"expires_at"`
 	CookiesExp  map[string]int64 `json:"cookies_exp"`
@@ -94,6 +95,7 @@ type Result struct {
 	SessionStatus string `json:"session_status"`
 	VMID          string `json:"vm_id,omitempty"`
 	VMState       string `json:"vm_state,omitempty"`
+	VMStateAt     int64  `json:"vm_state_at"`
 	WakeRequested bool   `json:"wake_requested"`
 	WakeOK        bool   `json:"wake_ok"`
 	ExpiresAt     int64  `json:"expires_at"`
@@ -145,6 +147,10 @@ type Service struct {
 	nextRun    int64
 	lastResult *Summary
 	waking     map[string]bool
+	// backoff is keyed by account ID and holds the 429 Retry-After deadline.
+	// It is deliberately in-memory: a restart may retry once early, but no
+	// schema migration is needed for a transient rate-limit signal.
+	backoff map[string]int64
 }
 
 // New validates the endpoint/proxy, loads the cookie key and builds the HTTP
@@ -207,7 +213,8 @@ func New(st store.Store, opt Options) (*Service, error) {
 				return http.ErrUseLastResponse
 			},
 		},
-		waking: map[string]bool{},
+		waking:  map[string]bool{},
+		backoff: map[string]int64{},
 	}
 	if created {
 		if accounts, err := st.ListMuseAccounts(); err == nil && len(accounts) > 0 {
@@ -270,7 +277,7 @@ func (s *Service) Authorize(ctx context.Context, peerID, label, cookieInput stri
 	if a.AuthState == "" {
 		a.AuthState = "unverified"
 	}
-	if a.LastError == "" && rerr != nil {
+	if !res.Transient && a.LastError == "" && rerr != nil {
 		a.LastError = truncate(rerr.Error(), 500)
 	}
 	if err := s.st.CreateMuseAccount(a); err != nil {
@@ -279,6 +286,7 @@ func (s *Service) Authorize(ctx context.Context, peerID, label, cookieInput stri
 		}
 		return nil, err
 	}
+	s.recordRetry(a.ID, res)
 	return s.toAccount(a), nil
 }
 
@@ -314,13 +322,16 @@ func (s *Service) Reauthorize(ctx context.Context, id, cookieInput string) (*Acc
 	if a.AuthState == "" {
 		a.AuthState = "unverified"
 	}
-	if a.LastError == "" && rerr != nil {
+	if !res.Transient && a.LastError == "" && rerr != nil {
 		a.LastError = truncate(rerr.Error(), 500)
 	}
-	a.AuthorizedAt = now
+	if res.OK {
+		a.AuthorizedAt = now
+	}
 	if err := s.st.SaveMuseAccount(a); err != nil {
 		return nil, err
 	}
+	s.recordRetry(a.ID, res)
 	return s.toAccount(a), nil
 }
 
@@ -444,12 +455,13 @@ func (s *Service) Keepalive(ctx context.Context, id string) (*Result, error) {
 		return nil, rerr
 	}
 	applyRenew(a, res, now, false)
-	if a.LastError == "" && rerr != nil {
+	if !res.Transient && a.LastError == "" && rerr != nil {
 		a.LastError = truncate(rerr.Error(), 500)
 	}
 	if err := s.st.SaveMuseAccount(a); err != nil {
 		return nil, err
 	}
+	s.recordRetry(a.ID, res)
 	return toResult(a, res), nil
 }
 
@@ -488,12 +500,13 @@ func (s *Service) Wake(ctx context.Context, id string) (*Result, error) {
 		return nil, rerr
 	}
 	applyRenew(a, res, now, true)
-	if a.LastError == "" && rerr != nil {
+	if !res.Transient && a.LastError == "" && rerr != nil {
 		a.LastError = truncate(rerr.Error(), 500)
 	}
 	if err := s.st.SaveMuseAccount(a); err != nil {
 		return nil, err
 	}
+	s.recordRetry(a.ID, res)
 	return toResult(a, res), nil
 }
 
@@ -525,23 +538,35 @@ func (s *Service) KeepaliveAll(ctx context.Context, force bool) (*Summary, error
 		if ctx.Err() != nil {
 			break
 		}
-		if !a.Enabled {
+		skip := func(reason string) {
 			sum.Skipped++
 			sum.SkippedAccounts = append(sum.SkippedAccounts, a.PeerID)
+			s.logVerdict(a, resultFromAccount(a), reason)
+		}
+		if !a.Enabled {
+			skip("disabled")
+			continue
+		}
+		// A 429 Retry-After window is authoritative even for a manual
+		// "全部保活": retrying by hand does not make the upstream forget the
+		// rate limit. It is checked before the needs_reauth gate.
+		if until := s.retryAt(a.ID); until > 0 {
+			skip(fmt.Sprintf("backoff_until=%d", until))
 			continue
 		}
 		if !force && a.AuthState == "needs_reauth" {
-			sum.Skipped++
-			sum.SkippedAccounts = append(sum.SkippedAccounts, a.PeerID)
+			skip("needs_reauth")
 			continue
 		}
 		res, kerr := s.Keepalive(ctx, a.ID)
 		if kerr != nil {
 			sum.Failed++
-			sum.Results = append(sum.Results, &Result{
+			failed := &Result{
 				ID: a.ID, PeerID: a.PeerID, Label: a.Label, OK: false,
 				AuthState: a.AuthState, Error: kerr.Error(), At: s.now().Unix(),
-			})
+			}
+			sum.Results = append(sum.Results, failed)
+			s.logVerdict(a, failed, "")
 		} else {
 			sum.Results = append(sum.Results, res)
 			if res.OK {
@@ -555,6 +580,7 @@ func (s *Service) KeepaliveAll(ctx context.Context, force bool) (*Summary, error
 			if res.WakeOK {
 				sum.WakeOK++
 			}
+			s.logVerdict(a, res, "")
 		}
 		select {
 		case <-ctx.Done():
@@ -571,6 +597,88 @@ func (s *Service) KeepaliveAll(ctx context.Context, force bool) (*Summary, error
 	}
 	s.mu.Unlock()
 	return sum, nil
+}
+
+func resultFromAccount(a *store.MuseAccount) *Result {
+	if a == nil {
+		return &Result{}
+	}
+	return &Result{
+		ID: a.ID, PeerID: a.PeerID, Label: a.Label,
+		OK: a.LastAttemptOK, AuthState: a.AuthState,
+		SessionStatus: a.SessionStatus, VMID: a.VMID, VMState: a.VMState,
+		VMStateAt: a.VMStateAt, WakeOK: a.LastWakeOK,
+		Error: a.LastError, WakeError: a.LastWakeError, WakeState: a.LastWakeState,
+		At: a.LastAttemptAt,
+	}
+}
+
+// logVerdict emits one line per account per round, including skipped
+// accounts. It is the operator-facing way to see which node failed and why.
+// Cookie values and ciphertext are never included; errors are bounded.
+func (s *Service) logVerdict(a *store.MuseAccount, r *Result, skipped string) {
+	if r == nil {
+		r = &Result{}
+	}
+	peerID, accountID := r.PeerID, r.ID
+	if a != nil {
+		if peerID == "" {
+			peerID = a.PeerID
+		}
+		if accountID == "" {
+			accountID = a.ID
+		}
+	}
+	vm, vmAt := r.VMState, r.VMStateAt
+	if a != nil {
+		// A transient failure has no new VM observation; report the last
+		// confirmed value rather than "UNKNOWN", which would look like a
+		// state change the upstream never reported.
+		if vm == "" {
+			vm, vmAt = a.VMState, a.VMStateAt
+		}
+	}
+	if vm == "" {
+		vm = "UNKNOWN"
+	}
+	detail := fmt.Sprintf("peer_id=%s account=%s ok=%v auth=%s vm_state=%s vm_state_at=%d wake_requested=%v wake_ok=%v wake_state=%s error=%s wake_error=%s",
+		peerID, accountID, r.OK, r.AuthState, vm, vmAt,
+		r.WakeRequested, r.WakeOK, r.WakeState,
+		truncate(r.Error, 160), truncate(r.WakeError, 160))
+	if skipped != "" {
+		detail += " skipped=" + skipped
+	}
+	log.Printf("muse: keepalive %s", detail)
+}
+
+func (s *Service) retryAt(accountID string) int64 {
+	if accountID == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until := s.backoff[accountID]
+	if until == 0 {
+		return 0
+	}
+	if until <= s.now().Unix() {
+		delete(s.backoff, accountID)
+		return 0
+	}
+	return until
+}
+
+func (s *Service) recordRetry(accountID string, res *renewResult) {
+	if accountID == "" || res == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if res.RetryAt > 0 {
+		s.backoff[accountID] = res.RetryAt
+	} else if res.OK {
+		delete(s.backoff, accountID)
+	}
 }
 
 // MaybeWakeOffline is the presence hook. It returns immediately; the actual
@@ -715,7 +823,7 @@ func (s *Service) toAccount(a *store.MuseAccount) *Account {
 	v := &Account{
 		ID: a.ID, PeerID: a.PeerID, Label: a.Label,
 		AuthState: a.AuthState, SessionStatus: a.SessionStatus,
-		VMID: a.VMID, VMState: a.VMState,
+		VMID: a.VMID, VMState: a.VMState, VMStateAt: a.VMStateAt,
 		LastKeepaliveAt: a.LastKeepaliveAt, LastAttemptAt: a.LastAttemptAt,
 		LastAttemptOK: a.LastAttemptOK, LastError: a.LastError,
 		LastWakeAt: a.LastWakeAt, LastWakeOK: a.LastWakeOK,
@@ -746,21 +854,40 @@ func applyRenew(a *store.MuseAccount, res *renewResult, now int64, recordWake bo
 	if res.CookiesExpJSON != "" {
 		a.CookiesExp = res.CookiesExpJSON
 	}
-	if res.SessionStatus != "" {
+
+	// A transient upstream failure (403/429/5xx, timeout, bad JSON) says
+	// nothing about the account: keep the last confirmed auth/VM state and
+	// the healthy row label. The error still travels in Result.Error and the
+	// keepalive verdict log. A 200 non-assigned response is not transient: it
+	// is a confirmed session failure, but never a reason to demand re-auth.
+	transient := res.Transient && a.AuthState == "ok"
+	if res.OK {
+		// A successful session is authoritative, including an empty
+		// vm_state (normalized to UNKNOWN by renew). Overwriting prevents a
+		// stale value from surviving a sandbox transition.
 		a.SessionStatus = res.SessionStatus
-	}
-	if res.VMID != "" {
 		a.VMID = res.VMID
-	}
-	if res.VMState != "" {
-		a.VMState = res.VMState
+		a.VMState = normalizeVMState(res.VMState)
+		a.VMStateAt = res.VMStateAt
+	} else if !transient {
+		if res.SessionStatus != "" {
+			a.SessionStatus = res.SessionStatus
+		}
+		if res.VMID != "" {
+			a.VMID = res.VMID
+		}
+		if res.VMState != "" {
+			a.VMState = res.VMState
+		}
 	}
 	if res.AuthState != "" {
 		a.AuthState = res.AuthState
 	}
-	a.LastError = truncate(res.Error, 500)
+	if !transient {
+		a.LastError = truncate(res.Error, 500)
+		a.LastAttemptOK = res.OK
+	}
 	a.LastAttemptAt = res.At
-	a.LastAttemptOK = res.OK
 	if res.OK {
 		a.LastKeepaliveAt = res.At
 	}
@@ -792,10 +919,17 @@ func toResult(a *store.MuseAccount, res *renewResult) *Result {
 	if auth == "" {
 		auth = a.AuthState
 	}
+	vm, vmAt := res.VMState, res.VMStateAt
+	if vm == "" {
+		// Keep the last confirmed state in the response to a transient
+		// failure; the row itself keeps it too (P2-2).
+		vm, vmAt = a.VMState, a.VMStateAt
+	}
 	return &Result{
 		ID: a.ID, PeerID: a.PeerID, Label: a.Label,
 		OK: res.OK, AuthState: auth,
-		SessionStatus: res.SessionStatus, VMID: res.VMID, VMState: res.VMState,
+		SessionStatus: res.SessionStatus, VMID: res.VMID, VMState: vm,
+		VMStateAt:     vmAt,
 		WakeRequested: res.WakeRequested, WakeOK: res.WakeOK,
 		ExpiresAt: minEssentialExpiry(res.Exp), Error: res.Error,
 		WakeError: res.WakeError, WakeState: res.WakeState, At: res.At,

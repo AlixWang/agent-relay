@@ -127,6 +127,9 @@ func TestMuseAuthorizeListPeersAndStats(t *testing.T) {
 	if acct["auth_state"] != "ok" || acct["vm_state"] != "RUNNING" || acct["essential_ok"] != true {
 		t.Fatalf("account: %+v", acct)
 	}
+	if at, ok := acct["vm_state_at"].(float64); !ok || at <= 0 {
+		t.Fatalf("account vm_state_at: %+v", acct)
+	}
 	if _, has := out["warning"]; has {
 		t.Fatalf("unexpected warning: %+v", out)
 	}
@@ -156,7 +159,8 @@ func TestMuseAuthorizeListPeersAndStats(t *testing.T) {
 		t.Fatalf("accounts: %+v", out)
 	}
 	row := rows[0].(map[string]any)
-	if row["auth_state"] != "ok" || row["vm_state"] != "RUNNING" || row["peer_online"] != false {
+	if row["auth_state"] != "ok" || row["vm_state"] != "RUNNING" || row["peer_online"] != false ||
+		row["vm_state_at"] == float64(0) {
 		t.Fatalf("embedded account fields: %+v", row)
 	}
 	facets := out["facets"].(map[string]any)
@@ -174,7 +178,8 @@ func TestMuseAuthorizeListPeersAndStats(t *testing.T) {
 		p := x.(map[string]any)
 		if p["id"] == "alice" {
 			m, ok := p["muse"].(map[string]any)
-			if !ok || m["account_id"] == nil || m["auth_state"] != "ok" {
+			if !ok || m["account_id"] == nil || m["auth_state"] != "ok" ||
+				m["vm_state_at"] == float64(0) {
 				t.Fatalf("admin peer muse summary: %+v", p)
 			}
 		}
