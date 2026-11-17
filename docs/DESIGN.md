@@ -214,11 +214,28 @@ needs two things the relay cannot infer: a valid Muse session cookie and the
   returns `vm_id`/`vm_state`; `POST {base}/api/hatch/vm/wake` asks Muse to boot
   the VM. A wake HTTP 200 is only an acknowledgement — a second `/api/session`
   must report `vm_state == RUNNING`.
-- **Background keepalive:** every `muse_keepalive_secs` (default 900) each enabled
-  account is renewed and woken. On an online→offline presence transition,
-  `presence.OnOffline` asks `muse.Service` to wake that peer's account (subject to
-  the per-account `auto_wake`, `enabled`, `needs_reauth`, `DISABLED` and cooldown
-  guards). The hook returns immediately; the wake runs in its own goroutine.
+- **Background keepalive:** the loop still ticks every `muse_keepalive_secs`
+  (default 900s = 15 minutes); each tick visits every enabled account, but
+  renews only when due. It skips an account
+  only when **all three** hold: the last successful renewal is less than 6h old,
+  both essential cookies expire more than 36h from now, and the account is
+  currently healthy (`auth_state=ok`, `last_attempt_ok`, empty `last_error`).
+  Any doubt (never renewed, older snapshot, unknown/shorter expiry, failed
+  session) renews. Because cookies live only 48h, the 36h horizon guarantees a
+  refresh well before expiry; the 6h floor bounds needless cookie rotation. A
+  manual sweep (`POST /admin/muse/keepalive`, `KeepaliveAll(force=true)`) and a
+  single manual keepalive (console “立即保活”) bypass the gate; an upstream 429
+  `Retry-After` window still wins even for manual runs. Each keepalive that runs
+  still wakes the VM (option B: keep waking rather than renew-only) and records
+  every attempt in `last_wake_at`/`last_wake_ok`/`last_wake_state`/
+  `last_wake_error`, so a failed wake can never leave an old successful value
+  looking current. The offline-wake cooldown does **not** read those background
+  timestamps: it uses a separate explicit/manual/offline wake clock, so a recent
+  keepalive can never suppress `presence.OnOffline` recovery.
+  On an online→offline presence transition, `presence.OnOffline` asks
+  `muse.Service` to wake that peer's account (subject to the per-account
+  `auto_wake`, `enabled`, `needs_reauth`, `DISABLED` and cooldown guards). The
+  hook returns immediately; the wake runs in its own goroutine.
 - **Failure semantics:** 401 marks `needs_reauth` and preserves the old cookie;
   403/429/5xx/timeouts/non-JSON are transient and preserve the last confirmed
   state; a wake that is not confirmed RUNNING is reported as `wake_ok=false` and

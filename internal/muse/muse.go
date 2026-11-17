@@ -36,6 +36,17 @@ var (
 	ErrBusy              = errors.New("muse keepalive already running")
 )
 
+const (
+	// keepaliveMinAge is the upstream-aligned floor between background session
+	// renewals once an account is healthy and its cookies are not close to
+	// expiry. A manual sweep bypasses it.
+	keepaliveMinAge = int64(6 * time.Hour / time.Second)
+	// keepaliveCookieHorizon forces a renewal before the 48h cookie lifetime
+	// gets within 36h, i.e. at most 12h after the previous renewal. An unknown
+	// or shorter expiry always renews.
+	keepaliveCookieHorizon = int64(36 * time.Hour / time.Second)
+)
+
 // Options configures the optional Muse integration. Zero durations select the
 // documented defaults; an empty BaseURL means https://muse.ai.
 type Options struct {
@@ -70,8 +81,12 @@ type Account struct {
 	LastAttemptAt   int64  `json:"last_attempt_at"`
 	LastAttemptOK   bool   `json:"last_attempt_ok"`
 	LastError       string `json:"last_error,omitempty"`
-	LastWakeAt      int64  `json:"last_wake_at"`
-	LastWakeOK      bool   `json:"last_wake_ok"`
+	// LastWakeAt/LastWakeOK describe the latest attempt that reached the wake
+	// step. Background keepalives record them too (option B: keep waking to
+	// stay warm, but never leave a stale wake verdict). They are display
+	// fields only: the offline-wake cooldown uses an explicit-wake clock.
+	LastWakeAt int64 `json:"last_wake_at"`
+	LastWakeOK bool  `json:"last_wake_ok"`
 	// LastWakeError/LastWakeState describe only the wake step. They must not
 	// leak into LastError, which stays session/auth-scoped.
 	LastWakeError string `json:"last_wake_error,omitempty"`
@@ -151,6 +166,13 @@ type Service struct {
 	// It is deliberately in-memory: a restart may retry once early, but no
 	// schema migration is needed for a transient rate-limit signal.
 	backoff map[string]int64
+	// wakeEvents is the per-account time of the last explicit/manual or
+	// offline-triggered wake, keyed by account ID. Background keepalives
+	// refresh LastWakeAt for display, but must never feed this clock: a
+	// 15-minute keepalive would otherwise keep the presence hook inside its
+	// cooldown and block offline recovery. In-memory on purpose; a restart can
+	// at worst allow one extra wake.
+	wakeEvents map[string]int64
 }
 
 // New validates the endpoint/proxy, loads the cookie key and builds the HTTP
@@ -213,8 +235,9 @@ func New(st store.Store, opt Options) (*Service, error) {
 				return http.ErrUseLastResponse
 			},
 		},
-		waking:  map[string]bool{},
-		backoff: map[string]int64{},
+		waking:     map[string]bool{},
+		backoff:    map[string]int64{},
+		wakeEvents: map[string]int64{},
 	}
 	if created {
 		if accounts, err := st.ListMuseAccounts(); err == nil && len(accounts) > 0 {
@@ -423,9 +446,11 @@ func (s *Service) List() ([]*Account, error) {
 	return out, nil
 }
 
-// Keepalive renews one account and records the outcome. Muse-level failures
-// are returned in Result (the admin API stays HTTP 200); only store/decrypt
-// plumbing errors are returned as Go errors.
+// Keepalive renews one account, wakes the VM and records the outcome (option
+// B: a keepalive still requests a wake rather than only renewing the session,
+// and every attempt refreshes last_wake_* so the console never shows a stale
+// success). Muse-level failures are returned in Result (the admin API stays
+// HTTP 200); only store/decrypt plumbing errors are returned as Go errors.
 func (s *Service) Keepalive(ctx context.Context, id string) (*Result, error) {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
@@ -454,7 +479,7 @@ func (s *Service) Keepalive(ctx context.Context, id string) (*Result, error) {
 	if res == nil {
 		return nil, rerr
 	}
-	applyRenew(a, res, now, false)
+	applyRenew(a, res, now, true)
 	if !res.Transient && a.LastError == "" && rerr != nil {
 		a.LastError = truncate(rerr.Error(), 500)
 	}
@@ -477,6 +502,10 @@ func (s *Service) Wake(ctx context.Context, id string) (*Result, error) {
 		return nil, ErrNotFound
 	}
 	now := s.now().Unix()
+	// Only an explicit/manual or offline-triggered wake starts the offline
+	// cooldown. Keepalive records last_wake_* for display but must not make
+	// MaybeWakeOffline believe a recovery wake just happened.
+	s.noteWakeEvent(a.ID, now)
 	cookies, exp, oerr := s.openAccount(a)
 	if oerr != nil {
 		a.AuthState = "needs_reauth"
@@ -510,9 +539,10 @@ func (s *Service) Wake(ctx context.Context, id string) (*Result, error) {
 	return toResult(a, res), nil
 }
 
-// KeepaliveAll runs the background sweep. force=true also retries accounts
-// marked needs_reauth (manual "全部保活"); the background loop leaves them
-// alone until the operator re-authorizes.
+// KeepaliveAll runs the background sweep. force=true is the manual
+// "全部保活": it bypasses the per-account 6h/36h cadence gate and also retries
+// accounts marked needs_reauth; the background loop leaves those alone until
+// the operator re-authorizes.
 func (s *Service) KeepaliveAll(ctx context.Context, force bool) (*Summary, error) {
 	if !s.runMu.TryLock() {
 		return nil, ErrBusy
@@ -558,6 +588,14 @@ func (s *Service) KeepaliveAll(ctx context.Context, force bool) (*Summary, error
 			skip("needs_reauth")
 			continue
 		}
+		if !force {
+			now := s.now().Unix()
+			if keepaliveGateSkip(a, now) {
+				exp := minEssentialExpiry(parseCookiesExp(a.CookiesExp))
+				skip(fmt.Sprintf("keepalive_gate age=%ds expires_in=%ds", now-a.LastKeepaliveAt, exp-now))
+				continue
+			}
+		}
 		res, kerr := s.Keepalive(ctx, a.ID)
 		if kerr != nil {
 			sum.Failed++
@@ -597,6 +635,26 @@ func (s *Service) KeepaliveAll(ctx context.Context, force bool) (*Summary, error
 	}
 	s.mu.Unlock()
 	return sum, nil
+}
+
+// keepaliveGateSkip implements the upstream 6h/36h cadence. The sweep may skip
+// an account only when all three signals agree: it was renewed less than 6h
+// ago, its essential cookies expire more than 36h from now, and it is
+// currently healthy. Cookies live only 48h, so any doubt (unknown/shorter
+// expiry, older renewal, failed session) must renew. A manual sweep passes
+// force and bypasses this gate entirely.
+func keepaliveGateSkip(a *store.MuseAccount, now int64) bool {
+	if a == nil || a.LastKeepaliveAt <= 0 {
+		return false
+	}
+	if now-a.LastKeepaliveAt >= keepaliveMinAge {
+		return false
+	}
+	exp := minEssentialExpiry(parseCookiesExp(a.CookiesExp))
+	if exp <= 0 || exp-now <= keepaliveCookieHorizon {
+		return false
+	}
+	return a.AuthState == "ok" && a.LastAttemptOK && a.LastError == ""
 }
 
 func resultFromAccount(a *store.MuseAccount) *Result {
@@ -681,6 +739,28 @@ func (s *Service) recordRetry(accountID string, res *renewResult) {
 	}
 }
 
+// noteWakeEvent records an explicit/manual or offline-triggered wake for the
+// per-account cooldown. Background keepalives deliberately do not call this:
+// they refresh LastWakeAt for display, but the presence hook must still be
+// free to recover a VM that went offline between two keepalive rounds.
+func (s *Service) noteWakeEvent(accountID string, at int64) {
+	if accountID == "" {
+		return
+	}
+	s.mu.Lock()
+	s.wakeEvents[accountID] = at
+	s.mu.Unlock()
+}
+
+func (s *Service) wakeEventAt(accountID string) int64 {
+	if accountID == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.wakeEvents[accountID]
+}
+
 // MaybeWakeOffline is the presence hook. It returns immediately; the actual
 // wake runs in a goroutine so a 30s presence sweep is never blocked by Muse.
 func (s *Service) MaybeWakeOffline(peerID string, offlineSecs int64) {
@@ -703,7 +783,7 @@ func (s *Service) MaybeWakeOffline(peerID string, offlineSecs int64) {
 	if cooldown <= 0 {
 		cooldown = 300
 	}
-	if a.LastWakeAt > 0 && now-a.LastWakeAt < cooldown {
+	if last := s.wakeEventAt(a.ID); last > 0 && now-last < cooldown {
 		return
 	}
 	s.mu.Lock()
@@ -891,10 +971,10 @@ func applyRenew(a *store.MuseAccount, res *renewResult, now int64, recordWake bo
 	if res.OK {
 		a.LastKeepaliveAt = res.At
 	}
-	// A manual Wake is a recorded event even when the session check fails
-	// before the wake request: it must not leave an older successful wake
-	// looking current. Keepalives only touch wake diagnostics when they
-	// actually reach the wake step.
+	// A keepalive or manual wake records the attempt even when the session
+	// check fails before the wake request: it must not leave an older
+	// successful wake looking current (option B). Session-only paths
+	// (authorize/reauthorize without a wake request) are the exception.
 	if recordWake {
 		a.LastWakeAt = res.At
 		a.LastWakeOK = res.WakeOK

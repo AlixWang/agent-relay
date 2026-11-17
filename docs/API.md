@@ -168,11 +168,11 @@ GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last
 - `result.ok` = 本次 **session** 有效（session/auth/HTTP 成功），不包含唤醒结果；`result.error`
   也只放 session/auth/HTTP 错误。`result.wake_requested` = wake POST 返回 HTTP 200（请求被接受；
   非 200 不置位）；`result.wake_ok` = 第二次 `/api/session` 复核到 `vm_state == RUNNING`。唤醒失败单独放 `result.wake_error`，
-  `result.wake_state` 为 `unconfirmed`（未确认 RUNNING）或 `running`（已确认）；保活/授权探测未走到
-  唤醒步骤时省略，手动唤醒未走到该步时仍记为 `unconfirmed`。
+  `result.wake_state` 为 `unconfirmed`（未确认 RUNNING）或 `running`（已确认）；保活/手动唤醒
+  未走到唤醒步骤时仍记为 `unconfirmed`（保活从选项 B 起每次都记录结果），授权探测未走到唤醒步骤时省略。
   wake HTTP 200 不等于成功：`ok=true` + `wake_ok=false` 表示“会话正常、唤醒未确认”。
 - 账号持久化同样分域：`last_error` 只记录 session/auth 错误；`last_wake_error` /
-  `last_wake_state` 单独记录最近一次唤醒诊断；手动唤醒在 session 检查阶段失败也会记为
+  `last_wake_state` 单独记录最近一次唤醒诊断；保活/手动唤醒在 session 检查阶段失败也会记为
   `unconfirmed` + `wake skipped`，避免旧的唤醒成功看起来仍然有效。唤醒失败不会把账号标成异常。
   升级兼容：旧版本写在 `last_error` 的已知唤醒错误会在读取账号时移入 `last_wake_error`
   （文本不丢弃），并标记 `last_wake_state=unconfirmed`、`last_wake_ok=false`。
@@ -186,6 +186,11 @@ GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last
     不会写入 `last_error`。wake HTTP 200 仅表示请求被接受，只有复核到
     `status=assigned` 且 `vm_state=RUNNING` 才清空它；`last_wake_state=unconfirmed`
     表示请求已发出但未确认上线。
+  - `last_wake_at` / `last_wake_ok`：最近一次走到唤醒步骤的尝试（**后台保活也计入**，
+    因此不会再出现保活唤醒了但时间戳纹不动的陈旧值）。失败会同时写
+    `last_wake_state=unconfirmed` + `last_wake_error`，但不会污染 `last_error`。
+    离线唤醒的 300 秒冷却只看显式/手动/离线唤醒事件，不读这两个保活记录，避免保活
+    刷新后把 `presence.OnOffline` 的恢复唤醒挡在冷却期内。
   - `wake_recovered`：仅当 `wake_ok=true`、`last_wake_error` 为空、
     `wake_state != "unconfirmed"`，且 `peer_last_seen >= last_wake_at` 时为 `true`；
     它表示唤醒后确实收到了心跳，而不只是 API 复核成功。
