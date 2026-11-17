@@ -6,6 +6,9 @@ import { setRoute } from './router.js';
 export let serverPromptVersion = 0;
 export let serverClientVersion = '';
 export let serverReceiverRev = '';
+// Version parsed from the server's embedded watch-layer script (stats). Empty
+// means the build has no parsable WATCH_VERSION; badges then stay neutral.
+export let serverScriptVersion = '';
 
 export function showLogin(msg) {
   $('app').hidden = true;
@@ -100,6 +103,7 @@ export async function refreshStats() {
     if (s.prompt_version) serverPromptVersion = s.prompt_version;
     if (s.client_version) serverClientVersion = s.client_version;
     if (s.receiver_rev) serverReceiverRev = s.receiver_rev;
+    if (s.script_version) serverScriptVersion = s.script_version;
 
     showApp();
     return true;

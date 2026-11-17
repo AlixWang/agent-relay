@@ -38,6 +38,7 @@
 | `resource_submit_per_hour` | int | `10` | 单个 peer 每小时最多提交次数 |
 | `resource_pending_ttl_days` | int | `30` | pending 提交未处理自动过期天数（0=不过期；过期清除正文） |
 | `resource_notify_batch_secs` | int | `600` | 同一 peer 的待审核通知合并窗口秒数（0=不合并） |
+| `scripts_update_enabled` | bool | `true` | watch 脚本自更新下发总开关：peer 上报的 `script_version` 与服务端内嵌脚本不同时，heartbeat 带 `script_update`（§8.9b）。关闭后不再下发，但上报、存储和控制台展示照常——用作 kill-switch |
 | `stream_keepalive_secs` | int | `20` | SSE 保活间隔秒（0=用 20；上限 120，§4.4b） |
 | `stream_max_per_peer` | int | `3` | 单身份并发流上限，超限 `429`（0=用 3，§4.4b） |
 | `profile_refresh_days` | int | `7` | 简介超期天数：heartbeat 带 `profile_refresh=true` 提醒更新（0=不提醒，§8.7） |

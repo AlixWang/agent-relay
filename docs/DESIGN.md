@@ -1056,6 +1056,48 @@ templates (shell scripts are fallback for hosts that can't run binaries);
 hermes keeps cron as its default entry but may use resident/SSE/Go when
 deployed resident (docker/regular host — no sandbox reclamation).
 
+### 8.9b Watch-layer script versioning (`script_update`)
+
+Shell watch scripts used to have no version at all: `/logs` reports
+`client.version="watch-1"`, a constant producer tag, and shell clients never
+report `client_version`. The Muse watch script now carries a semantic
+`WATCH_VERSION` constant (and `SCRIPT_KIND="muse-watch"`). The server parses
+the same constant from the artifact it embeds and serves — there is no second
+Go-side version constant to drift — and compares exactly (`!=`, like
+`receiver_rev`). The two repo copies (`clients/muse/` and
+`internal/web/clients/`) must stay byte-identical; `TestScriptVersions`
+enforces that plus the parse/sha256 invariant.
+
+The script reports `{id, script_kind, script_version}` through the ordinary
+`POST /heartbeat` at startup/when its constant differs from
+`$BASE/.script_version`, and re-reports hourly as loss insurance. The file is
+written only after the server confirms the report; a report attempt is gated to
+once per version per hour so a broken link cannot turn the 5s tick into a
+request storm. The heartbeat merge ignores `prompt_version<=0` and an empty
+`script_version`, so the script's version-only beat cannot disturb the
+daemon's prompt/client reporting. Empty `script_version` means unknown (old
+script): never nudged.
+
+A non-empty report that differs from the server's parsed version gets a
+**`script_update` event**, never `client_update` (old prompts would read that
+as "replace the receiver binary"). Shape:
+`{script_update:true, script_kind:"muse-watch", script_version, script_sha256,
+download:"/clients/relay-watch.sh"}`. `scripts_update_enabled` (default true)
+is the operator kill-switch; it gates delivery only, reporting/display keep
+working.
+
+Unless `SCRIPT_AUTO_UPDATE=0`, the script applies the update itself: download
+to a temp file in the script's directory → verify `script_sha256` and the
+downloaded version constant → `bash -n` → `chmod +x` → keep `$SELF.rollback` →
+atomic `mv` over `$SELF`. Rename (not in-place overwrite) is required because
+a running bash keeps reading the old inode; the current tick finishes on the
+old code and the next 5s tick runs the new file, no restart. On any failure
+it does not apply, logs `script.update_failed`, and wakes the worker with a
+self-contained human reason/path so the worker can fix it without prompt
+§7.6b. That prompt section, and adding sha256 to `client_update`, are
+explicit follow-ups. MVP covers the Muse watch only; Hermes watch is a fast
+follow-up, and poll/tail/supervisor are display-only later (Phase 3).
+
 ### 8.10 Hermes resident wake layer (`clients/hermes/`)
 
 A resident Hermes (docker / regular host) can run the Go receiver, but the Muse

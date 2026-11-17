@@ -1,6 +1,9 @@
 package web
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -188,6 +191,47 @@ func TestWatchScriptEmbedded(t *testing.T) {
 	}
 	if s != string(raw) {
 		t.Fatal("internal/web/clients/relay-watch.sh diverged from clients/muse/relay-watch.sh")
+	}
+}
+
+// TestScriptVersions is the Phase 0 invariant: the Muse watch script carries
+// exactly one parseable version constant, the server reads that constant from
+// the same embedded bytes it serves, and the two repo copies are identical.
+func TestScriptVersions(t *testing.T) {
+	embedded := WatchScript()
+	repo, err := os.ReadFile("../../clients/muse/relay-watch.sh")
+	if err != nil {
+		t.Fatalf("repo copy: %v", err)
+	}
+	served, err := os.ReadFile("clients/relay-watch.sh")
+	if err != nil {
+		t.Fatalf("embedded copy: %v", err)
+	}
+	if !bytes.Equal(repo, served) || string(repo) != embedded {
+		t.Fatal("relay-watch.sh copies diverged (clients/muse, internal/web/clients, embed)")
+	}
+	if !strings.Contains(string(repo), "\nSCRIPT_KIND=\"muse-watch\"\n") {
+		t.Fatal("relay-watch.sh missing SCRIPT_KIND=muse-watch")
+	}
+	ver := WatchScriptVersion()
+	if ver == "" {
+		t.Fatal("WATCH_VERSION missing or malformed in embedded script")
+	}
+	if !strings.Contains(string(repo), "\nWATCH_VERSION=\""+ver+"\"\n") {
+		t.Fatalf("WatchScriptVersion()=%q does not match the script constant", ver)
+	}
+	if got, want := WatchScriptVersion(), watchVersionFrom(string(repo)); got != want {
+		t.Fatalf("version parsed from embed %q != repo copy %q", got, want)
+	}
+	if MuseWatchKind != "muse-watch" || MuseWatchPath != "/clients/relay-watch.sh" {
+		t.Fatalf("unexpected script identity constants: %q %q", MuseWatchKind, MuseWatchPath)
+	}
+	sum := sha256.Sum256([]byte(embedded))
+	if got, want := WatchScriptSHA256(), hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("sha256 %q != %q", got, want)
+	}
+	if len(WatchScriptSHA256()) != 64 {
+		t.Fatalf("sha256 must be 64 hex chars, got %d", len(WatchScriptSHA256()))
 	}
 }
 

@@ -2,9 +2,12 @@
 package web
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"io/fs"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -94,6 +97,39 @@ func TailScript() string { return tailScript }
 // GET /clients/relay-watch.sh: watchdog + drain spool + wake decision
 // for the Go relay-tail dumb pipe (clients/muse/ standard onboarding).
 func WatchScript() string { return watchScript }
+
+// Muse script identity. The version is NOT a Go constant: it is parsed from
+// the embedded script, which stays the single source of truth shared with
+// clients/muse/relay-watch.sh (enforced byte-identical by tests). A Go-side
+// copy would drift silently the first time someone bumps only the script.
+const (
+	MuseWatchKind = "muse-watch"
+	MuseWatchPath = "/clients/relay-watch.sh"
+)
+
+var watchVersionRE = regexp.MustCompile(`(?m)^WATCH_VERSION="([0-9A-Za-z._-]+)"[ \t]*$`)
+
+func watchVersionFrom(src string) string {
+	m := watchVersionRE.FindStringSubmatch(src)
+	if len(m) != 2 {
+		return ""
+	}
+	return m[1]
+}
+
+// WatchScriptVersion reports the version of the embedded Muse script. Empty
+// means the constant is missing/malformed; callers must treat that as
+// "unknown server version" and never nudge anyone.
+func WatchScriptVersion() string { return watchVersionFrom(watchScript) }
+
+// WatchScriptSHA256 returns the lowercase hex digest of the exact embedded
+// artifact served at MuseWatchPath. The client re-computes it after download;
+// this catches truncation/stale caches, not a malicious relay (the hash and
+// the file ride the same channel).
+func WatchScriptSHA256() string {
+	sum := sha256.Sum256([]byte(watchScript))
+	return hex.EncodeToString(sum[:])
+}
 
 // WatchHermesScript returns the Hermes thin-shell layer served at
 // GET /clients/relay-watch-hermes.sh: same watchdog + drain spool + dedup

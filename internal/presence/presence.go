@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/AlixWang/agent-relay/internal/store"
@@ -39,6 +40,12 @@ type PeerView struct {
 	// actually decides whether the peer needs a new binary. A version-tag
 	// mismatch with an equal rev is not an update.
 	ClientRev string `json:"client_rev,omitempty"`
+	// Script version self-report (§8.9b): the watch-layer artifact the peer
+	// runs. Empty version = unknown (old script) and the server never nudges
+	// it. Shown as "脚本 v1.0.0" / "脚本 —" in the members console.
+	ScriptKind      string `json:"script_kind,omitempty"`
+	ScriptVersion   string `json:"script_version,omitempty"`
+	ScriptUpdatedAt int64  `json:"script_updated_at,omitempty"`
 	// Memory reconciliation (§8.6): the assistant's report of which
 	// conflicting relay rules it purged from memory, for which revision.
 	MemoryNote         string `json:"memory_note,omitempty"`
@@ -117,6 +124,10 @@ func New(st store.Store, onlineTimeoutSecs int64, webhookURL string) *Service {
 // value, non-empty overwrites with now as profile_updated_at.
 // clientVersion is the receiver client build (§8.9); empty keeps the stored
 // value (shell scripts don't report), non-empty overwrites.
+// scriptKind/scriptVersion are the watch-layer script self-report (§8.9b);
+// an empty version means "not reporting" (an old script) and never clobbers
+// a stored value. prompt_version=0 above is likewise ignored, so the script's
+// version-only heartbeat cannot disturb the daemon's revision reporting.
 // ClientRev records the receiver source revision reported in a heartbeat
 // (DESIGN §8.9). Kept separate from Beat so the presence API stays stable;
 // empty means "not reporting" and never clobbers a stored value.
@@ -136,7 +147,7 @@ func (s *Service) BeatMemory(peerID, note string, version int, now int64) error 
 	return s.st.UpdatePeerMemory(peerID, note, version, now)
 }
 
-func (s *Service) Beat(peerID string, protocolVer int, capabilities string, promptVersion int, profile string, clientVersion string, now int64) error {
+func (s *Service) Beat(peerID string, protocolVer int, capabilities string, promptVersion int, profile string, clientVersion string, scriptKind string, scriptVersion string, now int64) error {
 	if err := s.st.TouchPeer(peerID, now); err != nil {
 		return err
 	}
@@ -161,6 +172,12 @@ func (s *Service) Beat(peerID string, protocolVer int, capabilities string, prom
 	}
 	if clientVersion != "" {
 		_ = s.st.UpdatePeerClient(peerID, clientVersion, now)
+	}
+	scriptKind, scriptVersion = strings.TrimSpace(scriptKind), strings.TrimSpace(scriptVersion)
+	if scriptVersion != "" {
+		// Empty kind stays empty: it is "not reported" (like an old script),
+		// and the delivery predicate treats it as Muse for this MVP.
+		_ = s.st.UpdatePeerScript(peerID, scriptKind, scriptVersion, now)
 	}
 	// First sighting: mark online baseline so we don't fire a spurious
 	// offline event before the first timeout window passes.
@@ -192,6 +209,7 @@ func (s *Service) List(now int64, live map[string]bool) ([]*PeerView, error) {
 			Profile: p.Profile, ProfileUpdatedAt: p.ProfileUpdatedAt,
 			ClientVersion: p.ClientVersion, ClientUpdatedAt: p.ClientUpdatedAt,
 			ClientRev:  p.ClientRev,
+			ScriptKind: p.ScriptKind, ScriptVersion: p.ScriptVersion, ScriptUpdatedAt: p.ScriptUpdatedAt,
 			MemoryNote: p.MemoryNote, MemoryVersion: p.MemoryVersion, MemoryReconciledAt: p.MemoryReconciledAt,
 			AdminNote:    p.AdminNote,
 			ResourcesRev: p.ResourcesRev, ResourcesUpdatedAt: p.ResourcesUpdatedAt,

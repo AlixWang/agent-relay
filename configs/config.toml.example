@@ -80,6 +80,12 @@ resource_submit_per_hour = 10
 resource_pending_ttl_days = 30
 resource_notify_batch_secs = 600
 
+# Watch-layer script self-update (DESIGN §8.9b). On by default: a peer that
+# reports a script_version different from the server's embedded copy gets a
+# `script_update` event in its heartbeat response. Set false as a kill-switch;
+# reporting and console display keep working.
+scripts_update_enabled = true
+
 # SSE push (DESIGN §4.4b): outbound-only event stream for assistants that
 # can hold a persistent process (relay-tail.sh). Short polling stays default.
 stream_keepalive_secs = 20
