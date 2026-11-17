@@ -42,7 +42,7 @@ type PeerView struct {
 	ClientRev string `json:"client_rev,omitempty"`
 	// Script version self-report (§8.9b): the watch-layer artifact the peer
 	// runs. Empty version = unknown (old script) and the server never nudges
-	// it. Shown as "脚本 v1.0.0" / "脚本 —" in the members console.
+	// it. Shown as "脚本 v1.0.1" / "脚本 —" in the members console.
 	ScriptKind      string `json:"script_kind,omitempty"`
 	ScriptVersion   string `json:"script_version,omitempty"`
 	ScriptUpdatedAt int64  `json:"script_updated_at,omitempty"`

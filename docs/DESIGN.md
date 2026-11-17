@@ -1068,6 +1068,19 @@ Go-side version constant to drift — and compares exactly (`!=`, like
 `internal/web/clients/`) must stay byte-identical; `TestScriptVersions`
 enforces that plus the parse/sha256 invariant.
 
+The 1.0.1 line also keeps **Layer 0**: a `kind=result` whose payload is short
+(≤120 chars), single-line, and free of substantive markers (`?`/`？`, task /
+question / request words, `TODO`, contrast words, and word-boundary English
+`but|however|failed|failure|error`, case-insensitive) is acked by the script
+via `POST /ack` and dropped from the wake payload instead of waking the
+worker. A mechanical ack is logged (`ack.layer0`), recorded in `.done_ids`,
+and mirrored to `layer0-experiment.log` with the same `…layer0-script-ack`
+shape as the worker-wake line. If the ack fails or no token can be read, the
+batch falls back to the normal wake — the script never swallows a message.
+This is the 2026-11-17 owner-approved production behaviour restored after the
+1.0.0 copy had dropped it; the word-boundary guard exists so `"ok, but
+failed"` cannot be mistaken for a mechanical result.
+
 The script reports `{id, script_kind, script_version}` through the ordinary
 `POST /heartbeat` at startup/when its constant differs from
 `$BASE/.script_version`, and re-reports hourly as loss insurance. The file is

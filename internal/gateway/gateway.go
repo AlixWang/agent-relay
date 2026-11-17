@@ -801,7 +801,7 @@ type heartbeatReq struct {
 	// or prompt templates leaves it unchanged, so nobody gets nagged.
 	ClientRev string `json:"client_rev"`
 	// ScriptKind/ScriptVersion are the watch-layer script self-report
-	// (§8.9b): e.g. muse-watch / 1.0.0. Empty version = not reporting (an
+	// (§8.9b): e.g. muse-watch / 1.0.1. Empty version = not reporting (an
 	// old script) and the server never nudges it. The value is stored on the
 	// peer and compared exactly with the version parsed from the embedded
 	// artifact; a mismatch yields a `script_update` event in the response.
