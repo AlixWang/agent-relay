@@ -27,7 +27,7 @@ func TestAdminSendWakesSSEAndSpeaksAsOperator(t *testing.T) {
 	req := httptest.NewRequest("GET", "/messages/stream?for=alice&since=0", nil)
 	req = req.WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer "+f.tok["alice"])
-	rec := httptest.NewRecorder()
+	rec := newSafeRecorder()
 	done := make(chan struct{})
 	go func() { f.mux.ServeHTTP(rec, req); close(done) }()
 	time.Sleep(200 * time.Millisecond) // let it subscribe
@@ -43,14 +43,14 @@ func TestAdminSendWakesSSEAndSpeaksAsOperator(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(rec.Body.String(), "控制台指令") {
+	for !strings.Contains(rec.bodyString(), "控制台指令") {
 		select {
 		case <-done:
-			t.Fatalf("stream closed before the operator frame arrived: %q", rec.Body.String())
+			t.Fatalf("stream closed before the operator frame arrived: %q", rec.bodyString())
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("operator message did not reach the held stream: %q", rec.Body.String())
+			t.Fatalf("operator message did not reach the held stream: %q", rec.bodyString())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

@@ -289,30 +289,70 @@ func (c *noiseConn) readServiceFrame(ctx context.Context) (*serviceFrame, error)
 	return nil, newNoiseError("rpc", "too_many_frames", true, nil)
 }
 
-// doRPC sends one unary GET and collects its response. Non-2xx responses are
-// returned to the caller (the unread→identity fallback needs the status);
-// only transport/reset failures produce an error. The caller owns a per-RPC
-// context; this method never retries on the same stream.
-func (c *noiseConn) doRPC(ctx context.Context, streamID int64, path string) (*appResponse, error) {
-	req := &serviceFrame{
-		StreamID: streamID,
-		Request: &appRequest{
-			Verb:    http.MethodGet,
-			Path:    path,
-			Headers: []noiseHeader{{Key: "x-request-id", Value: newUUID()}},
-			EndBody: true,
-		},
+// buildAppRequest constructs one application request. GETs keep their query in
+// the path, matching muse-cli's own translation; a non-empty body always gets a
+// JSON content type and end_body. A caller-supplied x-request-id wins.
+func buildAppRequest(verb, path string, body []byte, headers []noiseHeader) *appRequest {
+	req := &appRequest{Verb: verb, Path: path, Body: body, EndBody: true}
+	hasRequestID := false
+	for _, h := range headers {
+		if strings.EqualFold(h.Key, "x-request-id") && h.Value != "" {
+			hasRequestID = true
+		}
+		req.Headers = append(req.Headers, h)
 	}
-	envelope := encodeServiceRequest(0, req) // service 0 = daemon
+	if !hasRequestID {
+		req.Headers = append(req.Headers, noiseHeader{Key: "x-request-id", Value: newUUID()})
+	}
+	if len(body) > 0 {
+		contentType := false
+		for _, h := range req.Headers {
+			if strings.EqualFold(h.Key, "content-type") {
+				contentType = true
+			}
+		}
+		if !contentType {
+			req.Headers = append(req.Headers, noiseHeader{Key: "content-type", Value: "application/json"})
+		}
+	}
+	return req
+}
+
+// sendServiceFrame encrypts and writes one ServiceFrame. Encrypt and WS write
+// are one critical section because the Noise send cipher state is stateful; the
+// chat connection's read loop may serve several streams, but writes stay
+// serialized here.
+func (c *noiseConn) sendServiceFrame(ctx context.Context, sf *serviceFrame) error {
+	envelope := encodeServiceRequest(0, sf) // service 0 = daemon
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	wire, err := c.encryptFrame(envelope)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	c.writeMu.Lock()
-	err = c.ws.Write(ctx, websocket.MessageBinary, wire)
-	c.writeMu.Unlock()
-	if err != nil {
-		return nil, newNoiseError("rpc", noiseNetworkClass(err), true, err)
+	if err := c.ws.Write(ctx, websocket.MessageBinary, wire); err != nil {
+		return newNoiseError("rpc", noiseNetworkClass(err), true, err)
+	}
+	return nil
+}
+
+// doRPC is the existing unary GET compatibility layer. verifyNoiseRPC keeps
+// using it; all chat calls use the body-aware form below or chatConn's own
+// dispatcher.
+func (c *noiseConn) doRPC(ctx context.Context, streamID int64, path string) (*appResponse, error) {
+	return c.doRPCWithBody(ctx, streamID, http.MethodGet, path, nil, nil)
+}
+
+// doRPCWithBody sends one unary application request and collects its response.
+// Non-2xx responses are returned to the caller (the unread→identity fallback
+// needs the status); only transport/reset failures produce an error. This is
+// only safe on a connection with no concurrent stream consumer.
+func (c *noiseConn) doRPCWithBody(ctx context.Context, streamID int64, verb, path string,
+	body []byte, headers []noiseHeader) (*appResponse, error) {
+
+	sf := &serviceFrame{StreamID: streamID, Request: buildAppRequest(verb, path, body, headers)}
+	if err := c.sendServiceFrame(ctx, sf); err != nil {
+		return nil, err
 	}
 
 	var resp *appResponse
@@ -322,7 +362,7 @@ func (c *noiseConn) doRPC(ctx context.Context, streamID int64, path string) (*ap
 			return nil, err
 		}
 		if sf.StreamID != streamID {
-			continue // a future multiplexed call may interleave streams
+			continue
 		}
 		switch {
 		case sf.Reset != nil:

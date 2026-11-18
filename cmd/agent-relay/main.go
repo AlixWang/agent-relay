@@ -144,6 +144,15 @@ func main() {
 		WakeCooldown:      time.Duration(cfg.MuseWakeCooldownSecs) * time.Second,
 		DataDir:           cfg.DataDir,
 		AutoWake:          cfg.MuseAutoWake,
+
+		DirectChatEnabled:   cfg.MuseDirectChatEnabled,
+		ChatMaxConcurrent:   cfg.MuseChatMaxConcurrent,
+		ChatDefaultBudget:   time.Duration(cfg.MuseChatDefaultBudgetSecs) * time.Second,
+		ChatMaxBudget:       time.Duration(cfg.MuseChatMaxBudgetSecs) * time.Second,
+		ChatPollInterval:    time.Duration(cfg.MuseChatPollSecs) * time.Second,
+		ChatPerPeerPerMin:   cfg.MuseChatPerPeerPerMinute,
+		ChatPerPeerPerHour:  cfg.MuseChatPerPeerPerHour,
+		ChatGlobalPerMinute: cfg.MuseChatGlobalPerMinute,
 	})
 	if museErr != nil {
 		museSvc = nil

@@ -35,6 +35,9 @@ var (
 	ErrBadCookies        = errors.New("invalid muse cookie")
 	ErrUnauthorized      = errors.New("muse session unauthorized")
 	ErrBusy              = errors.New("muse keepalive already running")
+	ErrChatActive        = errors.New("muse chat is active for this account")
+	ErrChatNotActive     = errors.New("muse chat is not active")
+	ErrChatNotFound      = errors.New("unknown muse chat")
 )
 
 const (
@@ -46,6 +49,17 @@ const (
 	// gets within 36h, i.e. at most 12h after the previous renewal. An unknown
 	// or shorter expiry always renews.
 	keepaliveCookieHorizon = int64(36 * time.Hour / time.Second)
+
+	// Direct-chat v1 hard caps (D7/D8/D9/D25). These are ceilings, not just
+	// defaults: configuration may lower them but never raise them.
+	chatMaxConcurrentHard = 4
+	chatDefaultBudgetHard = 180 * time.Second
+	chatMaxBudgetHard     = 300 * time.Second
+	chatMaxBudgetCeiling  = 300 * time.Second
+	chatPollHard          = 2 * time.Second
+	chatRatePeerMinute    = 6
+	chatRatePeerHour      = 30
+	chatRateGlobalMinute  = 30
 )
 
 // Options configures the optional Muse integration. Zero durations select the
@@ -63,6 +77,18 @@ type Options struct {
 	// production host. It exists so tests can point at a loopback Noise server;
 	// there is no config key for it.
 	GatewayURL string
+
+	// Direct chat (D1-D26). DirectChatEnabled is the deploy gate; the runtime
+	// kill switch and per-account consent are separate layers. The limits are
+	// hard-capped in New so a test/embedder cannot exceed the v1 design.
+	DirectChatEnabled   bool
+	ChatMaxConcurrent   int
+	ChatDefaultBudget   time.Duration
+	ChatMaxBudget       time.Duration
+	ChatPollInterval    time.Duration
+	ChatPerPeerPerMin   int
+	ChatPerPeerPerHour  int
+	ChatGlobalPerMinute int
 }
 
 // Account is the write-only-safe view of one authorization. It intentionally
@@ -98,8 +124,20 @@ type Account struct {
 	LastWakeState string `json:"last_wake_state,omitempty"`
 	AutoWake      bool   `json:"auto_wake"`
 	Enabled       bool   `json:"enabled"`
-	AuthorizedAt  int64  `json:"authorized_at"`
-	UpdatedAt     int64  `json:"updated_at"`
+
+	// Direct-chat consent is separate from keepalive authorization (D3/D4).
+	// chat_enabled starts false and is reset by reauthorization or peer
+	// rebinding; the consent fields are evidence, never credentials.
+	ChatEnabled         bool   `json:"chat_enabled"`
+	ChatConsentAt       int64  `json:"chat_consent_at"`
+	ChatConsentBy       string `json:"chat_consent_by,omitempty"`
+	ChatConsentVersion  int    `json:"chat_consent_version"`
+	ChatConsentEvidence string `json:"chat_consent_evidence,omitempty"`
+	LastChatAt          int64  `json:"last_chat_at"`
+	LastChatStatus      string `json:"last_chat_status,omitempty"`
+
+	AuthorizedAt int64 `json:"authorized_at"`
+	UpdatedAt    int64 `json:"updated_at"`
 }
 
 // Result is one keepalive/wake attempt. OK means the Muse session was valid;
@@ -183,6 +221,25 @@ type Service struct {
 	// cooldown and block offline recovery. In-memory on purpose; a restart can
 	// at worst allow one extra wake.
 	wakeEvents map[string]int64
+
+	// Direct-chat state. chatMu protects the job/lease maps and the runtime
+	// switch; it never covers network I/O or a job wait, so a 180s dialogue
+	// cannot block the console or keepalive. chatSem is the global capacity
+	// (D9); chatActive enforces one live dialogue per account (D9).
+	chatMu       sync.Mutex
+	chatJobs     map[string]*ChatJob
+	chatActive   map[string]string
+	chatRequests map[string]chatIdem
+	chatSem      chan struct{}
+	chatRuntime  bool
+	chatPerMin   map[string][]int64
+	chatPerHour  map[string][]int64
+	chatGlobal   []int64
+
+	// chatOpen is nil in production (the Service is its own gateway). Unit
+	// tests replace it with a fake session so the orchestration state machine
+	// can run without a Noise server.
+	chatOpen chatGateway
 }
 
 // New validates the endpoint/proxy, loads the cookie key and builds the HTTP
@@ -236,6 +293,33 @@ func New(st store.Store, opt Options) (*Service, error) {
 	opt.BaseURL = base
 	opt.HTTPTimeout = timeout
 	opt.WakeCooldown = cooldown
+	// Clamp direct-chat limits to the reviewed v1 envelope. Zero means
+	// "default"; an over-large value is lowered rather than rejected so an
+	// older config cannot accidentally widen the feature.
+	if opt.ChatMaxConcurrent <= 0 || opt.ChatMaxConcurrent > chatMaxConcurrentHard {
+		opt.ChatMaxConcurrent = chatMaxConcurrentHard
+	}
+	if opt.ChatDefaultBudget <= 0 || opt.ChatDefaultBudget > chatMaxBudgetHard {
+		opt.ChatDefaultBudget = chatDefaultBudgetHard
+	}
+	if opt.ChatMaxBudget <= 0 || opt.ChatMaxBudget > chatMaxBudgetCeiling {
+		opt.ChatMaxBudget = chatMaxBudgetCeiling
+	}
+	if opt.ChatDefaultBudget > opt.ChatMaxBudget {
+		opt.ChatDefaultBudget = opt.ChatMaxBudget
+	}
+	if opt.ChatPollInterval <= 0 || opt.ChatPollInterval > chatPollHard {
+		opt.ChatPollInterval = chatPollHard
+	}
+	if opt.ChatPerPeerPerMin <= 0 || opt.ChatPerPeerPerMin > chatRatePeerMinute {
+		opt.ChatPerPeerPerMin = chatRatePeerMinute
+	}
+	if opt.ChatPerPeerPerHour <= 0 || opt.ChatPerPeerPerHour > chatRatePeerHour {
+		opt.ChatPerPeerPerHour = chatRatePeerHour
+	}
+	if opt.ChatGlobalPerMinute <= 0 || opt.ChatGlobalPerMinute > chatRateGlobalMinute {
+		opt.ChatGlobalPerMinute = chatRateGlobalMinute
+	}
 	s := &Service{
 		st:         st,
 		opts:       opt,
@@ -250,9 +334,16 @@ func New(st store.Store, opt Options) (*Service, error) {
 				return http.ErrUseLastResponse
 			},
 		},
-		waking:     map[string]bool{},
-		backoff:    map[string]int64{},
-		wakeEvents: map[string]int64{},
+		waking:       map[string]bool{},
+		backoff:      map[string]int64{},
+		wakeEvents:   map[string]int64{},
+		chatJobs:     map[string]*ChatJob{},
+		chatActive:   map[string]string{},
+		chatRequests: map[string]chatIdem{},
+		chatSem:      make(chan struct{}, opt.ChatMaxConcurrent),
+		chatRuntime:  opt.DirectChatEnabled,
+		chatPerMin:   map[string][]int64{},
+		chatPerHour:  map[string][]int64{},
 	}
 	s.verifyWake = s.verifyNoise
 	if created {
@@ -367,10 +458,18 @@ func (s *Service) Reauthorize(ctx context.Context, id, cookieInput string) (*Acc
 	if res.OK {
 		a.AuthorizedAt = now
 	}
+	// A new cookie jar may belong to a different muse.ai identity. The old
+	// member consent does not transfer (D4); the operator must re-confirm.
+	a.ChatEnabled = false
+	a.ChatConsentAt = 0
+	a.ChatConsentBy = ""
+	a.ChatConsentVersion = 0
+	a.ChatConsentEvidence = ""
 	if err := s.st.SaveMuseAccount(a); err != nil {
 		return nil, err
 	}
 	s.recordRetry(a.ID, res)
+	go s.cancelChatsForAccount(a.ID, "reauthorized")
 	return s.toAccount(a), nil
 }
 
@@ -386,6 +485,7 @@ func (s *Service) Update(id string, label, peerID *string, autoWake, enabled *bo
 	if a == nil {
 		return nil, ErrNotFound
 	}
+	peerChanged := false
 	if peerID != nil {
 		target := strings.TrimSpace(*peerID)
 		if target == "" {
@@ -407,6 +507,7 @@ func (s *Service) Update(id string, label, peerID *string, autoWake, enabled *bo
 				return nil, ErrAlreadyAuthorized
 			}
 			a.PeerID = target
+			peerChanged = true
 		}
 	}
 	if label != nil {
@@ -418,9 +519,29 @@ func (s *Service) Update(id string, label, peerID *string, autoWake, enabled *bo
 	if enabled != nil {
 		a.Enabled = *enabled
 	}
+	if peerChanged {
+		// Consent is bound to a person, not to the account row.
+		a.ChatEnabled = false
+		a.ChatConsentAt = 0
+		a.ChatConsentBy = ""
+		a.ChatConsentVersion = 0
+		a.ChatConsentEvidence = ""
+	}
 	a.UpdatedAt = s.now().Unix()
 	if err := s.st.SaveMuseAccount(a); err != nil {
 		return nil, err
+	}
+	// An account disable must stop an in-flight dialogue as well as future
+	// ones. Cancel runs in its own goroutine: this update still holds opMu,
+	// and a preparing worker may be waiting for that same lock. The cancel
+	// path only needs the job/session locks and the connection's write lock.
+	disabled := enabled != nil && !*enabled
+	if peerChanged || disabled {
+		reason := "peer_changed"
+		if disabled {
+			reason = "account_disabled"
+		}
+		go s.cancelChatsForAccount(a.ID, reason)
 	}
 	return s.toAccount(a), nil
 }
@@ -436,7 +557,11 @@ func (s *Service) Revoke(id string) error {
 	if a == nil {
 		return ErrNotFound
 	}
-	return s.st.DeleteMuseAccount(id)
+	if err := s.st.DeleteMuseAccount(id); err != nil {
+		return err
+	}
+	go s.cancelChatsForAccount(id, "revoked")
+	return nil
 }
 
 func (s *Service) Get(id string) (*Account, error) {
@@ -468,8 +593,16 @@ func (s *Service) List() ([]*Account, error) {
 // success). Muse-level failures are returned in Result (the admin API stays
 // HTTP 200); only store/decrypt plumbing errors are returned as Go errors.
 func (s *Service) Keepalive(ctx context.Context, id string) (*Result, error) {
+	if s.chatLeaseActive(id) {
+		return nil, ErrChatActive
+	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	// Double-check after taking opMu: StartChat sets the lease before it
+	// prepares, so either this sees the lease or the chat's prepare waits.
+	if s.chatLeaseActive(id) {
+		return nil, ErrChatActive
+	}
 	a, err := s.st.GetMuseAccount(id)
 	if err != nil {
 		return nil, err
@@ -508,8 +641,14 @@ func (s *Service) Keepalive(ctx context.Context, id string) (*Result, error) {
 
 // Wake is Keepalive plus a recorded wake event (last_wake_at/last_wake_ok).
 func (s *Service) Wake(ctx context.Context, id string) (*Result, error) {
+	if s.chatLeaseActive(id) {
+		return nil, ErrChatActive
+	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	if s.chatLeaseActive(id) {
+		return nil, ErrChatActive
+	}
 	return s.wakeLocked(ctx, id)
 }
 
@@ -517,8 +656,14 @@ func (s *Service) Wake(ctx context.Context, id string) (*Result, error) {
 // exactly as it was before Wake wrote the new state. That pre-wake snapshot is
 // what the auto-wake audit decision compares against.
 func (s *Service) wakeWithPrior(ctx context.Context, id string) (*store.MuseAccount, *Result, error) {
+	if s.chatLeaseActive(id) {
+		return nil, nil, ErrChatActive
+	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	if s.chatLeaseActive(id) {
+		return nil, nil, ErrChatActive
+	}
 	prev, _ := s.st.GetMuseAccount(id)
 	res, err := s.wakeLocked(ctx, id)
 	return prev, res, err
@@ -609,6 +754,12 @@ func (s *Service) KeepaliveAll(ctx context.Context, force bool) (*Summary, error
 		}
 		if !a.Enabled {
 			skip("disabled")
+			continue
+		}
+		// A live dialogue owns this account's only Noise connection; skip the
+		// keepalive (not a failure) and try again next sweep (§4.4).
+		if s.chatLeaseActive(a.ID) {
+			skip("chat_active")
 			continue
 		}
 		// A 429 Retry-After window is authoritative even for a manual
@@ -808,6 +959,9 @@ func (s *Service) MaybeWakeOffline(peerID string, offlineSecs int64) {
 	if !a.Enabled || !a.AutoWake || a.AuthState == "needs_reauth" || a.VMState == "DISABLED" {
 		return
 	}
+	if s.chatLeaseActive(a.ID) {
+		return
+	}
 	peer, err := s.st.GetPeer(peerID)
 	if err != nil || peer == nil || peer.Status == "suspended" {
 		return
@@ -842,6 +996,11 @@ func (s *Service) autoWake(accountID, peerID string) {
 	// routine success that changes nothing is operational noise, not an audit
 	// event; failures and state transitions are what an operator needs.
 	prev, res, err := s.wakeWithPrior(ctx, accountID)
+	if errors.Is(err, ErrChatActive) {
+		// A chat started between the presence check and this wake; it is the
+		// stronger liveness proof and must not produce a failed-wake audit.
+		return
+	}
 	now := s.now().Unix()
 	detail := fmt.Sprintf("peer=%s account=%s ok=false", peerID, accountID)
 	if err != nil {
@@ -969,6 +1128,10 @@ func (s *Service) toAccount(a *store.MuseAccount) *Account {
 		LastWakeAt: a.LastWakeAt, LastWakeOK: a.LastWakeOK,
 		LastWakeError: a.LastWakeError, LastWakeState: a.LastWakeState,
 		AutoWake: a.AutoWake, Enabled: a.Enabled,
+		ChatEnabled: a.ChatEnabled, ChatConsentAt: a.ChatConsentAt,
+		ChatConsentBy: a.ChatConsentBy, ChatConsentVersion: a.ChatConsentVersion,
+		ChatConsentEvidence: a.ChatConsentEvidence,
+		LastChatAt:          a.LastChatAt, LastChatStatus: a.LastChatStatus,
 		AuthorizedAt: a.AuthorizedAt, UpdatedAt: a.UpdatedAt,
 	}
 	v.CookiesExp = parseCookiesExp(a.CookiesExp)

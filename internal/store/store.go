@@ -348,6 +348,11 @@ type Store interface {
 	GetMuseAccountByPeer(peerID string) (*MuseAccount, error)
 	ListMuseAccounts() ([]*MuseAccount, error)
 	SaveMuseAccount(a *MuseAccount) error
+	// SetMuseChatConsent writes chat opt-in state and its audit row atomically.
+	SetMuseChatConsent(id string, enabled bool, at int64, by, evidence string, version int,
+		actor, action, detail string, auditAt int64) error
+	// SetMuseChatStatus updates only last_chat_at/last_chat_status.
+	SetMuseChatStatus(id string, at int64, status string) error
 	DeleteMuseAccount(id string) error
 	// resource hub (§4.12, ADR 0004/0005): content is opaque here; secret
 	// encryption and hashing live in internal/resources.

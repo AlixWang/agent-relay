@@ -7,6 +7,7 @@ package musetest
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -33,13 +34,26 @@ type Reset struct {
 	Reason string
 }
 
-// Response is what the handler returns for one request.
+// Chunk is an ApplicationResponse body_chunk frame. Chunks let a stream
+// handler emit NDJSON lines after its initial Response without ending the
+// logical stream.
+type Chunk struct {
+	Data    []byte
+	EndBody bool
+}
+
+// Response is what the handler returns for one request. A Chunk response is
+// encoded as body_chunk instead of an ApplicationResponse. NoEnd suppresses
+// the default end_body=true for an empty initial response, which is what a
+// multi-frame chat.stream echo uses.
 type Response struct {
 	Status  int
 	Headers map[string]string
 	Body    []byte
 	EndBody bool
+	NoEnd   bool
 	Reset   *Reset
+	Chunk   *Chunk
 
 	streamID int64
 }
@@ -50,11 +64,13 @@ type Server struct {
 
 	http *httptest.Server
 
-	mu       sync.Mutex
-	dials    int
-	failN    int
-	requests []Request
-	handler  func(Request) Response
+	mu            sync.Mutex
+	dials         int
+	failN         int
+	requests      []Request
+	handler       func(Request) Response
+	streamHandler func(Request, *Emitter) Response
+	history       []any
 }
 
 // New starts a mock Noise gateway and registers cleanup with t.
@@ -72,6 +88,24 @@ func New(t testing.TB) *Server {
 func (s *Server) SetHandler(fn func(Request) Response) {
 	s.mu.Lock()
 	s.handler = fn
+	s.mu.Unlock()
+}
+
+// SetStreamHandler installs a handler that may emit additional frames after it
+// returns. The Emitter is safe for use from other goroutines; the mock keeps a
+// single decrypt consumer and serializes encrypt+write just like production.
+func (s *Server) SetStreamHandler(fn func(Request, *Emitter) Response) {
+	s.mu.Lock()
+	s.streamHandler = fn
+	s.mu.Unlock()
+}
+
+// SetHistory supplies the events a default handler returns for
+// GET /chat/history. It is a convenience for job/state-machine tests; custom
+// handlers can still implement pagination themselves.
+func (s *Server) SetHistory(events []any) {
+	s.mu.Lock()
+	s.history = append([]any(nil), events...)
 	s.mu.Unlock()
 }
 
@@ -106,6 +140,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.dials++
 	fail := s.dials <= s.failN
 	handler := s.handler
+	streamHandler := s.streamHandler
+	history := append([]any(nil), s.history...)
 	s.mu.Unlock()
 
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
@@ -116,17 +152,22 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if fail {
 		return
 	}
-	if handler == nil {
-		handler = func(Request) Response {
+	if handler == nil && streamHandler == nil {
+		handler = func(req Request) Response {
+			if req.Path == "/chat/history" && history != nil {
+				body, _ := json.Marshal(map[string]any{"chat_events": history, "has_more": false})
+				return Response{Status: 200, Body: body, EndBody: true}
+			}
 			return Response{Status: 200, Body: []byte(`{"ok":true}`), EndBody: true}
 		}
 	}
-	if err := s.serve(ws, handler); err != nil {
+	if err := s.serve(ws, handler, streamHandler); err != nil {
 		return
 	}
 }
 
-func (s *Server) serve(ws *websocket.Conn, handler func(Request) Response) error {
+func (s *Server) serve(ws *websocket.Conn, handler func(Request) Response,
+	streamHandler func(Request, *Emitter) Response) error {
 	ctx := context.Background()
 	cs := noise.NewCipherSuite(noise.DH25519, noise.CipherAESGCM, noise.HashSHA256)
 	static, err := noise.DH25519.GenerateKeypair(nil)
@@ -168,7 +209,10 @@ func (s *Server) serve(ws *websocket.Conn, handler func(Request) Response) error
 		return errors.New("mock: incomplete handshake")
 	}
 
-	var chunkID int64 = 1
+	w := &mockWriter{ctx: ctx, ws: ws, send: send, chunkID: 1}
+	emit := func(resp Response) error {
+		return w.write(resp)
+	}
 	for {
 		typ, ciphertext, err := ws.Read(ctx)
 		if err != nil {
@@ -193,19 +237,57 @@ func (s *Server) serve(ws *websocket.Conn, handler func(Request) Response) error
 		s.requests = append(s.requests, req)
 		s.mu.Unlock()
 
+		if streamHandler != nil {
+			em := &Emitter{streamID: req.StreamID, write: emit}
+			resp := streamHandler(req, em)
+			resp.streamID = req.StreamID
+			if err := w.write(resp); err != nil {
+				return err
+			}
+			continue
+		}
 		resp := handler(req)
 		resp.streamID = req.StreamID
-		respWire := encodeResponse(resp)
-		frame := encodeTransportFrame(chunkID, respWire)
-		chunkID++
-		ct, err := send.Encrypt(nil, nil, frame)
-		if err != nil {
-			return err
-		}
-		if err := ws.Write(ctx, websocket.MessageBinary, ct); err != nil {
+		if err := w.write(resp); err != nil {
 			return err
 		}
 	}
+}
+
+// Emitter writes additional response/body_chunk frames for one stream. It is
+// safe to call from any goroutine and after the handler has returned.
+type Emitter struct {
+	streamID int64
+	write    func(Response) error
+}
+
+func (e *Emitter) Emit(resp Response) error {
+	if e == nil {
+		return errors.New("mock: nil emitter")
+	}
+	resp.streamID = e.streamID
+	return e.write(resp)
+}
+
+type mockWriter struct {
+	ctx     context.Context
+	ws      *websocket.Conn
+	send    *noise.CipherState
+	chunkID int64
+	mu      sync.Mutex
+}
+
+func (w *mockWriter) write(resp Response) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	respWire := encodeResponse(resp)
+	frame := encodeTransportFrame(w.chunkID, respWire)
+	w.chunkID++
+	ct, err := w.send.Encrypt(nil, nil, frame)
+	if err != nil {
+		return err
+	}
+	return w.ws.Write(w.ctx, websocket.MessageBinary, ct)
 }
 
 // ---- independent protobuf helpers -----------------------------------------
@@ -376,6 +458,11 @@ func encodeResponse(r Response) []byte {
 		rr = append(rr, fieldUint(1, uint64(uint32(r.Reset.Code)))...)
 		rr = append(rr, fieldString(2, r.Reset.Reason)...)
 		frame = append(frame, fieldBytes(5, rr)...)
+	} else if r.Chunk != nil {
+		var bc []byte
+		bc = append(bc, fieldBytes(1, r.Chunk.Data)...)
+		bc = append(bc, fieldBool(2, r.Chunk.EndBody)...)
+		frame = append(frame, fieldBytes(4, bc)...)
 	} else {
 		status := r.Status
 		if status == 0 {
@@ -390,7 +477,7 @@ func encodeResponse(r Response) []byte {
 			app = append(app, fieldBytes(2, h)...)
 		}
 		app = append(app, fieldBytes(3, r.Body)...)
-		app = append(app, fieldBool(4, r.EndBody || len(r.Body) == 0)...)
+		app = append(app, fieldBool(4, r.EndBody || (len(r.Body) == 0 && !r.NoEnd))...)
 		frame = append(frame, fieldBytes(3, app)...)
 	}
 	return fieldBytes(1, frame)

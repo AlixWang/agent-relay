@@ -248,6 +248,7 @@
             </div>
             <div class="bar-right">
               <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="museQ" type="search" placeholder="搜索成员 / 标签 / 错误"></label>
+              <label class="switch" data-tip="直接对话运行时开关"><input type="checkbox" id="museChatRuntime"><span></span>直接对话</label>
               <label class="switch" data-tip="每 15 秒自动刷新"><input type="checkbox" id="museAutoRefresh"><span></span>自动</label>
               <button class="btn btn-outline btn-sm" id="museRefresh"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
               <button class="btn btn-outline btn-sm" id="museKeepaliveAll"><svg class="icon"><use href="#i-zap"/></svg>全部保活</button>
@@ -262,7 +263,7 @@
           </div>
           <p class="hint" id="museStatus"><svg class="icon xs"><use href="#i-info"/></svg><span>尚未运行</span></p>
         </div>
-        <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg>授权后只调用 muse.ai 的 /api/session 与 /api/hatch/vm/wake：按配置周期续期 Cookie、保持沙盒 VM 热备，成员离线时自动唤醒。不会读取聊天内容，也不会代发消息。唤醒请求被接受但 /api/session 仍未确认 RUNNING 时，检查沙盒里的 Hatch hook 是否仍在跑 relay-watch.sh。</p>
+        <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg>保活只调用 muse.ai 的 /api/session、/api/hatch/vm/wake，以及唤醒验证所需的 /api/auth/check、/api/hatch/token 和 Noise 只读 RPC；不读取聊天内容。若某成员单独开通“直接对话”，后台可在其 Muse 主聊天/指定 side chat 发送操作者输入的消息，消息对该成员可见；该通道不是审批通道。未开通的成员不受影响。唤醒请求被接受但 /api/session 仍未确认 RUNNING 时，检查沙盒里的 Hatch hook 是否仍在跑 relay-watch.sh。</p>
       </section>
 
       <!-- ---------- 消息线程 ---------- -->
@@ -1011,6 +1012,69 @@
     <div class="modal-foot">
       <button type="button" class="btn btn-ghost" data-close>取消</button>
       <button type="submit" class="btn btn-primary" id="museDlgSubmit"><svg class="icon"><use href="#i-key"/></svg>授权</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Muse direct-chat consent ============ -->
+<dialog id="museChatConsentDlg" class="modal" aria-labelledby="museChatConsentTitle">
+  <form method="dialog" id="museChatConsentForm">
+    <div class="modal-head">
+      <svg class="icon dlg-ic" style="color: var(--muted)"><use href="#i-message"/></svg>
+      <div><h2 id="museChatConsentTitle">开通直接对话</h2><p class="muted xs">成员：<b id="museChatConsentPeer"></b> · 同意文本版本 1</p></div>
+    </div>
+    <div class="alert alert-warn"><svg class="icon"><use href="#i-alert"/></svg><span>消息会进入该成员的 Muse 主聊天（或指定 side chat），成员本人可见；agent 可能因此执行操作。此通道不是审批通道，不能代替成员点击原生审批卡。</span></div>
+    <div class="modal-section">
+      <h4>成员同意文本（v1）</h4>
+      <p id="museChatConsentText" class="chat-consent-text"></p>
+    </div>
+    <label class="field">同意证据（成员在中继里说“我同意”的消息 id，或书面备注；8–200 字符）
+      <input id="museConsentEvidence" maxlength="200" placeholder="如 msg-12345 / 2026-11-19 当面确认" autocomplete="off" required>
+    </label>
+    <label class="switch"><input type="checkbox" id="museConsentCheck"><span></span>我确认已取得该成员同意，并已向其说明消息可见与工具调用风险</label>
+    <p id="museConsentErr" class="alert alert-bad" hidden></p>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <button type="submit" class="btn btn-primary" id="museConsentSubmit"><svg class="icon"><use href="#i-check"/></svg>开通直接对话</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Muse direct-chat drawer ============ -->
+<dialog id="museChatDlg" class="modal chat-dialog" aria-labelledby="museChatTitle">
+  <form method="dialog" id="museChatForm">
+    <div class="modal-head">
+      <svg class="icon dlg-ic" style="color: var(--muted)"><use href="#i-message"/></svg>
+      <div><h2 id="museChatTitle">与成员 Muse agent 对话</h2><p class="muted xs"><span id="museChatState" class="badge muted">未发送</span> <span id="museChatMeta">发送后这里显示 job 时间线。</span></p></div>
+    </div>
+    <div class="alert alert-warn chat-visibility"><svg class="icon"><use href="#i-eye"/></svg><span id="museChatVisibility"></span></div>
+    <label class="field" id="museChatConfirmField">首次向该成员发送，请输入成员 peer_id 确认
+      <input id="museChatConfirmPeer" autocomplete="off" spellcheck="false" placeholder="精确输入成员 peer_id">
+    </label>
+    <label class="field">消息（纯文本，1–4000 Unicode 码点）
+      <textarea id="museChatText" rows="4" maxlength="4000" placeholder="例如：帮我看一下今天有没有未读的日程，只回一句话。"></textarea>
+      <small id="museChatCount" class="muted xs">0 / 4000</small>
+    </label>
+    <div class="chat-options">
+      <label class="field">等待预算
+        <select id="museChatBudget">
+          <option value="90">90 秒</option>
+          <option value="180" selected>180 秒（默认）</option>
+          <option value="300">300 秒（最大）</option>
+        </select>
+      </label>
+      <label class="field">side chat session_id（可选，留空=主聊天；只接受已存在的会话）
+        <input id="museChatSession" maxlength="128" placeholder="s_..." autocomplete="off" spellcheck="false">
+      </label>
+    </div>
+    <div id="museChatReply" class="chat-reply"></div>
+    <p id="museChatWarnings" class="alert alert-warn" hidden></p>
+    <p id="museChatErr" class="alert alert-bad" hidden></p>
+    <div class="alert alert-info"><svg class="icon"><use href="#i-info"/></svg><span>超时不会自动取消 Muse 侧生成；只有点“停止生成”才会 best-effort 发 <code>chat.cancel</code>。取消/超时都不会删除已发出的消息。回复全文只在成员自己的 Muse 会话里，后台快照 1 小时后回收。</span></div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost danger" id="museChatDisable">关闭直接对话</button>
+      <button type="button" class="btn btn-outline" id="museChatCancel" disabled><svg class="icon"><use href="#i-pause"/></svg>停止生成</button>
+      <button type="submit" class="btn btn-primary" id="museChatSend"><svg class="icon"><use href="#i-send"/></svg>发送</button>
     </div>
   </form>
 </dialog>
