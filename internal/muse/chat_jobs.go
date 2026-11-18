@@ -167,6 +167,7 @@ type ChatJob struct {
 	LastSeq  int64
 	Canceled bool
 	Cancel   string
+	DupUser  bool
 	Updated  int64
 
 	session chatSession
@@ -756,8 +757,8 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 		cf := chatErrorFromFailure(serr)
 		if sendRes.Wrote && shouldConfirmAfterSend(cf) {
 			job.advance(ChatStatusConfirming, s.now().Unix())
-			if seq, _, cerr := s.confirmChat(ctx, sess, job); seq > 0 {
-				job.setConfirmed(seq, s.now().Unix())
+			if seq, dup, cerr := s.confirmChat(ctx, sess, job); seq > 0 {
+				job.setConfirmed(seq, s.now().Unix(), dup)
 				// Fall through to the wait phase; the message did land.
 			} else {
 				if job.cancelRequested() {
@@ -774,7 +775,7 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 		}
 	} else {
 		job.advance(ChatStatusConfirming, s.now().Unix())
-		seq, _, cerr := s.confirmChat(ctx, sess, job)
+		seq, dup, cerr := s.confirmChat(ctx, sess, job)
 		if seq <= 0 {
 			if job.cancelRequested() {
 				return cancelledOutcome(job)
@@ -785,7 +786,7 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 			return chatOutcome{Status: ChatStatusDeliveryUnknown, Stage: "confirm",
 				Error: &ChatError{Code: "muse_delivery_unknown", Class: "confirm"}}
 		}
-		job.setConfirmed(seq, s.now().Unix())
+		job.setConfirmed(seq, s.now().Unix(), dup)
 	}
 
 	job.setDeadline(job.Confirmed() + int64(job.Budget/time.Second))
@@ -816,28 +817,28 @@ func shouldConfirmAfterSend(cf *ChatError) bool {
 
 // confirmChat waits up to 5s for our message.user to appear in history. The
 // reply budget starts only once delivery is confirmed (D7/D12).
-func (s *Service) confirmChat(ctx context.Context, sess chatSession, job *ChatJob) (int64, []chatEvent, error) {
+func (s *Service) confirmChat(ctx context.Context, sess chatSession, job *ChatJob) (int64, bool, error) {
 	cctx, cancel := context.WithTimeout(ctx, chatConfirmBudget)
 	defer cancel()
 	var lastErr error
 	for {
 		hist, err := sess.History(cctx, job.SessionID, 20, 0)
 		if err == nil {
-			if seq, _, found := findChatUser(hist.ChatEvents, job.BaselineValue(), job.Text); found {
-				return seq, hist.ChatEvents, nil
+			if seq, dup, found := findChatUser(hist.ChatEvents, job.BaselineValue(), job.Text); found {
+				return seq, dup, nil
 			}
 			job.bumpLastSeq(maxChatSeq(hist.ChatEvents))
 		} else {
 			lastErr = err
 			if errors.Is(err, context.Canceled) {
-				return 0, nil, err
+				return 0, false, err
 			}
 		}
 		timer := time.NewTimer(chatConfirmEvery)
 		select {
 		case <-cctx.Done():
 			timer.Stop()
-			return 0, nil, lastErr
+			return 0, false, lastErr
 		case <-timer.C:
 		}
 	}
@@ -920,12 +921,14 @@ func (s *Service) waitForReply(ctx context.Context, sess chatSession, job *ChatJ
 		}
 		if parse.Reply != nil {
 			conf := "high"
-			if parse.Ambiguous {
+			warnings := append([]string(nil), parse.Warnings...)
+			if parse.Ambiguous || job.userDuplicated() {
 				conf = "ambiguous"
+				warnings = append(warnings, "duplicate_user_text")
 			}
 			return chatOutcome{
 				Status: ChatStatusReplied, Reply: parse.Reply,
-				Confidence: conf, Warnings: parse.Warnings, Stage: "poll",
+				Confidence: conf, Warnings: uniqueStrings(warnings), Stage: "poll",
 			}
 		}
 		if !s.sleepChatPoll(ctx, poll) {
@@ -1383,10 +1386,11 @@ func (j *ChatJob) setSentAt(sec int64) {
 	j.mu.Unlock()
 }
 
-func (j *ChatJob) setConfirmed(seq, sec int64) {
+func (j *ChatJob) setConfirmed(seq, sec int64, duplicate bool) {
 	j.mu.Lock()
 	j.UserSeq = seq
 	j.Confirm = sec
+	j.DupUser = duplicate
 	if seq > j.LastSeq {
 		j.LastSeq = seq
 	}
@@ -1435,6 +1439,7 @@ func (j *ChatJob) ConfirmValue() int64  { j.mu.Lock(); defer j.mu.Unlock(); retu
 func (j *ChatJob) DeadlineValue() int64 { j.mu.Lock(); defer j.mu.Unlock(); return j.Deadline }
 func (j *ChatJob) LastSeqValue() int64  { j.mu.Lock(); defer j.mu.Unlock(); return j.LastSeq }
 func (j *ChatJob) PollsValue() int      { j.mu.Lock(); defer j.mu.Unlock(); return j.Polls }
+func (j *ChatJob) userDuplicated() bool { j.mu.Lock(); defer j.mu.Unlock(); return j.DupUser }
 func (j *ChatJob) ConfirmAt() int64     { j.mu.Lock(); defer j.mu.Unlock(); return j.Confirm }
 
 func (j *ChatJob) statusValue() string {

@@ -532,8 +532,9 @@ func (s *Service) Update(id string, label, peerID *string, autoWake, enabled *bo
 		return nil, err
 	}
 	// An account disable must stop an in-flight dialogue as well as future
-	// ones. Releasing opMu first avoids making the worker wait for the very
-	// lock this update holds.
+	// ones. Cancel runs in its own goroutine: this update still holds opMu,
+	// and a preparing worker may be waiting for that same lock. The cancel
+	// path only needs the job/session locks and the connection's write lock.
 	disabled := enabled != nil && !*enabled
 	if peerChanged || disabled {
 		reason := "peer_changed"

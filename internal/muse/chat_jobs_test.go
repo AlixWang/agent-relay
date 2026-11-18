@@ -180,6 +180,18 @@ func waitChatStatus(t *testing.T, svc *Service, id string, want ...string) *Chat
 	return nil
 }
 
+func waitChatPolls(t *testing.T, svc *Service, id string, min int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, err := svc.GetChat(id); err == nil && v.PollCount >= min {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("chat %s did not reach %d poll(s)", id, min)
+}
+
 func waitChatDone(t *testing.T, svc *Service, id string) {
 	t.Helper()
 	svc.chatMu.Lock()
@@ -330,6 +342,7 @@ func TestChatTimeoutAndDraftPartial(t *testing.T) {
 	}}
 	view := env.start(t, &fakeChatGateway{sessions: []*fakeChatSession{sess}}, ChatStartRequest{})
 	waitChatStatus(t, env.svc, view.ChatID, ChatStatusWaiting)
+	waitChatPolls(t, env.svc, view.ChatID, 1)
 	env.clock += 31
 	got := waitChatStatus(t, env.svc, view.ChatID, ChatStatusTimeout)
 	if got.Error == nil || got.Error.Code != "muse_reply_timeout" {
@@ -550,6 +563,9 @@ func TestChatLeaseBlocksKeepalive(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 	waitChatDone(t, env.svc, view.ChatID)
+	if _, err := env.svc.Keepalive(context.Background(), env.account.ID); err != nil {
+		t.Fatalf("keepalive after lease release: %v", err)
+	}
 }
 
 func TestChatConsentResetOnPeerChangeAndReauthorize(t *testing.T) {
@@ -639,4 +655,67 @@ type failAuditStore struct {
 
 func (f failAuditStore) AppendAudit(_, _, _ string, _ int64) error {
 	return errors.New("audit db down")
+}
+
+func TestChatReplyUnknownAfterReconnect(t *testing.T) {
+	env := newChatTestEnv(t)
+	gw := &fakeChatGateway{factory: func(open int) *fakeChatSession {
+		if open > 1 {
+			return &fakeChatSession{historyFn: func(int, int, int64) (*chatHistoryResponse, error) {
+				return nil, &chatFailure{Code: "muse_upstream_timeout", Stage: "history", Retryable: true}
+			}}
+		}
+		return &fakeChatSession{historyFn: func(call, _ int, _ int64) (*chatHistoryResponse, error) {
+			if call == 1 {
+				return &chatHistoryResponse{ChatEvents: []chatEvent{chatAssistantEvent(10, "old", "completed")}}, nil
+			}
+			if call == 2 {
+				return &chatHistoryResponse{ChatEvents: []chatEvent{
+					chatAssistantEvent(10, "old", "completed"), chatUserEvent(11, "hello muse"),
+				}}, nil
+			}
+			return nil, &chatFailure{Code: "muse_upstream_timeout", Stage: "history", Retryable: true}
+		}}
+	}}
+	view := env.start(t, gw, ChatStartRequest{})
+	got := waitChatStatus(t, env.svc, view.ChatID, ChatStatusReplyUnknown)
+	if got.Error == nil || got.Error.Code != "muse_reply_unknown" {
+		t.Fatalf("error: %+v", got.Error)
+	}
+	if gw.openCount() < 2 {
+		t.Fatalf("no read-only reconnect: %d", gw.openCount())
+	}
+}
+
+func TestChatStaleUserDoesNotBlock(t *testing.T) {
+	env := newChatTestEnv(t)
+	nowMS := env.clock * 1000
+	gw := &fakeChatGateway{factory: func(int) *fakeChatSession {
+		return &fakeChatSession{historyFn: func(call, _ int, _ int64) (*chatHistoryResponse, error) {
+			stale := chatEvent{EventName: "message.user", Seq: 10, OccurredAtMS: nowMS - int64(11*time.Minute/time.Millisecond),
+				Payload: chatPayload{DisplayText: "stale question"}}
+			old := chatAssistantEvent(9, "old", "completed")
+			if call == 1 {
+				return &chatHistoryResponse{ChatEvents: []chatEvent{old, stale}}, nil
+			}
+			ours := chatUserEvent(11, "hello muse")
+			ours.OccurredAtMS = nowMS
+			return &chatHistoryResponse{ChatEvents: []chatEvent{old, stale, ours, chatAssistantEvent(12, "fresh answer", "completed")}}, nil
+		}}
+	}}
+	view := env.start(t, gw, ChatStartRequest{})
+	got := waitChatStatus(t, env.svc, view.ChatID, ChatStatusReplied)
+	if got.Reply == nil || got.Reply.Text != "fresh answer" {
+		t.Fatalf("reply: %+v", got)
+	}
+}
+
+func TestChatDeployGateBlocksRuntimeEnable(t *testing.T) {
+	env := newChatTestEnv(t)
+	env.svc.opts.DirectChatEnabled = false
+	_, err := env.svc.SetChatRuntime(true, "admin")
+	ce, code := chatAdmissionCode(t, err)
+	if ce.Status != 409 || code != "deploy_flag_off" {
+		t.Fatalf("deploy gate: %+v", ce)
+	}
 }
