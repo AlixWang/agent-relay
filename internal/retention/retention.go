@@ -37,6 +37,16 @@ func New(st store.Store, p Policy) *Runner { return &Runner{st: st, policy: p} }
 // prune stale peers, prune audit log. Returns human-readable counts.
 func (r *Runner) RunOnce(now int64) (map[string]int64, error) {
 	stats := map[string]int64{}
+	// One-time pre-v1.10.1 audit noise cleanup. The store method is guarded by
+	// a settings marker and does not scan the table again after the first run.
+	if purge, err := r.st.PurgeAuditNoise(now); err != nil {
+		return stats, err
+	} else if purge != nil && !purge.AlreadyDone &&
+		(purge.AutoWakeSuccess > 0 || purge.PeerOffline > 0) {
+		stats["audit_noise_purged"] = purge.AutoWakeSuccess + purge.PeerOffline
+		stats["audit_auto_wake_purged"] = purge.AutoWakeSuccess
+		stats["audit_peer_offline_purged"] = purge.PeerOffline
+	}
 	msgCutoff := now - int64(r.policy.MessageTTLDays)*86400
 	if r.policy.MessageTTLDays > 0 {
 		archived, deleted, skipped, err := r.archiveOldMessages(msgCutoff, now)

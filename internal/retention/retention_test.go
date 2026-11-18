@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/AlixWang/agent-relay/internal/store"
@@ -133,6 +134,101 @@ func TestPeerAndAuditPrune(t *testing.T) {
 	entries, _ := st.ListAudit("", "", 0, 10)
 	if len(entries) != 1 || entries[0].Action != "new.evt" {
 		t.Fatalf("audit: %+v", entries)
+	}
+}
+
+func TestReducedDefaultWindows(t *testing.T) {
+	st := openTest(t)
+	now := int64(200 * 86400)
+	// Audit: 31 days old is out under 30, 29 days old stays.
+	_ = st.AppendAudit("x", "old.evt", "", now-31*86400)
+	_ = st.AppendAudit("x", "fresh.evt", "", now-29*86400)
+	// Agent logs: 8 days old is out under 7, 6 days old stays.
+	if _, _, err := st.InsertAgentLogs([]*store.AgentLog{
+		{EventID: "old", Ts: now - 8*86400, ReceivedAt: now - 8*86400, PeerID: "alice", Level: "info", Source: "relay-watch", Event: "wake.requested"},
+		{EventID: "fresh", Ts: now - 6*86400, ReceivedAt: now - 6*86400, PeerID: "alice", Level: "info", Source: "relay-watch", Event: "wake.requested"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := New(st, Policy{AuditRetentionDays: 30, AgentLogRetentionDays: 7, DataDir: t.TempDir()})
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["audit_pruned"] != 1 || stats["agent_logs_pruned"] != 1 {
+		t.Fatalf("stats: %+v", stats)
+	}
+	entries, _ := st.ListAudit("", "", 0, 10)
+	if len(entries) != 1 || entries[0].Action != "fresh.evt" {
+		t.Fatalf("audit after prune: %+v", entries)
+	}
+	if _, total, err := st.ListAgentLogsPage(store.AgentLogFilter{PeerID: "alice"}, 10, 0); err != nil || total != 1 {
+		t.Fatalf("agent logs after prune: total=%d err=%v", total, err)
+	}
+}
+
+func TestPurgeLegacyAuditNoiseOnce(t *testing.T) {
+	st := openTest(t)
+	now := int64(1000)
+	success := "peer=alice account=ma1 ok=true vm=UNKNOWN wake_ok=true wake_state=noise_confirmed error= wake_error="
+	failure := "peer=alice account=ma1 ok=false error=session failed"
+	wakeFailure := "peer=alice account=ma1 ok=true vm=RUNNING wake_ok=false wake_state=unconfirmed error= wake_error=noise timeout"
+	for _, e := range []struct {
+		action, detail string
+		ts             int64
+	}{
+		{"muse.auto_wake", success, now - 100},
+		{"muse.auto_wake", failure, now - 90},
+		{"muse.auto_wake", wakeFailure, now - 80},
+		{"peer.offline", "peer=alice offline_secs=600", now - 70},
+		{"peer.offline", "peer=bob offline_secs=300", now - 60},
+		{"peer.status", "peer=alice status=active", now - 50},
+	} {
+		if err := st.AppendAudit("system", e.action, e.detail, e.ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := New(st, Policy{AuditRetentionDays: 30, DataDir: t.TempDir()})
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["audit_noise_purged"] != 3 || stats["audit_auto_wake_purged"] != 1 ||
+		stats["audit_peer_offline_purged"] != 2 {
+		t.Fatalf("stats: %+v", stats)
+	}
+	entries, _ := st.ListAudit("", "", 0, 20)
+	counts := map[string]int{}
+	for _, e := range entries {
+		counts[e.Action]++
+		if e.Action == "retention.purged" &&
+			(!strings.Contains(e.Detail, "muse_auto_wake_success=1") ||
+				!strings.Contains(e.Detail, "peer_offline=2") ||
+				!strings.Contains(e.Detail, "muse_auto_wake_kept=2")) {
+			t.Fatalf("purge audit detail: %q", e.Detail)
+		}
+	}
+	if counts["muse.auto_wake"] != 2 || counts["peer.offline"] != 0 ||
+		counts["peer.status"] != 1 || counts["retention.purged"] != 1 || len(entries) != 4 {
+		t.Fatalf("audit after purge: %+v", counts)
+	}
+	// The failed and error-bearing wake rows survive; the routine success is gone.
+	for _, e := range entries {
+		if e.Action == "muse.auto_wake" && e.Detail == success {
+			t.Fatalf("success row survived: %+v", e)
+		}
+	}
+	// Second pass is a no-op: marker set, zero deletes, no second purge audit.
+	stats, err = r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["audit_noise_purged"] != 0 {
+		t.Fatalf("second run purged: %+v", stats)
+	}
+	entries2, _ := st.ListAudit("", "", 0, 20)
+	if len(entries2) != len(entries) {
+		t.Fatalf("second run changed audit rows: %d -> %d", len(entries), len(entries2))
 	}
 }
 

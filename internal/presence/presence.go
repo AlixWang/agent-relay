@@ -94,14 +94,23 @@ type Service struct {
 	st            store.Store
 	onlineTimeout int64
 	webhookURL    string
-	// OnOffline is called after an online→offline transition is audited and
-	// before the webhook. It must not block: the Muse integration spawns its
-	// own goroutine. Nil disables the hook.
+	// OnOffline is called after an online→offline transition is persisted
+	// (audit row and/or webhook effect) and before the webhook. It must not
+	// block: the Muse integration spawns its own goroutine. Nil disables the
+	// hook.
 	OnOffline func(peerID string, offlineSecs int64)
 
 	mu        sync.Mutex
 	wasOnline map[string]bool
+	// lastOfflineAudit is the last time a peer.offline audit row was written,
+	// per peer. A flapping node can cross the timeout repeatedly; one audit
+	// row per 30 minutes is enough to reconstruct the outage. Restart loss is
+	// acceptable: this is best-effort noise reduction, not a durable contract.
+	lastOfflineAudit map[string]int64
 }
+
+// offlineAuditWindowSecs is the per-peer throttle for peer.offline audit rows.
+const offlineAuditWindowSecs = int64(30 * 60)
 
 // New creates a presence Service.
 func New(st store.Store, onlineTimeoutSecs int64, webhookURL string) *Service {
@@ -109,10 +118,11 @@ func New(st store.Store, onlineTimeoutSecs int64, webhookURL string) *Service {
 		onlineTimeoutSecs = 300
 	}
 	return &Service{
-		st:            st,
-		onlineTimeout: onlineTimeoutSecs,
-		webhookURL:    webhookURL,
-		wasOnline:     map[string]bool{},
+		st:               st,
+		onlineTimeout:    onlineTimeoutSecs,
+		webhookURL:       webhookURL,
+		wasOnline:        map[string]bool{},
+		lastOfflineAudit: map[string]int64{},
 	}
 }
 
@@ -239,12 +249,14 @@ func orEmptyJSON(s string) string {
 	return s
 }
 
-// Sweep checks for online→offline transitions, audits them and optionally
-// enqueues the webhook. Run every 30s from main.
+// Sweep checks for online→offline transitions, records an audit row at most
+// once per peer per 30 minutes, and optionally enqueues the webhook for every
+// transition. Run every 30s from main.
 //
-// The audit row and the durable effect are committed in one transaction. The
-// in-memory baseline is only flipped after that commit succeeds, so a database
-// failure is retried on the next sweep instead of losing the alert.
+// On a non-throttled transition the audit row and durable effect are committed
+// in one transaction. On a throttled one only the effect is enqueued; in both
+// cases the in-memory baseline is flipped only after persistence succeeds, so
+// a database failure is retried on the next sweep instead of losing the alert.
 func (s *Service) Sweep(now int64) {
 	peers, err := s.st.ListPeers()
 	if err != nil {
@@ -265,17 +277,32 @@ func (s *Service) Sweep(now int64) {
 			s.mu.Unlock()
 			continue
 		}
+		lastAudit := s.lastOfflineAudit[p.ID]
 		s.mu.Unlock()
 
 		offlineSecs := now - p.LastSeen
 		kind, key, payload := s.webhookEffect(p.ID, offlineSecs, now)
-		if err := s.st.RecordAuditAndEffect("system", "peer.offline",
+		throttled := lastAudit > 0 && now-lastAudit < offlineAuditWindowSecs
+		if throttled {
+			// Keep the offline notification itself unchanged; only the audit
+			// row is deduplicated. The effect key still changes per
+			// transition, so receivers see every flap.
+			if kind != "" {
+				if err := s.st.EnqueueEffect(kind, key, payload, now); err != nil {
+					log.Printf("presence: offline transition for %s not persisted: %v", p.ID, err)
+					continue
+				}
+			}
+		} else if err := s.st.RecordAuditAndEffect("system", "peer.offline",
 			"peer="+p.ID+formatSecs(offlineSecs), kind, key, payload, now); err != nil {
 			log.Printf("presence: offline transition for %s not persisted: %v", p.ID, err)
 			continue
 		}
 		s.mu.Lock()
 		s.wasOnline[p.ID] = false
+		if !throttled {
+			s.lastOfflineAudit[p.ID] = now
+		}
 		s.mu.Unlock()
 		if s.OnOffline != nil {
 			s.OnOffline(p.ID, offlineSecs)

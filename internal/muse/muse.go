@@ -510,6 +510,24 @@ func (s *Service) Keepalive(ctx context.Context, id string) (*Result, error) {
 func (s *Service) Wake(ctx context.Context, id string) (*Result, error) {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	return s.wakeLocked(ctx, id)
+}
+
+// wakeWithPrior runs one wake while holding opMu and returns the account row
+// exactly as it was before Wake wrote the new state. That pre-wake snapshot is
+// what the auto-wake audit decision compares against.
+func (s *Service) wakeWithPrior(ctx context.Context, id string) (*store.MuseAccount, *Result, error) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	prev, _ := s.st.GetMuseAccount(id)
+	res, err := s.wakeLocked(ctx, id)
+	return prev, res, err
+}
+
+// wakeLocked is Wake's implementation; the caller holds opMu. Splitting it out
+// lets autoWake snapshot the pre-wake row under the same lock, so the
+// "changed since last time" comparison cannot race a concurrent keepalive.
+func (s *Service) wakeLocked(ctx context.Context, id string) (*Result, error) {
 	a, err := s.st.GetMuseAccount(id)
 	if err != nil {
 		return nil, err
@@ -820,17 +838,43 @@ func (s *Service) autoWake(accountID, peerID string) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	res, err := s.Wake(ctx, accountID)
+	// Snapshot the previous wake state before Wake writes the new one. A
+	// routine success that changes nothing is operational noise, not an audit
+	// event; failures and state transitions are what an operator needs.
+	prev, res, err := s.wakeWithPrior(ctx, accountID)
 	now := s.now().Unix()
 	detail := fmt.Sprintf("peer=%s account=%s ok=false", peerID, accountID)
 	if err != nil {
 		detail += " error=" + err.Error()
-	} else {
+	} else if res != nil {
 		detail = fmt.Sprintf("peer=%s account=%s ok=%v vm=%s wake_ok=%v wake_state=%s error=%s wake_error=%s",
 			peerID, accountID, res.OK, res.VMState, res.WakeOK, res.WakeState, res.Error, res.WakeError)
 	}
-	_ = s.st.AppendAudit("system", "muse.auto_wake", truncate(detail, 500), now)
+	if shouldAuditAutoWake(prev, res, err) {
+		_ = s.st.AppendAudit("system", "muse.auto_wake", truncate(detail, 500), now)
+	}
 	log.Printf("muse: auto-wake %s", truncate(detail, 300))
+}
+
+// shouldAuditAutoWake reports whether one auto-wake attempt deserves an audit
+// row. Routine success (ok, unchanged wake state, no errors) is suppressed;
+// anything an operator would want to reconstruct is kept. prev is the account
+// row as read before the wake, so applyRenew's writes cannot mask a change.
+func shouldAuditAutoWake(prev *store.MuseAccount, res *Result, err error) bool {
+	if err != nil || res == nil {
+		return true
+	}
+	if !res.OK {
+		return true
+	}
+	if prev == nil {
+		// We could not prove "unchanged", so keep the row.
+		return true
+	}
+	if res.WakeState != prev.LastWakeState || res.WakeOK != prev.LastWakeOK {
+		return true
+	}
+	return res.Error != "" || res.WakeError != ""
 }
 
 func (s *Service) Status() Status {

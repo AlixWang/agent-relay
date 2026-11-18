@@ -26,11 +26,12 @@
 | `permission_ttl_secs` | int | `600` | `permission_request` 缺省过期秒数（单请求 `expires_in_secs` 60–3600，可夹逼，上限硬顶 3600） |
 | `message_ttl_days` | int | `30` | 线程最近一条消息超过该天数后，全 ack 且超期的消息归档为 `archive/YYYY-MM.jsonl` 后删除；活跃线程整体保留 |
 | `peer_prune_after_days` | int | `7` | 超期未见的 peer 行删除（token 保留，可随时回来） |
-| `audit_retention_days` | int | `90` | 审计日志保留 |
-| `agent_log_retention_days` | int | `30` | Agent 运行日志保留天数（`POST /logs`，独立于审计日志；0=不按天清理） |
+| `audit_retention_days` | int | `30` | 审计日志保留天数（0=不按天清理） |
+| `agent_log_retention_days` | int | `7` | Agent 运行日志保留天数（`POST /logs`，独立于审计日志；0=不按天清理） |
 | `agent_log_rate_per_minute` | int | `60` | 单 peer 每分钟最多上报多少条 Agent 日志事件（超出 `429 + Retry-After`） |
 | `agent_log_max_rows_per_peer` | int | `20000` | 单 peer 保留的 Agent 日志最大行数，超出按最旧删除（0=不限） |
 | `offline_webhook_url` | string | `""` | peer 由在线转离线时 POST `{"kind","key","peer_id","offline_secs","ts"}`，并带 `X-Agent-Relay-Effect-Kind/Key` 头；由持久化 effects 队列重试，接收方按 kind+key 幂等（Phase 3） |
+
 | `max_body_bytes` | int | `1048576` | 请求体上限 1 MiB |
 | `resource_self_registration` | bool | `true` | 是否允许 active 助手向资源中心提交资源（全局开关；关闭后现有资源与授权不受影响） |
 | `resource_pending_max_per_peer` | int | `20` | 单个 peer 的 pending 提交上限 |
@@ -51,6 +52,8 @@
 | `muse_auto_wake` | bool | `true` | 全局自动唤醒开关；账号级 `auto_wake` 还可单独关闭 |
 | `muse_base_url` | string | `"https://muse.ai"` | Muse 控制面地址；生产必须 https，http 仅允许 loopback（测试） |
 | `muse_proxy_url` | string | `""` | 出站代理（http/https/socks5）；空=使用服务环境里的 `HTTPS_PROXY` |
+
+> v1.10.1 日志降噪：审计默认保留 30 天、Agent 日志默认保留 7 天。生产 `config.toml` 若显式设置过这两个键，默认值不会生效，升级时需同步改配置。升级后的首次 retention 会一次性清理历史 `muse.auto_wake` 成功行与全部 `peer.offline` 行（写一条 `retention.purged` 审计记录删行数），失败/带错误的 auto_wake 行保留；该清理由 settings 标记守卫，之后不再扫描全表。
 
 ## Muse 保活（可选）
 
