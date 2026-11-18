@@ -826,6 +826,20 @@ func TestManualKeepaliveBypassesGate(t *testing.T) {
 	}
 }
 
+// waitAutoWakeIdle waits until the background auto-wake for peerID has
+// finished. autoWake clears s.waking in a defer after its last read of the
+// fake clock, so observing the entry disappear (under the same mutex) keeps
+// subsequent test writes to env.clock out of the goroutine's way.
+func waitAutoWakeIdle(t *testing.T, env *testEnv, peerID string) {
+	t.Helper()
+	waitFor(t, func() bool {
+		env.svc.mu.Lock()
+		idle := !env.svc.waking[peerID]
+		env.svc.mu.Unlock()
+		return idle
+	})
+}
+
 func TestMaybeWakeOfflineGuards(t *testing.T) {
 	env := newTestEnv(t, true)
 	a := env.authorize(t, "alice")
@@ -841,9 +855,11 @@ func TestMaybeWakeOfflineGuards(t *testing.T) {
 	}
 
 	// Once the explicit-wake cooldown expires, the hook fires again.
+	waitAutoWakeIdle(t, env, "alice")
 	env.clock += 61
 	env.svc.MaybeWakeOffline("alice", 600)
 	waitFor(t, func() bool { return env.fake.wakeCount() > before })
+	waitAutoWakeIdle(t, env, "alice")
 
 	// Suspended peers are not woken.
 	if err := env.st.UpdatePeerStatus("alice", "suspended"); err != nil {
