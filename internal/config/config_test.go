@@ -248,3 +248,47 @@ func TestMuseConfig(t *testing.T) {
 		t.Fatalf("https root must pass: %v", err)
 	}
 }
+
+func TestMuseDirectChatConfig(t *testing.T) {
+	cfg := Default()
+	if cfg.MuseDirectChatEnabled {
+		t.Fatal("muse_direct_chat_enabled must default to false")
+	}
+	if cfg.MuseChatMaxConcurrent != 4 || cfg.MuseChatDefaultBudgetSecs != 180 ||
+		cfg.MuseChatMaxBudgetSecs != 300 || cfg.MuseChatPollSecs != 2 ||
+		cfg.MuseChatPerPeerPerMinute != 6 || cfg.MuseChatPerPeerPerHour != 30 ||
+		cfg.MuseChatGlobalPerMinute != 30 {
+		t.Fatalf("unexpected direct-chat defaults: %+v", cfg)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("defaults must validate: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("muse_direct_chat_enabled = true\nmuse_chat_max_concurrent = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !loaded.MuseDirectChatEnabled || loaded.MuseChatMaxConcurrent != 2 {
+		t.Fatalf("direct-chat config not applied: %+v", loaded)
+	}
+
+	for _, bad := range []func(*Config){
+		func(c *Config) { c.MuseChatMaxConcurrent = 5 },
+		func(c *Config) { c.MuseChatDefaultBudgetSecs = 29 },
+		func(c *Config) { c.MuseChatDefaultBudgetSecs = 301 },
+		func(c *Config) { c.MuseChatDefaultBudgetSecs = 200; c.MuseChatMaxBudgetSecs = 100 },
+		func(c *Config) { c.MuseChatPollSecs = 0 },
+		func(c *Config) { c.MuseChatPerPeerPerMinute = 0 },
+	} {
+		c := Default()
+		bad(c)
+		if err := c.Validate(); err == nil {
+			t.Fatalf("expected validation error for %+v", c)
+		}
+	}
+}

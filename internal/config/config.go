@@ -110,6 +110,19 @@ type Config struct {
 	MuseAutoWake         bool   `toml:"muse_auto_wake"`
 	MuseBaseURL          string `toml:"muse_base_url"`
 	MuseProxyURL         string `toml:"muse_proxy_url"`
+
+	// Direct Muse agent chat (DESIGN §3–§5). The deploy gate defaults off;
+	// runtime and per-member consent are separate layers. The remaining
+	// values mirror D7/D8/D9/D25 and bound the feature even after the deploy
+	// flag is turned on.
+	MuseDirectChatEnabled     bool `toml:"muse_direct_chat_enabled"`
+	MuseChatMaxConcurrent     int  `toml:"muse_chat_max_concurrent"`
+	MuseChatDefaultBudgetSecs int  `toml:"muse_chat_default_budget_secs"`
+	MuseChatMaxBudgetSecs     int  `toml:"muse_chat_max_budget_secs"`
+	MuseChatPollSecs          int  `toml:"muse_chat_poll_secs"`
+	MuseChatPerPeerPerMinute  int  `toml:"muse_chat_per_peer_per_minute"`
+	MuseChatPerPeerPerHour    int  `toml:"muse_chat_per_peer_per_hour"`
+	MuseChatGlobalPerMinute   int  `toml:"muse_chat_global_per_minute"`
 }
 
 // Default returns the documented defaults (DESIGN §6.1, §10.2).
@@ -156,6 +169,14 @@ func Default() *Config {
 		MuseHTTPTimeoutSecs:          12,
 		MuseAutoWake:                 true,
 		MuseBaseURL:                  "https://muse.ai",
+		MuseDirectChatEnabled:        false,
+		MuseChatMaxConcurrent:        4,
+		MuseChatDefaultBudgetSecs:    180,
+		MuseChatMaxBudgetSecs:        300,
+		MuseChatPollSecs:             2,
+		MuseChatPerPeerPerMinute:     6,
+		MuseChatPerPeerPerHour:       30,
+		MuseChatGlobalPerMinute:      30,
 	}
 }
 
@@ -198,6 +219,10 @@ func Load(path string) (*Config, error) {
 		"muse_keepalive_secs":   true, "muse_wake_cooldown_secs": true,
 		"muse_http_timeout_secs": true, "muse_auto_wake": true,
 		"muse_base_url": true, "muse_proxy_url": true,
+		"muse_direct_chat_enabled": true, "muse_chat_max_concurrent": true,
+		"muse_chat_default_budget_secs": true, "muse_chat_max_budget_secs": true,
+		"muse_chat_poll_secs": true, "muse_chat_per_peer_per_minute": true,
+		"muse_chat_per_peer_per_hour": true, "muse_chat_global_per_minute": true,
 	}
 	for k := range raw {
 		if !known[k] {
@@ -310,6 +335,25 @@ func (c *Config) Validate() error {
 		if err := validateMuseProxyURL(c.MuseProxyURL); err != nil {
 			return err
 		}
+	}
+	// Direct chat bounds are deliberately narrow (D9/D25). Even with the
+	// deploy flag on, v1 cannot be configured above four connections.
+	if c.MuseChatMaxConcurrent < 1 || c.MuseChatMaxConcurrent > 4 {
+		return fmt.Errorf("muse_chat_max_concurrent must be 1-4")
+	}
+	if c.MuseChatDefaultBudgetSecs < 30 || c.MuseChatDefaultBudgetSecs > 300 {
+		return fmt.Errorf("muse_chat_default_budget_secs must be 30-300")
+	}
+	if c.MuseChatMaxBudgetSecs < 30 || c.MuseChatMaxBudgetSecs > 300 ||
+		c.MuseChatDefaultBudgetSecs > c.MuseChatMaxBudgetSecs {
+		return fmt.Errorf("muse_chat_max_budget_secs must be 30-300 and >= default")
+	}
+	if c.MuseChatPollSecs < 1 || c.MuseChatPollSecs > 10 {
+		return fmt.Errorf("muse_chat_poll_secs must be 1-10")
+	}
+	if c.MuseChatPerPeerPerMinute < 1 || c.MuseChatPerPeerPerHour < 1 ||
+		c.MuseChatGlobalPerMinute < 1 {
+		return fmt.Errorf("muse chat rate limits must be >= 1")
 	}
 	return nil
 }

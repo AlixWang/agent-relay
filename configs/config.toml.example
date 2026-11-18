@@ -117,3 +117,17 @@ muse_base_url = "https://muse.ai"
 # Optional outbound proxy (muse.ai blocked / fixed egress needed).
 # Empty = honour HTTPS_PROXY from the service environment.
 muse_proxy_url = ""
+
+# Direct Muse agent chat (design D1-D26). Disabled by default: the deploy gate,
+# settings runtime kill switch, and per-member chat_enabled opt-in must all be
+# on. Keep this false until the reviewed build is installed and a consenting
+# member is ready for the controlled first message. Limits are deliberately
+# hard-capped at the v1 design values.
+muse_direct_chat_enabled = false
+muse_chat_max_concurrent = 4          # 1-4; global active connection hard cap
+muse_chat_default_budget_secs = 180   # 30-300, measured from delivery confirm
+muse_chat_max_budget_secs = 300       # 30-300
+muse_chat_poll_secs = 2               # 1-10; 2s +-200ms jitter in v1
+muse_chat_per_peer_per_minute = 6
+muse_chat_per_peer_per_hour = 30
+muse_chat_global_per_minute = 30
