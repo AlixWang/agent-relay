@@ -104,6 +104,7 @@ type renewResult struct {
 	SessionStatus  string
 	VMID           string
 	VMState        string
+	EndpointURL    string
 	Cookies        map[string]string
 	Exp            map[string]int64
 	CookiesEnc     string
@@ -169,6 +170,7 @@ func (s *Service) renew(ctx context.Context, cookies map[string]string, exp map[
 	res.SessionStatus = sess.Status
 	res.VMID = sess.VMID
 	res.VMState = normalizeVMState(sess.VMState)
+	res.EndpointURL = sess.EndpointURL
 	res.VMStateAt = now
 	res.OK = true
 	res.AuthState = "ok"
@@ -210,6 +212,7 @@ func (s *Service) renew(ctx context.Context, cookies map[string]string, exp map[
 					res.SessionStatus = verify.Status
 					res.VMID = verify.VMID
 					res.VMState = normalizeVMState(verify.VMState)
+					res.EndpointURL = verify.EndpointURL
 					res.VMStateAt = now
 					// vm_state is display-only: it is deliberately NOT a wake
 					// shortcut, even when upstream claims RUNNING. Only a
