@@ -131,7 +131,7 @@ POST /admin/tokens/rotate { peer_id, label? } → { token }
 GET  /admin/messages → 线程列表；?thread=<root> → 明细；?q=<query> → payload 全文搜索
 POST /admin/messages/approve { seq, approve }
 POST /admin/fuse/reset { root_id }
-GET  /admin/audit?actor=&action=&since=&limit=
+GET  /admin/audit?actor=&action=&since=&limit=   （审计保留 30 天）
 GET  /admin/logs?peer=&level=&source=&event=&task_id=&thread=&q=&range=&page=&page_size=&facets=1
                                    → { ok, entries, total, page, page_size, facets?, stats? }（Agent 运行日志，admin）
 GET  /admin/logs/export?<same filters> → NDJSON（最多 10000 行）

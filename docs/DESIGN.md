@@ -188,8 +188,8 @@ SQLite (WAL mode) behind a repository interface so Postgres is a drop-in later. 
 
 - Background job: a thread with no traffic inside `message_ttl` (default 30 days) is considered inactive; its fully-acked messages older than the TTL are moved to an archive table (or exported as JSONL and deleted). A thread with any newer message is pinned so an active conversation does not lose its earlier turns.
 - Peers not seen in `peer_prune_after` (default 7 days) are pruned from the peers table (tokens remain until revoked).
-- Audit log retained longer (default 90 days), exportable from the UI.
-- Agent runtime logs are retained for `agent_log_retention_days` (default 30 days)
+- Audit log retained for `audit_retention_days` (default 30 days), exportable from the UI.
+- Agent runtime logs are retained for `agent_log_retention_days` (default 7 days)
   and capped per peer (`agent_log_max_rows_per_peer`, default 20000); both are
   diagnostic data, separate from the audit trail (§4.11).
 
@@ -302,9 +302,9 @@ Phase 4 adds immutable per-template prompt revisions (`prompt_revisions` with
 Operational diagnostics from the local delivery chain — relay-tail connection
 state, relay-watch spool/wake decisions, worker start/timeout — are uploaded by
 clients to `POST /logs` and stored in `agent_logs`. This is deliberately **not**
-`audit_log`: audit is a low-volume security/action trail with 90-day retention;
+`audit_log`: audit is a low-volume security/action trail with 30-day retention;
 Agent logs are high-volume, short-lived diagnostics with their own retention
-(default 30 days) and per-peer row cap.
+(default 7 days) and per-peer row cap.
 
 The ingest path is best-effort: authentication is the peer token, `peer_id` comes
 from the token (never the body), batches are capped (100 events / 256 KiB), per-
@@ -1419,7 +1419,7 @@ The console JS that follows a job is verified by `make test-ui-js`
 
 - Inactive threads (newest message older than 30 days) → fully-acked messages older than 30 days are archived (JSONL export) and deleted.
 - Peers unseen for 7 days → pruned from the peers table (their tokens persist until revoked, so a returning assistant can still authenticate and re-register presence).
-- Audit log: 90 days online, exportable.
+- Audit log: 30 days online, exportable.
 - A `VACUUM` runs on schedule; DB size is reported on the UI dashboard.
 
 ### 10.3 Observability
@@ -1427,7 +1427,8 @@ The console JS that follows a job is verified by `make test-ui-js`
 - `/health` for liveness; `/peers` doubles as the presence dashboard.
 - `/admin/health` for work projection readiness, per-kind effects pending/due/failed counts and the deterministic policy version/rules.
 - Structured logs (one line per request, like relay v2) to stderr/journald.
-- Audit events for every state change that matters: `peer.registered`, `peer.verified`, `token.revoked`, `message.held`, `fuse.tripped`, `peer.offline`.
+- Audit events for every state change that matters: `peer.registered`, `peer.verified`, `token.revoked`, `message.held`, `fuse.tripped`, `peer.offline` (at most one row per node per 30 minutes), `muse.auto_wake` (failures and wake-state/error changes only; routine successes stay in the process log).
+- The first retention pass after upgrading to v1.10.1 runs a one-time, settings-guarded cleanup of legacy `muse.auto_wake` success rows and all `peer.offline` rows; when it deletes anything it writes one `retention.purged` audit row with the counts, and later passes do not rescan.
 - Optional offline webhook (generic POST) so the human hears about a dead assistant without watching the UI.
 
 ---
