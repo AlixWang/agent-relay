@@ -394,6 +394,10 @@ type Store interface {
 	AppendAudit(actor, action, detail string, ts int64) error
 	ListAudit(actor, action string, since, limit int) ([]*AuditEntry, error)
 	PruneAudit(olderThan int64) (int64, error)
+	// PurgeAuditNoise is a one-time, settings-guarded cleanup of legacy
+	// muse.auto_wake success rows and all peer.offline rows (v1.10.1 noise
+	// reduction). Subsequent calls are no-ops.
+	PurgeAuditNoise(now int64) (*AuditNoisePurge, error)
 	// agent runtime logs (DESIGN §4.11): uploaded diagnostics, not audit.
 	InsertAgentLogs(events []*AgentLog) (accepted, duplicates int, err error)
 	ListAgentLogsPage(f AgentLogFilter, limit, offset int) ([]*AgentLog, int, error)
