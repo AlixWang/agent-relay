@@ -846,7 +846,7 @@ func (s *Service) autoWake(accountID, peerID string) {
 	detail := fmt.Sprintf("peer=%s account=%s ok=false", peerID, accountID)
 	if err != nil {
 		detail += " error=" + err.Error()
-	} else {
+	} else if res != nil {
 		detail = fmt.Sprintf("peer=%s account=%s ok=%v vm=%s wake_ok=%v wake_state=%s error=%s wake_error=%s",
 			peerID, accountID, res.OK, res.VMState, res.WakeOK, res.WakeState, res.Error, res.WakeError)
 	}

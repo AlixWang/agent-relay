@@ -249,12 +249,14 @@ func orEmptyJSON(s string) string {
 	return s
 }
 
-// Sweep checks for online→offline transitions, audits them and optionally
-// enqueues the webhook. Run every 30s from main.
+// Sweep checks for online→offline transitions, records an audit row at most
+// once per peer per 30 minutes, and optionally enqueues the webhook for every
+// transition. Run every 30s from main.
 //
-// The audit row and the durable effect are committed in one transaction. The
-// in-memory baseline is only flipped after that commit succeeds, so a database
-// failure is retried on the next sweep instead of losing the alert.
+// On a non-throttled transition the audit row and durable effect are committed
+// in one transaction. On a throttled one only the effect is enqueued; in both
+// cases the in-memory baseline is flipped only after persistence succeeds, so
+// a database failure is retried on the next sweep instead of losing the alert.
 func (s *Service) Sweep(now int64) {
 	peers, err := s.st.ListPeers()
 	if err != nil {
