@@ -858,6 +858,53 @@ func TestMaybeWakeOfflineGuards(t *testing.T) {
 	}
 }
 
+func TestAutoWakeAuditsOnlyOnFailureOrStateChange(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	audits := func() []*store.AuditEntry {
+		t.Helper()
+		entries, err := env.st.ListAudit("system", "muse.auto_wake", 0, 100)
+		if err != nil {
+			t.Fatalf("list audit: %v", err)
+		}
+		return entries
+	}
+
+	// Authorize left a confirmed wake. Repeating the same successful wake is
+	// routine and must not add an audit row.
+	env.svc.autoWake(a.ID, "alice")
+	if got := audits(); len(got) != 0 {
+		t.Fatalf("routine success wrote audit: %+v", got)
+	}
+
+	// A wake_state transition is a state change worth recording.
+	row, err := env.st.GetMuseAccount(a.ID)
+	if err != nil || row == nil {
+		t.Fatalf("account: %+v (%v)", row, err)
+	}
+	row.LastWakeState = "unconfirmed"
+	row.LastWakeOK = true
+	if err := env.st.SaveMuseAccount(row); err != nil {
+		t.Fatal(err)
+	}
+	env.svc.autoWake(a.ID, "alice")
+	got := audits()
+	if len(got) != 1 || !strings.Contains(got[0].Detail, "wake_state=noise_confirmed") {
+		t.Fatalf("state change audit: %+v", got)
+	}
+
+	// A failed wake always gets an audit row, even when the state is unchanged.
+	env.fake.setSessionCode(http.StatusInternalServerError)
+	env.svc.autoWake(a.ID, "alice")
+	got = audits()
+	if len(got) != 2 || !strings.Contains(got[1].Detail, "ok=false") {
+		t.Fatalf("failure audit: %+v", got)
+	}
+	if !strings.Contains(got[1].Detail, "error=") {
+		t.Fatalf("failure detail missing error: %q", got[1].Detail)
+	}
+}
+
 func TestAutoWakeDisabledGlobally(t *testing.T) {
 	env := newTestEnv(t, false)
 	env.authorize(t, "alice")
