@@ -63,7 +63,10 @@ func noiseNetworkClass(err error) string {
 	if err == nil {
 		return "network"
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
 	}
 	var ne net.Error

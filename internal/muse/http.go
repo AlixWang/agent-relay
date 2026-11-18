@@ -17,9 +17,10 @@ import (
 // sessionResponse is the subset of GET /api/session we rely on. muse2api's
 // probes pin these three fields; everything else is ignored.
 type sessionResponse struct {
-	Status  string `json:"status"`
-	VMID    string `json:"vm_id"`
-	VMState string `json:"vm_state"`
+	Status      string `json:"status"`
+	VMID        string `json:"vm_id"`
+	VMState     string `json:"vm_state"`
+	EndpointURL string `json:"endpoint_url"`
 }
 
 // MuseSessionUnavailable reports an HTTP 200 /api/session response whose
