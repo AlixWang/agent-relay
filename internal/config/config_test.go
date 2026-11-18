@@ -16,6 +16,21 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+// Log noise reduction tightened the default retention windows; the per-peer
+// row cap intentionally stayed at 20000.
+func TestDefaultRetentionWindows(t *testing.T) {
+	cfg := Default()
+	if cfg.AuditRetentionDays != 30 {
+		t.Fatalf("audit_retention_days default = %d, want 30", cfg.AuditRetentionDays)
+	}
+	if cfg.AgentLogRetentionDays != 7 {
+		t.Fatalf("agent_log_retention_days default = %d, want 7", cfg.AgentLogRetentionDays)
+	}
+	if cfg.AgentLogMaxRowsPerPeer != 20000 {
+		t.Fatalf("agent_log_max_rows_per_peer default = %d, want 20000", cfg.AgentLogMaxRowsPerPeer)
+	}
+}
+
 // Script self-update delivery is on by default (so a new server can nudge
 // outdated watch scripts immediately) and can be killed via TOML.
 func TestScriptsUpdateEnabled(t *testing.T) {

@@ -136,6 +136,36 @@ func TestPeerAndAuditPrune(t *testing.T) {
 	}
 }
 
+func TestReducedDefaultWindows(t *testing.T) {
+	st := openTest(t)
+	now := int64(200 * 86400)
+	// Audit: 31 days old is out under 30, 29 days old stays.
+	_ = st.AppendAudit("x", "old.evt", "", now-31*86400)
+	_ = st.AppendAudit("x", "fresh.evt", "", now-29*86400)
+	// Agent logs: 8 days old is out under 7, 6 days old stays.
+	if _, _, err := st.InsertAgentLogs([]*store.AgentLog{
+		{EventID: "old", Ts: now - 8*86400, ReceivedAt: now - 8*86400, PeerID: "alice", Level: "info", Source: "relay-watch", Event: "wake.requested"},
+		{EventID: "fresh", Ts: now - 6*86400, ReceivedAt: now - 6*86400, PeerID: "alice", Level: "info", Source: "relay-watch", Event: "wake.requested"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := New(st, Policy{AuditRetentionDays: 30, AgentLogRetentionDays: 7, DataDir: t.TempDir()})
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["audit_pruned"] != 1 || stats["agent_logs_pruned"] != 1 {
+		t.Fatalf("stats: %+v", stats)
+	}
+	entries, _ := st.ListAudit("", "", 0, 10)
+	if len(entries) != 1 || entries[0].Action != "fresh.evt" {
+		t.Fatalf("audit after prune: %+v", entries)
+	}
+	if _, total, err := st.ListAgentLogsPage(store.AgentLogFilter{PeerID: "alice"}, 10, 0); err != nil || total != 1 {
+		t.Fatalf("agent logs after prune: total=%d err=%v", total, err)
+	}
+}
+
 func TestRejectedHoldArchivedAfterTTL(t *testing.T) {
 	st := openTest(t)
 	dir := t.TempDir()
