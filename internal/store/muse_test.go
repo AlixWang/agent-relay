@@ -16,6 +16,9 @@ func TestMuseAccountsCRUDAndCascades(t *testing.T) {
 		LastWakeAt: 102, LastWakeOK: true,
 		LastWakeError: "", LastWakeState: "running",
 		AutoWake: true, Enabled: true,
+		ChatEnabled: true, ChatConsentAt: 95, ChatConsentBy: "admin",
+		ChatConsentVersion: 1, ChatConsentEvidence: "msg-12345",
+		LastChatAt: 99, LastChatStatus: "replied",
 		AuthorizedAt: 90, UpdatedAt: 102,
 	}
 	if err := st.CreateMuseAccount(a); err != nil {
@@ -27,7 +30,9 @@ func TestMuseAccountsCRUDAndCascades(t *testing.T) {
 	}
 	if got.PeerID != "alice" || got.CookiesEnc != "ciphertext" || got.VMStateAt != 99 ||
 		!got.LastAttemptOK || !got.LastWakeOK || got.LastWakeState != "running" ||
-		got.LastWakeError != "" || !got.AutoWake || !got.Enabled {
+		got.LastWakeError != "" || !got.AutoWake || !got.Enabled ||
+		!got.ChatEnabled || got.ChatConsentAt != 95 || got.ChatConsentVersion != 1 ||
+		got.ChatConsentEvidence != "msg-12345" || got.LastChatAt != 99 || got.LastChatStatus != "replied" {
 		t.Fatalf("round-trip: %+v", got)
 	}
 	byPeer, err := st.GetMuseAccountByPeer("alice")
@@ -113,5 +118,54 @@ func TestPrunePeersRemovesMuseAccounts(t *testing.T) {
 	}
 	if got, _ := st.GetMuseAccount("ma_fresh"); got == nil {
 		t.Fatal("fresh binding was pruned")
+	}
+}
+
+func TestMuseChatConsentIsTransactionalAndNarrow(t *testing.T) {
+	st := openTest(t)
+	mustPeer(t, st, "alice")
+	a := &MuseAccount{ID: "ma_chat", PeerID: "alice", AuthState: "ok", Enabled: true,
+		AutoWake: true, AuthorizedAt: 1, UpdatedAt: 1}
+	if err := st.CreateMuseAccount(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMuseChatConsent(a.ID, true, 100, "admin", "member said yes", 1,
+		"admin", "muse.chat.opt_in", "account=ma_chat peer=alice consent=1", 100); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	got, _ := st.GetMuseAccount(a.ID)
+	if !got.ChatEnabled || got.ChatConsentAt != 100 || got.ChatConsentBy != "admin" ||
+		got.ChatConsentVersion != 1 || got.ChatConsentEvidence != "member said yes" {
+		t.Fatalf("consent round-trip: %+v", got)
+	}
+	rows, err := st.ListAudit("", "muse.chat.opt_in", 0, 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("audit with consent: %v %+v", err, rows)
+	}
+	// Disabling keeps the historical consent metadata.
+	if err := st.SetMuseChatConsent(a.ID, false, 200, "", "", 0,
+		"admin", "muse.chat.opt_out", "account=ma_chat peer=alice", 200); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	got, _ = st.GetMuseAccount(a.ID)
+	if got.ChatEnabled || got.ChatConsentAt != 100 || got.ChatConsentEvidence != "member said yes" {
+		t.Fatalf("opt-out erased consent history: %+v", got)
+	}
+	// A missing account must not leave an audit row behind.
+	if err := st.SetMuseChatConsent("ma_missing", true, 300, "admin", "evidence", 1,
+		"admin", "muse.chat.opt_in", "account=missing", 300); err == nil {
+		t.Fatal("expected unknown account error")
+	}
+	rows, _ = st.ListAudit("", "muse.chat.opt_in", 0, 10)
+	if len(rows) != 1 {
+		t.Fatalf("failed transaction wrote audit: %+v", rows)
+	}
+
+	if err := st.SetMuseChatStatus(a.ID, 400, "timeout"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.GetMuseAccount(a.ID)
+	if got.LastChatAt != 400 || got.LastChatStatus != "timeout" || got.UpdatedAt != 1 {
+		t.Fatalf("narrow status update: %+v", got)
 	}
 }

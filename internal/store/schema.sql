@@ -320,12 +320,30 @@ CREATE TABLE IF NOT EXISTS muse_accounts (
     last_wake_state   TEXT DEFAULT '',
     auto_wake         INTEGER DEFAULT 1,
     enabled           INTEGER DEFAULT 1,
+    -- Direct Muse chat is a separate consent (D3/D4/D22): keepalive
+    -- authorization never implies permission for the server to speak as the
+    -- member. Every account starts disabled; reauthorization/peer rebinding
+    -- resets these in the service layer.
+    chat_enabled          INTEGER DEFAULT 0,
+    chat_consent_at       INTEGER DEFAULT 0,
+    chat_consent_by       TEXT DEFAULT '',
+    chat_consent_version  INTEGER DEFAULT 0,
+    chat_consent_evidence TEXT DEFAULT '',
+    last_chat_at          INTEGER DEFAULT 0,
+    last_chat_status      TEXT DEFAULT '',
     authorized_at     INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL
 );
 ALTER TABLE muse_accounts ADD COLUMN last_wake_error TEXT DEFAULT '';
 ALTER TABLE muse_accounts ADD COLUMN last_wake_state TEXT DEFAULT '';
 ALTER TABLE muse_accounts ADD COLUMN vm_state_at INTEGER DEFAULT 0;
+ALTER TABLE muse_accounts ADD COLUMN chat_enabled INTEGER DEFAULT 0;
+ALTER TABLE muse_accounts ADD COLUMN chat_consent_at INTEGER DEFAULT 0;
+ALTER TABLE muse_accounts ADD COLUMN chat_consent_by TEXT DEFAULT '';
+ALTER TABLE muse_accounts ADD COLUMN chat_consent_version INTEGER DEFAULT 0;
+ALTER TABLE muse_accounts ADD COLUMN chat_consent_evidence TEXT DEFAULT '';
+ALTER TABLE muse_accounts ADD COLUMN last_chat_at INTEGER DEFAULT 0;
+ALTER TABLE muse_accounts ADD COLUMN last_chat_status TEXT DEFAULT '';
 -- Resource hub (§4.12, ADR 0004/0005): register once, grant per peer, distribute.
 -- resource_revisions is append-only history; resources points each (kind,name)
 -- at its live revision. content is AES-GCM ciphertext for kind='secret' (key in
