@@ -58,6 +58,10 @@ type Options struct {
 	DataDir           string
 	AutoWake          bool
 	Now               func() time.Time
+	// GatewayURL overrides the shared hatch WSS endpoint. Empty selects the
+	// production host. It exists so tests can point at a loopback Noise server;
+	// there is no config key for it.
+	GatewayURL string
 }
 
 // Account is the write-only-safe view of one authorization. It intentionally
@@ -147,12 +151,13 @@ type Status struct {
 // so concurrent keepalive/settings updates must not interleave) and prevents
 // two full keepalive runs through runMu.
 type Service struct {
-	st      store.Store
-	opts    Options
-	key     []byte
-	baseURL string
-	client  *http.Client
-	now     func() time.Time
+	st         store.Store
+	opts       Options
+	key        []byte
+	baseURL    string
+	gatewayURL string
+	client     *http.Client
+	now        func() time.Time
 
 	mu         sync.Mutex
 	runMu      sync.Mutex
@@ -200,6 +205,10 @@ func New(st store.Store, opt Options) (*Service, error) {
 	if opt.KeepaliveInterval < 0 {
 		opt.KeepaliveInterval = 0
 	}
+	gatewayURL, err := normalizeGatewayURL(opt.GatewayURL)
+	if err != nil {
+		return nil, err
+	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	if strings.TrimSpace(opt.ProxyURL) != "" {
 		pu, err := url.Parse(opt.ProxyURL)
@@ -223,11 +232,12 @@ func New(st store.Store, opt Options) (*Service, error) {
 	opt.HTTPTimeout = timeout
 	opt.WakeCooldown = cooldown
 	s := &Service{
-		st:      st,
-		opts:    opt,
-		key:     key,
-		baseURL: base,
-		now:     now,
+		st:         st,
+		opts:       opt,
+		key:        key,
+		baseURL:    base,
+		gatewayURL: gatewayURL,
+		now:        now,
 		client: &http.Client{
 			Timeout:   timeout,
 			Transport: tr,
@@ -1038,6 +1048,29 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
+}
+
+// normalizeGatewayURL validates the Noise endpoint. Production must use wss;
+// ws is allowed only on loopback so tests never require a TLS certificate.
+func normalizeGatewayURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return noiseGatewayDefault, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" {
+		return "", errors.New("muse: gateway URL is not valid")
+	}
+	switch u.Scheme {
+	case "wss":
+	case "ws":
+		if !isLoopbackHost(u.Hostname()) {
+			return "", errors.New("muse: gateway URL must use wss unless loopback")
+		}
+	default:
+		return "", errors.New("muse: gateway URL must be ws(s)")
+	}
+	return raw, nil
 }
 
 func validateBaseURL(raw string) error {
