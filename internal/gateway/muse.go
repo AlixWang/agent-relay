@@ -35,14 +35,23 @@ func museSessionOK(a *muse.Account) bool {
 
 // museWakeState derives the operator-facing wake state. A recorded failed wake
 // must stay unconfirmed even if the peer heartbeat later reappears: only a
-// wake that actually verified RUNNING may claim "已上线".
+// wake that actually verified the VM may claim "已上线". noise_confirmed is
+// already proven by the Noise handshake + RPC, so it must not wait out the
+// 120s heartbeat window used by the legacy RUNNING path.
 func museWakeState(a *muse.Account, p *presence.PeerView, now int64) string {
 	if a == nil {
 		return "none"
 	}
 	if a.LastWakeError != "" || a.LastWakeState == "unconfirmed" ||
-		(a.LastWakeState == "" && a.LastWakeAt > 0 && !a.LastWakeOK) {
+		(a.LastWakeState == "" && a.LastWakeAt > 0 && !a.LastWakeOK) ||
+		(a.LastWakeState == "noise_confirmed" && !a.LastWakeOK) {
 		return "unconfirmed"
+	}
+	if a.LastWakeOK && a.LastWakeState == "noise_confirmed" {
+		if a.LastWakeAt > 0 && p != nil && p.LastSeen >= a.LastWakeAt {
+			return "recovered"
+		}
+		return "noise_confirmed"
 	}
 	if a.LastWakeAt <= 0 {
 		if a.LastWakeState == "running" {

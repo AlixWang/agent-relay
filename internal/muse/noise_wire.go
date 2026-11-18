@@ -587,7 +587,7 @@ func (r *chunkReassembler) Feed(f *noiseTransportFrame) ([]byte, bool, error) {
 		r.remove(f.ChunkID)
 		return nil, false, fmt.Errorf("noise chunks for id %d repeat chunk_index %d", f.ChunkID, idx)
 	}
-	if a.size+len(f.Payload) > maxNoiseAssembly || r.buffered+len(f.Payload) > maxNoiseAssembly*maxNoisePending {
+	if a.size+len(f.Payload) > maxNoiseAssembly || r.buffered+len(f.Payload) > maxNoiseAssembly {
 		r.remove(f.ChunkID)
 		return nil, false, errors.New("noise chunk assembly exceeds the buffer limit")
 	}

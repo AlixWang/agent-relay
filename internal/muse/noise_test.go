@@ -138,6 +138,28 @@ func newNoiseResult() *renewResult {
 	}
 }
 
+func TestVerifyNoiseHonorsCancellation(t *testing.T) {
+	_, httpSrv := newNoiseHTTPFixture(t)
+	ws := musetest.New(t)
+	svc := newNoiseService(httpSrv.URL, ws.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	err := svc.verifyNoise(ctx, newNoiseResult(), &sessionResponse{Status: "assigned", VMID: "vm-1"})
+	if err == nil {
+		t.Fatal("expected cancellation failure")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("cancellation was not honored promptly: %s", elapsed)
+	}
+	if !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("error should say canceled: %v", err)
+	}
+	if ws.Dials() != 0 {
+		t.Fatalf("cancelled verify dialed %d times", ws.Dials())
+	}
+}
+
 func TestVerifyNoiseSuccess(t *testing.T) {
 	httpFake, httpSrv := newNoiseHTTPFixture(t)
 	ws := musetest.New(t)

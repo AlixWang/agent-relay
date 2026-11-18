@@ -62,7 +62,7 @@ func (s *Service) verifyNoise(ctx context.Context, res *renewResult, sess *sessi
 		dialCancel()
 		if derr != nil {
 			last = noiseAsError(derr)
-			if !last.Retryable || attempt == noiseMaxAttempts {
+			if budget.Err() != nil || !last.Retryable || attempt == noiseMaxAttempts {
 				break
 			}
 			continue
@@ -77,7 +77,7 @@ func (s *Service) verifyNoise(ctx context.Context, res *renewResult, sess *sessi
 			return nil
 		}
 		last = noiseAsError(herr)
-		if !last.Retryable || attempt == noiseMaxAttempts {
+		if budget.Err() != nil || !last.Retryable || attempt == noiseMaxAttempts {
 			break
 		}
 	}
@@ -140,7 +140,7 @@ func (s *Service) fetchTokenValue(ctx context.Context, res *renewResult, stage, 
 	call := func() (*http.Response, []byte, error) {
 		reqCtx, cancel := context.WithTimeout(ctx, noiseTokenTimeout)
 		defer cancel()
-		return s.doNoiseRequest(reqCtx, res, path, body, bearer)
+		return s.doNoiseRequest(reqCtx, res, stage, path, body, bearer)
 	}
 	resp, raw, err := call()
 	if err != nil {
@@ -218,7 +218,7 @@ func newNoiseSessionError(err error) *noiseError {
 // doNoiseRequest is a minimal JSON/empty-body POST with the browser headers
 // Muse expects. It reuses s.client (proxy, TLS, CheckRedirect) and caps the
 // body at 1 MiB like the rest of the muse package.
-func (s *Service) doNoiseRequest(ctx context.Context, res *renewResult, path string,
+func (s *Service) doNoiseRequest(ctx context.Context, res *renewResult, stage, path string,
 	body []byte, bearer string) (*http.Response, []byte, error) {
 
 	var rdr io.Reader
@@ -227,7 +227,7 @@ func (s *Service) doNoiseRequest(ctx context.Context, res *renewResult, path str
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+path, rdr)
 	if err != nil {
-		return nil, nil, newNoiseError("auth", "request", false, err)
+		return nil, nil, newNoiseError(stage, "request", false, err)
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "application/json")
@@ -239,15 +239,15 @@ func (s *Service) doNoiseRequest(ctx context.Context, res *renewResult, path str
 	if len(res.Cookies) > 0 {
 		req.Header.Set("Cookie", cookieHeader(res.Cookies))
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
+	// muse-cli's _hatch_headers always sends this, even for auth/check's
+	// intentionally empty body. The body itself must stay empty (no `{}`).
+	req.Header.Set("Content-Type", "application/json")
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, nil, newNoiseError("auth", noiseNetworkClass(err), false, err)
+		return nil, nil, newNoiseError(stage, noiseNetworkClass(err), false, err)
 	}
 	defer resp.Body.Close()
 	// Merge rotation before looking at the status: a 401/403 can also set a
@@ -255,7 +255,7 @@ func (s *Service) doNoiseRequest(ctx context.Context, res *renewResult, path str
 	mergeSetCookies(res.Cookies, res.Exp, resp.Cookies(), s.now().Unix())
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, nil, newNoiseError("auth", noiseNetworkClass(err), false, err)
+		return nil, nil, newNoiseError(stage, noiseNetworkClass(err), false, err)
 	}
 	return resp, raw, nil
 }

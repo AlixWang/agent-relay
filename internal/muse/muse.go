@@ -4,7 +4,8 @@
 // The control plane is deliberately tiny: GET /api/session refreshes the
 // hatch_sess/hatch_vml cookies and reports the current vm_id/vm_state, and
 // POST /api/hatch/vm/wake asks Muse to boot the sandbox. Waking is never
-// inferred from the wake HTTP 200: a second /api/session must report RUNNING.
+// inferred from the wake HTTP 200: a second /api/session must be assigned and
+// the VM must complete a Noise XX handshake plus one read-only RPC.
 package muse
 
 import (
@@ -102,9 +103,9 @@ type Account struct {
 }
 
 // Result is one keepalive/wake attempt. OK means the Muse session was valid;
-// WakeOK separately proves the VM reached RUNNING. Error is session/auth/HTTP
-// scoped; WakeError is wake scoped, so a failed wake does not turn a healthy
-// session result into a general failure.
+// WakeOK separately proves the VM completed the Noise verification. Error is
+// session/auth/HTTP scoped; WakeError is wake scoped, so a failed wake does not
+// turn a healthy session result into a general failure.
 type Result struct {
 	ID            string `json:"id"`
 	PeerID        string `json:"peer_id"`
@@ -158,6 +159,10 @@ type Service struct {
 	gatewayURL string
 	client     *http.Client
 	now        func() time.Time
+
+	// verifyWake is verifyNoise in production. Tests that exercise the renew
+	// state machine without a Noise server override it.
+	verifyWake func(context.Context, *renewResult, *sessionResponse) error
 
 	mu         sync.Mutex
 	runMu      sync.Mutex
@@ -249,6 +254,7 @@ func New(st store.Store, opt Options) (*Service, error) {
 		backoff:    map[string]int64{},
 		wakeEvents: map[string]int64{},
 	}
+	s.verifyWake = s.verifyNoise
 	if created {
 		if accounts, err := st.ListMuseAccounts(); err == nil && len(accounts) > 0 {
 			log.Printf("WARN: muse: created a new cookie key; %d existing authorization(s) must be re-entered", len(accounts))

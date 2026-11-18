@@ -55,11 +55,15 @@
 ## Muse 保活（可选）
 
 控制台的「Muse 保活」页为每个 muse 成员绑定一个 muse.ai 账号（粘贴
-`hatch_sess` 登录态即可，`hatch_vml` 可选）。服务端只调用两个端点：
+`hatch_sess` 登录态即可，`hatch_vml` 可选）。服务端调用的控制面端点：
 
-- `GET /api/session`：续签 `hatch_vml` / `hatch_sess`，返回当前 `vm_id` / `vm_state`；
-- `POST /api/hatch/vm/wake`：唤醒沙盒 VM；HTTP 200 只算“请求已接受”，
-  必须再次 `/api/session` 复核 `vm_state == RUNNING` 才算成功。
+- `GET /api/session`：续签 `hatch_vml` / `hatch_sess`，返回当前 `vm_id` /
+  `vm_state` / `endpoint_url`；
+- `POST /api/hatch/vm/wake`：唤醒沙盒 VM；HTTP 200 只算“请求已接受”；
+- `POST /api/auth/check` → `POST /api/hatch/token`：唤醒后取一次性 hatch token；
+- `wss://hatch.metaaivm.com/v1/noise`：完成 Noise XX 握手并调用一次只读 RPC
+  （`chat.unread_count`，404/405 时 `identity`）。`vm_state` 只做展示，不参与
+  唤醒成功判定；最多 3 次拨号、25 秒总预算。
 
 行为约定：
 

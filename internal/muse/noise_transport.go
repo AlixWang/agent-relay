@@ -166,7 +166,7 @@ func (c *noiseConn) handshake(ctx context.Context, timeout time.Duration) error 
 	if err != nil {
 		return newNoiseError("handshake", "write1", false, err)
 	}
-	if err := c.write(ctx, m1); err != nil {
+	if err := c.write(hctx, m1); err != nil {
 		return err
 	}
 	typ, m2, err := c.ws.Read(hctx)
@@ -191,7 +191,7 @@ func (c *noiseConn) handshake(ctx context.Context, timeout time.Duration) error 
 	if err != nil {
 		return newNoiseError("handshake", "write3", false, err)
 	}
-	if err := c.write(ctx, m3); err != nil {
+	if err := c.write(hctx, m3); err != nil {
 		return err
 	}
 	if send == nil || recv == nil {
@@ -228,7 +228,7 @@ func (c *noiseConn) write(ctx context.Context, payload []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if err := c.ws.Write(ctx, websocket.MessageBinary, payload); err != nil {
-		return newNoiseError("dial", noiseNetworkClass(err), true, err)
+		return newNoiseError("handshake", noiseNetworkClass(err), true, err)
 	}
 	return nil
 }
