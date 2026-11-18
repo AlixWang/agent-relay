@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,43 @@ import (
 	"github.com/AlixWang/agent-relay/internal/web"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// safeRecorder serializes handler writes against test-side body reads. The
+// plain httptest.ResponseRecorder is not safe for "read while the SSE handler
+// is still writing", which is exactly what the held-stream regression tests
+// do; the race detector rightly flags it.
+type safeRecorder struct {
+	*httptest.ResponseRecorder
+	mu sync.Mutex
+}
+
+func newSafeRecorder() *safeRecorder {
+	return &safeRecorder{ResponseRecorder: httptest.NewRecorder()}
+}
+
+func (r *safeRecorder) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ResponseRecorder.Write(p)
+}
+
+func (r *safeRecorder) WriteHeader(code int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ResponseRecorder.WriteHeader(code)
+}
+
+func (r *safeRecorder) Flush() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ResponseRecorder.Flush()
+}
+
+func (r *safeRecorder) bodyString() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ResponseRecorder.Body.String()
+}
 
 type fixture struct {
 	srv *Server
@@ -1050,7 +1088,7 @@ func TestStreamBacklogAndAuth(t *testing.T) {
 	// No hub wired in fixture: 503.
 	req := httptest.NewRequest("GET", "/messages/stream?for=alice&since=0", nil)
 	req.Header.Set("Authorization", "Bearer "+f.tok["alice"])
-	rec := httptest.NewRecorder()
+	rec := newSafeRecorder()
 	f.mux.ServeHTTP(rec, req)
 	if rec.Code != 503 {
 		t.Fatalf("nil hub should 503, got %d", rec.Code)
@@ -1068,20 +1106,20 @@ func TestStreamBacklogAndAuth(t *testing.T) {
 	req = httptest.NewRequest("GET", "/messages/stream?for=alice&since=0", nil)
 	req = req.WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer "+f.tok["alice"])
-	rec = httptest.NewRecorder()
+	rec = newSafeRecorder()
 	done := make(chan struct{})
 	go func() { f.mux.ServeHTTP(rec, req); close(done) }()
 	// Wait for the backlog frame, then cancel.
 	deadline := time.Now().Add(4 * time.Second)
-	for !strings.Contains(rec.Body.String(), `"id":"s1"`) {
+	for !strings.Contains(rec.bodyString(), `"id":"s1"`) {
 		if time.Now().After(deadline) {
-			t.Fatalf("no backlog frame: %q", rec.Body.String())
+			t.Fatalf("no backlog frame: %q", rec.bodyString())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	cancel()
 	<-done
-	body := rec.Body.String()
+	body := rec.bodyString()
 	if !strings.Contains(body, "event: message") || !strings.Contains(body, "retry: 3000") {
 		t.Fatalf("frame shape: %q", body)
 	}
@@ -1117,7 +1155,7 @@ func TestStreamLivePushAndResume(t *testing.T) {
 	req := httptest.NewRequest("GET", "/messages/stream?for=bob&since=0", nil)
 	req = req.WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer "+f.tok["bob"])
-	rec := httptest.NewRecorder()
+	rec := newSafeRecorder()
 	done := make(chan struct{})
 	go func() { f.mux.ServeHTTP(rec, req); close(done) }()
 	// Give the handler a moment to subscribe, then send.
@@ -1128,9 +1166,9 @@ func TestStreamLivePushAndResume(t *testing.T) {
 		t.Fatalf("send: %+v", out)
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(rec.Body.String(), `"id":"live1"`) {
+	for !strings.Contains(rec.bodyString(), `"id":"live1"`) {
 		if time.Now().After(deadline) {
-			t.Fatalf("no live frame: %q", rec.Body.String())
+			t.Fatalf("no live frame: %q", rec.bodyString())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -1150,12 +1188,12 @@ func TestStreamLivePushAndResume(t *testing.T) {
 	req2 := httptest.NewRequest("GET", "/messages/stream?for=bob&since="+itoa(maxSeq), nil)
 	req2 = req2.WithContext(ctx2)
 	req2.Header.Set("Authorization", "Bearer "+f.tok["bob"])
-	rec2 := httptest.NewRecorder()
+	rec2 := newSafeRecorder()
 	done2 := make(chan struct{})
 	go func() { f.mux.ServeHTTP(rec2, req2); close(done2) }()
 	<-done2 // ctx timeout ends it
-	if strings.Contains(rec2.Body.String(), `"id":"live1"`) {
-		t.Fatalf("resume replayed old item: %q", rec2.Body.String())
+	if strings.Contains(rec2.bodyString(), `"id":"live1"`) {
+		t.Fatalf("resume replayed old item: %q", rec2.bodyString())
 	}
 }
 
@@ -1454,7 +1492,7 @@ func TestStreamLiveFrameWithoutDisconnect(t *testing.T) {
 	req := httptest.NewRequest("GET", "/messages/stream?for=bob&since=0", nil)
 	req = req.WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer "+f.tok["bob"])
-	rec := httptest.NewRecorder()
+	rec := newSafeRecorder()
 	done := make(chan struct{})
 	go func() { f.mux.ServeHTTP(rec, req); close(done) }()
 	time.Sleep(200 * time.Millisecond) // let it subscribe
@@ -1465,14 +1503,14 @@ func TestStreamLiveFrameWithoutDisconnect(t *testing.T) {
 	// The frame must appear while the connection is still open (cancel only
 	// fires at the deadline — if the handler returned early, done closes).
 	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(rec.Body.String(), `"id":"live-held"`) {
+	for !strings.Contains(rec.bodyString(), `"id":"live-held"`) {
 		select {
 		case <-done:
-			t.Fatalf("stream closed before live frame: %q", rec.Body.String())
+			t.Fatalf("stream closed before live frame: %q", rec.bodyString())
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no live frame on held connection: %q", rec.Body.String())
+			t.Fatalf("no live frame on held connection: %q", rec.bodyString())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
