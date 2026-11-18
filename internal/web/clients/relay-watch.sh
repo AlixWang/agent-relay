@@ -11,26 +11,162 @@
 #   二选一：同一时间只跑这一种接收方式，不要同时再跑 relay-poll.sh
 #   （两者都会写 .last_seq，混用会互相覆盖游标）。
 #
-# ============ CONFIG（按你的环境改这里） ============
-RELAY_URL="${RELAY_URL:-<RELAY_URL>}"      # 中继地址，如 https://relay.example.com
-BASE="${BASE:-$HOME/workspace/task-relay}" # 工作目录
-# 脚本自身版本：服务端从内嵌副本解析同一个常量作为唯一事实来源。
-# 发布脚本时手动 bump；比对用精确相等（不做 semver 大小比较）。
-WATCH_VERSION="1.0.1"
-SCRIPT_KIND="muse-watch"
-# 身份与 token 由 daemon 直接读取，本脚本不碰 token：
-#   $BASE/identity   单行身份，如 <YOUR_IDENTITY>
-#   $BASE/.token     个人 token，chmod 600
-# ====================================================
+# DO NOT EDIT; config in $BASE/relay-watch.env, adapter in $BASE/relay-watch.local.sh.
+# 节点差异不再改脚本正文：
+#   - 配置（数据）：$BASE/relay-watch.env，一行一个 KEY=VALUE；
+#     优先级：环境变量 > 配置文件 > 内置默认。
+#   - 适配（可选代码）：$BASE/relay-watch.local.sh，定义 watch_wake/watch_silent；
+#     自更新只替换本文件，配置与覆盖层永不被碰。
+#
+# 配置键（只解析这些，未知键忽略，不执行任意代码）：
+#   RELAY_URL=...              必填；缺失时 fail closed（stderr + 每小时一条日志 + silent）
+#   SCRIPT_AUTO_UPDATE=1       0 = 不自动更新（仍上报并在有新版时提示一次）
+#   AGENT_LOG_UPLOAD=1         Agent 日志上报开关
+#   AGENT_LOG_LEVEL=info       error|warn|info|debug
+#   AGENT_LOG_MAX_BYTES=1048576
+#   AGENT_LOG_BATCH=20
+#   RELAY_DAEMON_PROXY=inherit inherit|strip|direct（daemon 启动时的代理处理）
+#   WATCH_WAKE_MODE=auto       auto|hatch|generic|overlay
+#   WATCH_RUNTIME_LOG=0        1 = 除本地 log_event 外，再镜像一条 Hatch 日志
+#
+# 适配器契约（core 拥有，永不 exit）：
+#   wake(reason, payload) -> 0 已交接（可推进 offset）| 1 未交接（下一 tick 重读）
+#   silent(reason)        -> 0
+#   log(event, fields_json, message?) -> 0
+# core 的 log 只走本地 log_event 链路，不交给 runtime；Hatch runtime 的 log 仅在
+# WATCH_RUNTIME_LOG=1 时另镜像一条。覆盖层接口：watch_wake / watch_silent；
+# 内置适配器接口：adapter_wake / adapter_silent。offset 只在 wake 返回 0 后推进。
+#
+# 状态：$BASE/.script_version 等；自更新只替换 $SELF（先写 $SELF.rollback），
+# 永不触碰 $BASE/relay-watch.env 与 $BASE/relay-watch.local.sh。
 #
 set -euo pipefail
 
-# SCRIPT_AUTO_UPDATE=0 disables silent self-update; the update is still
-# reported once per target version so a worker can apply it manually.
-SCRIPT_AUTO_UPDATE="${SCRIPT_AUTO_UPDATE:-1}"
+# ---- 常量（服务端从内嵌副本解析 WATCH_VERSION，作为唯一事实来源） ----
+WATCH_VERSION="1.1.0"
+SCRIPT_KIND="muse-watch"
+
+# ---- 0. BASE：环境变量 > 默认 ----
+BASE="${BASE:-$HOME/workspace/task-relay}"
 SELF="$(readlink -f "$0" 2>/dev/null || true)"
 [ -n "$SELF" ] || SELF="$0"
 
+# ---- 1. 配置：环境变量 > $BASE/relay-watch.env > 默认 ----
+# 只按 KEY=VALUE 解析已知键；绝不 source 配置文件。
+CONFIG_RELAY_URL=""
+CONFIG_SCRIPT_AUTO_UPDATE=""
+CONFIG_AGENT_LOG_UPLOAD=""
+CONFIG_AGENT_LOG_LEVEL=""
+CONFIG_AGENT_LOG_MAX_BYTES=""
+CONFIG_AGENT_LOG_BATCH=""
+CONFIG_RELAY_DAEMON_PROXY=""
+CONFIG_WATCH_WAKE_MODE=""
+CONFIG_WATCH_RUNTIME_LOG=""
+CONFIG_WARNINGS=""
+
+trim() {
+  local s="${1-}"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+config_warn() {
+  CONFIG_WARNINGS="${CONFIG_WARNINGS}${1}|${2}"$'\n'
+}
+
+config_store() {
+  case "$1" in
+    RELAY_URL) CONFIG_RELAY_URL="$2" ;;
+    SCRIPT_AUTO_UPDATE) CONFIG_SCRIPT_AUTO_UPDATE="$2" ;;
+    AGENT_LOG_UPLOAD) CONFIG_AGENT_LOG_UPLOAD="$2" ;;
+    AGENT_LOG_LEVEL) CONFIG_AGENT_LOG_LEVEL="$2" ;;
+    AGENT_LOG_MAX_BYTES) CONFIG_AGENT_LOG_MAX_BYTES="$2" ;;
+    AGENT_LOG_BATCH) CONFIG_AGENT_LOG_BATCH="$2" ;;
+    RELAY_DAEMON_PROXY) CONFIG_RELAY_DAEMON_PROXY="$2" ;;
+    WATCH_WAKE_MODE) CONFIG_WATCH_WAKE_MODE="$2" ;;
+    WATCH_RUNTIME_LOG) CONFIG_WATCH_RUNTIME_LOG="$2" ;;
+  esac
+}
+
+load_config_file() {
+  local file="$BASE/relay-watch.env" line key val
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    line="$(trim "$line")"
+    case "$line" in
+      ''|'#'*) continue ;;
+      export\ *) line="${line#export }"; line="$(trim "$line")" ;;
+    esac
+    case "$line" in
+      *=*) ;;
+      *) config_warn "config.invalid_line" "忽略无法解析的配置行"; continue ;;
+    esac
+    key="$(trim "${line%%=*}")"
+    val="$(trim "${line#*=}")"
+    case "$val" in
+      \"*\") val="${val#\"}"; val="${val%\"}" ;;
+      \'*\') val="${val#\'}"; val="${val%\'}" ;;
+    esac
+    case "$key" in
+      RELAY_URL|SCRIPT_AUTO_UPDATE|AGENT_LOG_UPLOAD|AGENT_LOG_LEVEL|AGENT_LOG_MAX_BYTES|AGENT_LOG_BATCH|RELAY_DAEMON_PROXY|WATCH_WAKE_MODE|WATCH_RUNTIME_LOG)
+        config_store "$key" "$val"
+        ;;
+      *) config_warn "config.unknown_key" "忽略未知配置键: $key" ;;
+    esac
+  done < "$file"
+}
+
+load_config_file
+
+# 环境变量已设置时优先；否则用配置文件值；最后落到内置默认。
+[ -n "${RELAY_URL+x}" ] || RELAY_URL="${CONFIG_RELAY_URL-}"
+[ -n "${SCRIPT_AUTO_UPDATE+x}" ] || SCRIPT_AUTO_UPDATE="${CONFIG_SCRIPT_AUTO_UPDATE-}"
+[ -n "${AGENT_LOG_UPLOAD+x}" ] || AGENT_LOG_UPLOAD="${CONFIG_AGENT_LOG_UPLOAD-}"
+[ -n "${AGENT_LOG_LEVEL+x}" ] || AGENT_LOG_LEVEL="${CONFIG_AGENT_LOG_LEVEL-}"
+[ -n "${AGENT_LOG_MAX_BYTES+x}" ] || AGENT_LOG_MAX_BYTES="${CONFIG_AGENT_LOG_MAX_BYTES-}"
+[ -n "${AGENT_LOG_BATCH+x}" ] || AGENT_LOG_BATCH="${CONFIG_AGENT_LOG_BATCH-}"
+[ -n "${RELAY_DAEMON_PROXY+x}" ] || RELAY_DAEMON_PROXY="${CONFIG_RELAY_DAEMON_PROXY-}"
+[ -n "${WATCH_WAKE_MODE+x}" ] || WATCH_WAKE_MODE="${CONFIG_WATCH_WAKE_MODE-}"
+[ -n "${WATCH_RUNTIME_LOG+x}" ] || WATCH_RUNTIME_LOG="${CONFIG_WATCH_RUNTIME_LOG-}"
+
+RELAY_URL="${RELAY_URL-}"
+SCRIPT_AUTO_UPDATE="${SCRIPT_AUTO_UPDATE:-1}"
+AGENT_LOG_UPLOAD="${AGENT_LOG_UPLOAD:-1}"
+AGENT_LOG_LEVEL="${AGENT_LOG_LEVEL:-info}"
+AGENT_LOG_MAX_BYTES="${AGENT_LOG_MAX_BYTES:-1048576}"
+AGENT_LOG_BATCH="${AGENT_LOG_BATCH:-20}"
+RELAY_DAEMON_PROXY="${RELAY_DAEMON_PROXY:-inherit}"
+WATCH_RUNTIME_LOG="${WATCH_RUNTIME_LOG:-0}"
+
+# WATCH_WAKE_MODE 是否被环境变量/配置文件显式指定：显式值优先于覆盖层。
+WATCH_WAKE_MODE_EXPLICIT=0
+[ -n "${WATCH_WAKE_MODE+x}" ] && WATCH_WAKE_MODE_EXPLICIT=1
+WATCH_WAKE_MODE="${WATCH_WAKE_MODE:-auto}"
+
+case "$SCRIPT_AUTO_UPDATE" in
+  0|1) ;;
+  *) config_warn "config.invalid_value" "SCRIPT_AUTO_UPDATE 非 0/1，按 0 处理"; SCRIPT_AUTO_UPDATE=0 ;;
+esac
+case "$AGENT_LOG_UPLOAD" in
+  0|1) ;;
+  *) config_warn "config.invalid_value" "AGENT_LOG_UPLOAD 非 0/1，按 0 处理"; AGENT_LOG_UPLOAD=0 ;;
+esac
+case "$RELAY_DAEMON_PROXY" in
+  inherit|strip|direct) ;;
+  *) config_warn "config.invalid_value" "RELAY_DAEMON_PROXY 非法，按 inherit 处理"; RELAY_DAEMON_PROXY=inherit ;;
+esac
+case "$WATCH_WAKE_MODE" in
+  auto|hatch|generic|overlay) ;;
+  *) config_warn "config.invalid_value" "WATCH_WAKE_MODE 非法，按 auto 处理"; WATCH_WAKE_MODE=auto; WATCH_WAKE_MODE_EXPLICIT=0 ;;
+esac
+case "$WATCH_RUNTIME_LOG" in
+  0|1) ;;
+  *) config_warn "config.invalid_value" "WATCH_RUNTIME_LOG 非 0/1，按 0 处理"; WATCH_RUNTIME_LOG=0 ;;
+esac
+
+# ---- 2. 路径与状态 ----
 BIN="$BASE/bin/relay-tail"
 SPOOL_DIR="$BASE/spool"
 SPOOL="$SPOOL_DIR/wake.jsonl"
@@ -50,25 +186,17 @@ AGENT_LOG_OFFSET="$BASE/.agent_log_offset"
 TAIL_ERR_OFFSET="$BASE/.relay-tail-err.offset"
 TAIL_ERR_LAST="$BASE/.relay-tail-err.last"
 TAIL_ERR_LAST_TS="$BASE/.relay-tail-err.last.ts"
-AGENT_LOG_UPLOAD="${AGENT_LOG_UPLOAD:-1}"
-AGENT_LOG_LEVEL="${AGENT_LOG_LEVEL:-info}"
-AGENT_LOG_MAX_BYTES="${AGENT_LOG_MAX_BYTES:-1048576}"
-AGENT_LOG_BATCH="${AGENT_LOG_BATCH:-20}"
 AGENT_LOG_SEQ=0
-ME_IDENTITY="$(tr -d '[:space:]' < "$BASE/identity" 2>/dev/null || true)"
+ME_IDENTITY=""
+if [ -r "$BASE/identity" ]; then
+  ME_IDENTITY="$(tr -d '[:space:]' < "$BASE/identity" 2>/dev/null || true)"
+fi
 [ -z "$ME_IDENTITY" ] && ME_IDENTITY="unknown"
+OVERLAY="$BASE/relay-watch.local.sh"
+MISSING_URL_TS="$BASE/.missing_relay_url.logged_at"
+TICK_LOCK="$BASE/.relay-watch.tick.lock"
+TICK_LOCK_DIR="$BASE/.relay-watch.tick.lock.d"
 
-# ---------- 本地适配：唤醒/日志原语 ----------
-# 默认实现：wake 只把事件记到 pending.log，等人工或你自己的调度来处理。
-# 如果你有 hook/agent 调度体系，把 wake() 换成调你的唤醒命令
-#（如 Hatch 的 hook runtime：source "$HATCH_HOOK_RUNTIME" 后直接调 wake）。
-wake() {
-  # $1 = 人话原因（通知/日志用），$2 = 事件 JSON（worker 按 id 去 spool 取全文）
-  # A failed append must not look like a successful hand-off, or the caller
-  # advances the spool offset past events no worker will ever read.
-  printf '[%s] %s\n%s\n' "$(date -u +%FT%TZ)" "${1-}" "${2-}" >> "$SPOOL_DIR/pending.log" || return 1
-  return 0
-}
 # refresh_context — pull the newest messages of the scope the current batch
 # belongs to and write them as a read-only background section.
 #
@@ -222,14 +350,157 @@ log_event() {
   fi
   return 0
 }
+# ---------- 配置告警 / 覆盖层 / 唤醒适配器 ----------
+# Emit config warnings only after log_event exists (paths and config are set).
+if [ -n "$CONFIG_WARNINGS" ]; then
+  while IFS='|' read -r warn_event warn_message; do
+    [ -n "$warn_event" ] || continue
+    log_event warn "$warn_event" "$warn_message" '{}'
+  done <<< "$CONFIG_WARNINGS"
+fi
+
+# 覆盖层：$BASE/relay-watch.local.sh（可选，永不被自更新触碰）。
+# 安全：只接受当前用户拥有、且 group/world 不可写的普通文件；否则警告并忽略。
+OVERLAY_LOADED=0
+overlay_trusted() {
+  local owner mode
+  [ -f "$OVERLAY" ] || return 1
+  owner="$(stat -c '%u' "$OVERLAY" 2>/dev/null || stat -f '%u' "$OVERLAY" 2>/dev/null || true)"
+  if [ -z "$owner" ] || [ "$owner" != "$(id -u)" ]; then
+    log_event warn "config.overlay_rejected" "覆盖层属主不是当前用户，已忽略" \
+      "$(jq -cn --arg path "$OVERLAY" --arg owner "$owner" '{path:$path,owner:$owner}' 2>/dev/null || echo '{}')"
+    return 1
+  fi
+  mode="$(stat -c '%a' "$OVERLAY" 2>/dev/null || stat -f '%Lp' "$OVERLAY" 2>/dev/null || true)"
+  case "$mode" in
+    ''|*[!0-7]*)
+      log_event warn "config.overlay_rejected" "覆盖层权限不可读，已忽略" \
+        "$(jq -cn --arg path "$OVERLAY" '{path:$path}' 2>/dev/null || echo '{}')"
+      return 1
+      ;;
+  esac
+  # Reject group/world writable (0020 / 0002).
+  if [ "$((0$mode & 022))" -ne 0 ]; then
+    log_event warn "config.overlay_rejected" "覆盖层 group/world 可写，已忽略" \
+      "$(jq -cn --arg path "$OVERLAY" --arg mode "$mode" '{path:$path,mode:$mode}' 2>/dev/null || echo '{}')"
+    return 1
+  fi
+  return 0
+}
+
+load_overlay() {
+  [ -f "$OVERLAY" ] || return 0
+  overlay_trusted || return 0
+  # 显式 WATCH_WAKE_MODE（环境变量或配置）优先于覆盖层；其余变量允许覆盖层设置。
+  local _watch_pinned_mode=""
+  [ "$WATCH_WAKE_MODE_EXPLICIT" = "1" ] && _watch_pinned_mode="$WATCH_WAKE_MODE"
+  # shellcheck disable=SC1090
+  if ! source "$OVERLAY"; then
+    log_event warn "config.overlay_failed" "覆盖层加载失败，已忽略" \
+      "$(jq -cn --arg path "$OVERLAY" '{path:$path}' 2>/dev/null || echo '{}')"
+    return 0
+  fi
+  [ -n "$_watch_pinned_mode" ] && WATCH_WAKE_MODE="$_watch_pinned_mode"
+  OVERLAY_LOADED=1
+  return 0
+}
+load_overlay
+
+overlay_has_adapter() {
+  [ "$OVERLAY_LOADED" = "1" ] || return 1
+  declare -F watch_wake >/dev/null 2>&1 || return 1
+  declare -F watch_silent >/dev/null 2>&1 || return 1
+  return 0
+}
+
+hatch_runtime_available() {
+  [ -n "${HATCH_HOOK_RUNTIME:-}" ] && [ -r "$HATCH_HOOK_RUNTIME" ]
+}
+
+# Hatch runtime 的 wake()/silent() 是“发射即 exit 0”，不是可返回原语。
+# 把 _hatch_hook_emit 包进子 shell，让 exit 0 只结束子 shell；父 shell 继续
+# 执行，offset 才能在 wake 返回 0 后推进（1.1.0 的 offset 回归修复）。
+load_hatch_adapter() {
+  local log_body
+  # shellcheck disable=SC1090
+  if ! source "$HATCH_HOOK_RUNTIME"; then
+    return 1
+  fi
+  if ! declare -F _hatch_hook_emit >/dev/null 2>&1; then
+    return 1
+  fi
+  # Keep the runtime log available only for the optional mirror; core log()
+  # is defined below and remains the single log_event path.
+  log_body="$(declare -f log 2>/dev/null | sed '1s/^log /_hatch_runtime_log /' || true)"
+  if [ -n "$log_body" ]; then
+    eval "$log_body" || true
+  fi
+  unset -f wake silent log 2>/dev/null || true
+  adapter_wake() { ( _hatch_hook_emit "wake" "$@" ); }
+  adapter_silent() { ( _hatch_hook_emit "silent" "$@" ); }
+  return 0
+}
+
+WATCH_ADAPTER="generic"
+if [ "$WATCH_WAKE_MODE" = "overlay" ]; then
+  if overlay_has_adapter; then
+    WATCH_ADAPTER="overlay"
+  else
+    log_event warn "config.wake_mode_fallback" "WATCH_WAKE_MODE=overlay 但覆盖层不可用，回落自动探测" '{}'
+    WATCH_WAKE_MODE="auto"
+  fi
+fi
+if [ "$WATCH_WAKE_MODE" = "hatch" ]; then
+  if hatch_runtime_available && load_hatch_adapter; then
+    WATCH_ADAPTER="hatch"
+  else
+    log_event warn "config.wake_mode_fallback" "WATCH_WAKE_MODE=hatch 但 HATCH_HOOK_RUNTIME 不可用，回落 generic" '{}'
+    WATCH_ADAPTER="generic"
+  fi
+elif [ "$WATCH_WAKE_MODE" = "auto" ]; then
+  if overlay_has_adapter; then
+    WATCH_ADAPTER="overlay"
+  elif hatch_runtime_available && load_hatch_adapter; then
+    WATCH_ADAPTER="hatch"
+  else
+    WATCH_ADAPTER="generic"
+  fi
+elif [ "$WATCH_WAKE_MODE" = "generic" ]; then
+  WATCH_ADAPTER="generic"
+fi
+
+# Generic adapter: same pending.log behavior as 1.0.x.
+adapter_generic_wake() {
+  printf '[%s] %s\n%s\n' "$(date -u +%FT%TZ)" "${1-}" "${2-}" >> "$SPOOL_DIR/pending.log" || return 1
+  return 0
+}
+
+# core primitives: never exit; offset advances only after wake returns 0.
+wake() {
+  case "$WATCH_ADAPTER" in
+    hatch) adapter_wake "$@" ;;
+    overlay) watch_wake "$@" ;;
+    generic|*) adapter_generic_wake "$@" ;;
+  esac
+}
+silent() {
+  case "$WATCH_ADAPTER" in
+    hatch) adapter_silent "$@" || true ;;
+    overlay) watch_silent "$@" || true ;;
+  esac
+  return 0
+}
 log() {
-  # 兼容旧调用：log event fields-json（level 按事件名推断）
+  # 兼容旧调用：log event fields-json [message]（level 按事件名推断）。
   local event="${1:-}" fields="${2:-}" message="${3:-}"
   event="$(canonical_event "$event")"
   log_event "$(log_level_of "$event")" "$event" "$message" "$fields" || true
+  if [ "$WATCH_RUNTIME_LOG" = "1" ] && [ "$WATCH_ADAPTER" = "hatch" ] &&
+     declare -F _hatch_runtime_log >/dev/null 2>&1; then
+    _hatch_runtime_log "${message:-$event}" "$fields" || true
+  fi
   return 0
 }
-silent() { :; }  # 无事发生；调用处随后 exit 0
 
 # ---------- 脚本版本自报 / 自更新 ----------
 # The server parses WATCH_VERSION from the embedded copy and compares it with
@@ -295,6 +566,8 @@ script_update_disabled() {
 }
 
 script_apply_update() {
+  # ONLY $SELF is replaced. $BASE/relay-watch.env and
+  # $BASE/relay-watch.local.sh are node-owned and must never be touched here.
   # Download to a temp file in the script's own directory, verify sha256 and
   # syntax, keep a rollback copy, then rename over $SELF. rename (not
   # in-place overwrite) is required: a running bash keeps reading the old
@@ -445,6 +718,7 @@ flush_agent_logs() {
   # Best-effort batch upload at script exit. Never let log delivery block or
   # fail the watchdog: the local relay-watch.log remains the source of truth.
   [ "$AGENT_LOG_UPLOAD" = "1" ] || return 0
+  [ -n "${RELAY_URL:-}" ] || return 0
   [ -s "$AGENT_LOG_FILE" ] || return 0
   [ -f "$BASE/.token" ] || return 0
   local offset total count batch resp token size batch_max
@@ -520,13 +794,73 @@ capture_tail_stderr() {
   done < <(tail -c +"$((off + 1))" "$SPOOL_ERR" 2>/dev/null)
   printf '%s' "$total" > "$TAIL_ERR_OFFSET"
 }
-trap 'flush_agent_logs || true' EXIT
+cleanup() {
+  if [ "${TICK_ACQUIRED:-0}" = "1" ]; then
+    flush_agent_logs || true
+  fi
+  if [ -n "${TICK_LOCK_DIR_ACTIVE:-}" ]; then
+    rm -f "$TICK_LOCK_DIR_ACTIVE/pid" 2>/dev/null || true
+    rmdir "$TICK_LOCK_DIR_ACTIVE" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 # --------------------------------------------
 
-mkdir -p "$SPOOL_DIR"
+mkdir -p "$BASE" "$SPOOL_DIR"
 touch "$SPOOL"
 
-# ---- 0. 脚本版本自报 / 自更新 ----
+# ---- 0. tick 锁：同一时间只跑一份 core ----
+# Linux 用 flock（fd 9 随进程存活）；没有 flock 时退化为 mkdir 原子锁，
+# 用 pid 判活并清理陈旧锁。拿不到锁就静默退出，不写日志、不报错。
+TICK_LOCK_DIR_ACTIVE=""
+if command -v flock >/dev/null 2>&1; then
+  if ! exec 9>"$TICK_LOCK"; then
+    silent "无法创建 tick 锁"
+    exit 0
+  fi
+  if ! flock -n 9 2>/dev/null; then
+    silent "上一 tick 尚未结束"
+    exit 0
+  fi
+else
+  if ! mkdir "$TICK_LOCK_DIR" 2>/dev/null; then
+    old_lock_pid="$(cat "$TICK_LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$old_lock_pid" ] && kill -0 "$old_lock_pid" 2>/dev/null; then
+      silent "上一 tick 尚未结束"
+      exit 0
+    fi
+    rm -f "$TICK_LOCK_DIR/pid" 2>/dev/null || true
+    rmdir "$TICK_LOCK_DIR" 2>/dev/null || true
+    if ! mkdir "$TICK_LOCK_DIR" 2>/dev/null; then
+      silent "上一 tick 尚未结束"
+      exit 0
+    fi
+  fi
+  printf '%s' "$$" > "$TICK_LOCK_DIR/pid" 2>/dev/null || true
+  TICK_LOCK_DIR_ACTIVE="$TICK_LOCK_DIR"
+fi
+TICK_ACQUIRED=1
+
+# ---- 1. 可观测性：每次实际执行的 tick 记所选唤醒模式 ----
+printf '[%s] script.mode=%s\n' "$(date -u +%FT%TZ)" "$WATCH_ADAPTER" >> "$BASE/relay-watch.log" 2>/dev/null || true
+
+# ---- 2. RELAY_URL 缺失：fail closed，但不刷屏 ----
+case "${RELAY_URL:-}" in
+  ''|'<RELAY_URL>')
+    now_ts="$(date +%s)"
+    last_ts="$(as_uint "$(cat "$MISSING_URL_TS" 2>/dev/null || echo 0)")"
+    if [ "$((now_ts - last_ts))" -ge 3600 ]; then
+      printf 'relay-watch: RELAY_URL 未配置；请把 RELAY_URL=https://... 写入 %s/relay-watch.env\n' "$BASE" >&2
+      printf '%s' "$now_ts" > "$MISSING_URL_TS" 2>/dev/null || true
+      log_event error "config.missing_relay_url" "RELAY_URL 未配置" \
+        "$(jq -cn --arg path "$BASE/relay-watch.env" '{config:$path}' 2>/dev/null || echo '{}')"
+    fi
+    silent "RELAY_URL 未配置"
+    exit 0
+    ;;
+esac
+
+# ---- 3. 脚本版本自报 / 自更新 ----
 # Best-effort and never fatal: a failed report must not stop the watchdog.
 script_update_check || true
 
@@ -550,7 +884,9 @@ daemon_alive() {
 if ! daemon_alive; then
   if [ ! -x "$BIN" ]; then
     log "relay_binary_missing" '{"detail":"bin/relay-tail 不可执行"}'
-    wake "中继 Go 二进制丢失或不可执行" '{"binary_missing":true}'
+    if ! wake "中继 Go 二进制丢失或不可执行" '{"binary_missing":true}'; then
+      log_event error "wake.failed" "wake 调用失败" '{"reason":"binary_missing"}'
+    fi
     exit 0
   fi
   if [ -f "$AUTH_FAIL_MARKER" ]; then
@@ -562,17 +898,29 @@ if ! daemon_alive; then
   if tail -n 20 "$SPOOL_ERR" 2>/dev/null | grep -qE "relay-tail: (401|426)"; then
     log "relay_auth_error" '{"detail":"daemon 报 401/426，需要重新 onboarding"}'
     touch "$AUTH_FAIL_MARKER"
-    wake "中继认证或协议失败，需要重新跑 onboarding" '{"auth_error":true}'
+    if ! wake "中继认证或协议失败，需要重新跑 onboarding" '{"auth_error":true}'; then
+      log_event error "wake.failed" "wake 调用失败" '{"reason":"auth_error"}'
+    fi
     exit 0
   fi
   # 拉起 daemon。注意两点：
   #  1. 不要用 setsid：它会 fork，$! 拿到的是中间进程 PID，pidfile 失准后
   #     看门狗会误判 daemon 已死、重复拉起（实测：两个 daemon 各持一条 SSE 流，
   #     spool 出现逐字节相同的重复行）。用 nohup（不 fork，$! 准确）。
-  #  2. 代理：relay-tail v0.9.0+ 已修复旧版"HTTPS_PROXY 非空就强制改写 :3130"
-  #     的 bug（只对 tailnet/私网地址走 tunnel，公网按环境代理原样走）。
-  #     用旧版二进制才需要在这里 unset 代理变量。
+  #  2. 代理：默认 inherit（daemon 子 shell 原样继承环境代理）。relay-tail
+  #     v0.9.0+ 已修复旧版"HTTPS_PROXY 非空就强制改写 :3130"的 bug；只有旧
+  #     二进制/沙箱 tunnel quirk 才需要 RELAY_DAEMON_PROXY=strip（保留
+  #     ALL_PROXY），代理故障逃生口是 direct（全部 unset）。
   (
+    case "$RELAY_DAEMON_PROXY" in
+      strip)
+        unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+        ;;
+      direct)
+        unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
+        ;;
+      inherit|*) : ;;
+    esac
     export RELAY_URL
     RELAY="$RELAY_URL"
     export RELAY

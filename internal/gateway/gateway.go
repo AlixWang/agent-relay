@@ -342,6 +342,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if v := web.WatchScriptVersion(); v != "" {
 		out["script_kind"] = web.MuseWatchKind
 		out["script_version"] = v
+		// Public artifact digest: lets a human verify a manually downloaded
+		// /clients/relay-watch.sh without auth (same value as script_update).
+		out["script_sha256"] = web.WatchScriptSHA256()
 	}
 	writeJSON(w, 200, out)
 }
@@ -821,6 +824,52 @@ type heartbeatReq struct {
 
 const maxMemoryNoteRunes = 500
 
+// parseSemver parses the release-shaped versions used by watch scripts:
+// optional "v", three numeric components, optional -prerelease/+build suffix.
+// It deliberately accepts only the shape WATCH_VERSION has used so a garbage
+// report falls back to the legacy exact-equality behavior instead of being
+// silently ignored.
+func parseSemver(s string) ([3]int, bool) {
+	var out [3]int
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "v")
+	if i := strings.IndexAny(s, "-+"); i >= 0 {
+		s = s[:i]
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return out, false
+	}
+	for i, p := range parts {
+		if p == "" {
+			return out, false
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
+}
+
+// semverLess reports whether a < b, and whether both parsed. Callers use the
+// second result to keep the exact-equality trigger when a version is not
+// semver-shaped (e.g. a hand-edited local version).
+func semverLess(a, b string) (less bool, ok bool) {
+	av, aok := parseSemver(a)
+	bv, bok := parseSemver(b)
+	if !aok || !bok {
+		return false, false
+	}
+	for i := range av {
+		if av[i] != bv[i] {
+			return av[i] < bv[i], true
+		}
+	}
+	return false, true
+}
+
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	peer, _ := s.authed(w, r)
 	if peer == nil {
@@ -921,11 +970,22 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		cur := web.WatchScriptVersion()
 		if cur != "" && cur != p2.ScriptVersion &&
 			(p2.ScriptKind == "" || p2.ScriptKind == web.MuseWatchKind) {
-			resp["script_update"] = true
-			resp["script_kind"] = web.MuseWatchKind
-			resp["script_version"] = cur
-			resp["script_sha256"] = web.WatchScriptSHA256()
-			resp["download"] = web.MuseWatchPath
+			// Anti-downgrade guard (§Q5): the trigger stays exact inequality,
+			// but a peer already running a NEWER semver than this server must
+			// not be told to install the older artifact. Without this, a node
+			// upgraded before the server is rolled back to the previous script
+			// on its next heartbeat. Non-semver reports keep the legacy
+			// exact-match behavior (the guard only narrows a valid nudge).
+			if older, ok := semverLess(cur, p2.ScriptVersion); ok && older {
+				log.Printf("heartbeat: peer %s reports script %s newer than server %s; suppressing script_update",
+					peer.ID, p2.ScriptVersion, cur)
+			} else {
+				resp["script_update"] = true
+				resp["script_kind"] = web.MuseWatchKind
+				resp["script_version"] = cur
+				resp["script_sha256"] = web.WatchScriptSHA256()
+				resp["download"] = web.MuseWatchPath
+			}
 		}
 	}
 	// Profile refresh nudge (§8.7): never-set or older than

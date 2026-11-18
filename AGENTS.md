@@ -28,7 +28,15 @@
   CI, excluded from the embedded assets by its `_` prefix).
 - `relay-watch.sh` exists as **two byte-identical copies**
   (`clients/muse/` + `internal/web/clients/`); edit one, `cp` the other.
-  `internal/web` tests compare them.
+  `internal/web` tests compare them. 1.1.0+ is a **stable core**: node config
+  lives in `$BASE/relay-watch.env`, adapters in `$BASE/relay-watch.local.sh`;
+  never re-add a per-node CONFIG block or `source` a runtime inside the core.
+  Hatch is auto-detected (`HATCH_HOOK_RUNTIME`); self-update only replaces the
+  script and must never touch the env/overlay files.
+- Watch-script release order is a hard constraint: **server first, nodes
+  second**. The heartbeat anti-downgrade guard (suppresses `script_update`
+  when the peer reports a newer semver) is a safety net, not a substitute for
+  the order. `/health` exposes `script_sha256` for manual migration checks.
 - `internal/web/views/*_templ.go` **is committed** (a clean checkout must build
   with plain `go build`: no CLI, no network, no build chain). After editing a
   `.templ` file run `make generate` and commit both; `make generate-check`,

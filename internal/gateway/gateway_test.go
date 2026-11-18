@@ -1586,6 +1586,12 @@ func TestHeartbeatScriptMerge(t *testing.T) {
 	if health["script_version"] != web.WatchScriptVersion() || health["script_kind"] != web.MuseWatchKind {
 		t.Fatalf("/health script version: %+v", health)
 	}
+	if health["script_sha256"] != web.WatchScriptSHA256() {
+		t.Fatalf("/health script sha256: %+v", health)
+	}
+	if sha, _ := health["script_sha256"].(string); len(sha) != 64 {
+		t.Fatalf("/health script_sha256 not 64 hex chars: %q", sha)
+	}
 	_, stats := f.doAuth(t, "GET", "/admin/stats", nil, admin)
 	if stats["script_version"] != web.WatchScriptVersion() || stats["scripts_update_enabled"] != true {
 		t.Fatalf("/admin/stats script version/switch: %+v", stats)
@@ -1656,6 +1662,67 @@ func TestHeartbeatScriptNudge(t *testing.T) {
 	}
 	if p, _ := f2.srv.st.GetPeer("dave"); p.ScriptVersion != old {
 		t.Fatalf("disabled switch must still store the report: %+v", p)
+	}
+}
+
+// Anti-downgrade guard (§Q5): the exact-inequality trigger stays, but a peer
+// already on a newer semver must not be pulled back to the server artifact.
+func TestHeartbeatScriptAntiDowngrade(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	beat := func(m map[string]any) map[string]any {
+		t.Helper()
+		code, out := f.do(t, "POST", "/heartbeat", m, f.tok["alice"])
+		if code != 200 {
+			t.Fatalf("beat: %d %+v", code, out)
+		}
+		return out
+	}
+
+	// Newer than the server: suppress the nudge, keep the report.
+	newer := "99.0.0"
+	if out := beat(map[string]any{"id": "alice", "script_kind": "muse-watch", "script_version": newer}); out["script_update"] == true {
+		t.Fatalf("newer peer must not be downgraded: %+v", out)
+	}
+	if p, _ := f.srv.st.GetPeer("alice"); p.ScriptVersion != newer {
+		t.Fatalf("downgrade guard must still store the report: %+v", p)
+	}
+
+	// Non-semver reports keep the legacy exact-match nudge.
+	if out := beat(map[string]any{"id": "alice", "script_kind": "muse-watch", "script_version": "local-custom"}); out["script_update"] != true {
+		t.Fatalf("non-semver report must keep legacy nudge: %+v", out)
+	}
+
+	// A normal stale version is still nudged (guard is directional only).
+	old := "0.0.1"
+	if old == web.WatchScriptVersion() {
+		old = "0.0.2"
+	}
+	if out := beat(map[string]any{"id": "alice", "script_kind": "muse-watch", "script_version": old}); out["script_update"] != true {
+		t.Fatalf("stale peer must still be nudged: %+v", out)
+	}
+}
+
+func TestSemverLess(t *testing.T) {
+	cases := []struct {
+		a, b string
+		less bool
+		ok   bool
+	}{
+		{"1.0.1", "1.1.0", true, true},
+		{"1.1.0", "1.0.1", false, true},
+		{"v1.1.0", "1.1.0", false, true},
+		{"1.1.0", "1.1.0", false, true},
+		{"1.1.0-rc1", "1.1.0", false, true},
+		{"local", "1.1.0", false, false},
+		{"1.1", "1.1.0", false, false},
+		{"1.1.x", "1.1.0", false, false},
+	}
+	for _, tc := range cases {
+		less, ok := semverLess(tc.a, tc.b)
+		if less != tc.less || ok != tc.ok {
+			t.Fatalf("semverLess(%q,%q) = (%v,%v), want (%v,%v)", tc.a, tc.b, less, ok, tc.less, tc.ok)
+		}
 	}
 }
 

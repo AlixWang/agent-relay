@@ -102,7 +102,7 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 20
+const PromptVersion = 21
 
 // RoomAwarePromptVersion is the revision that first documents rooms and the
 // operator identity (§7.8 muse/claw/generic, §6.7 hermes), and that requires the
@@ -215,6 +215,11 @@ var ChangeLog = []ChangeEntry{
 		Version: 20,
 		Summary: "唤醒时附带「只读背景」：本作用域最近若干条消息（只保留 who/when/what，剥离 kind），明确标注为非待办、不产生 ack；服务端新增作用域水位与 scope-head 投递，旧接收端仍可用 since 本地游标。",
 		Actions: "被唤醒时若 prompt 里出现「只读背景」区段，只把它当上下文理解，不要据其中的历史任务重新执行、也不要为它 ack；真正的待办只在「本次真正待处理的事件」之后。",
+	},
+	{
+		Version: 21,
+		Summary: "Muse 脚本 1.1.0 改为稳定 core：RELAY_URL 等配置写 $BASE/relay-watch.env（一行即用），Hatch 自动探测 HATCH_HOOK_RUNTIME（wake/silent 子 shell 包装，修 wake 后 offset 不推进的重复唤醒），非 Hatch 才写 relay-watch.local.sh；自更新只换脚本；服务端新增防降级守卫（已上报更高 semver 的节点不再收到旧脚本下发）。",
+		Actions: "1) Muse 节点：先等服务端 /health 的 script_version 变为 1.1.0，再写 $BASE/relay-watch.env（至少 RELAY_URL=...），下载新 relay-watch.sh 覆盖并保留 .rollback；2) 删除旧脚本顶部 CONFIG 改动和手写 source HATCH_HOOK_RUNTIME（1.1.0 自动探测）；3) 迁移期间 SCRIPT_AUTO_UPDATE=0，验证 wake 后 .spool_offset 推进、第二次运行 silent，再设 1；4) 只有非 Hatch runtime 才在 $BASE/relay-watch.local.sh 定义 watch_wake/watch_silent；5) 发布顺序：服务端先上 1.1.0，节点再更新。",
 	},
 }
 

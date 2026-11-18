@@ -58,7 +58,10 @@ chmod +x ~/workspace/task-relay/bin/relay-tail
 # 薄层脚本（看门狗 + drain spool + 唤醒决策，每 5 秒跑一次）从服务端下载，不要去仓库找、不要手写：
 curl -s "{{.ServerAddr}}/clients/relay-watch.sh" -o ~/workspace/task-relay/relay-watch.sh
 chmod +x ~/workspace/task-relay/relay-watch.sh
-# 改 relay-watch.sh 顶部 CONFIG 区的 RELAY_URL/BASE 为你的地址和目录，把 wake()/log()/silent() 换成你的 runtime 能用的唤醒/日志方式。
+# 1.1.0 起脚本是稳定 core：节点差异只写配置，不改脚本正文。RELAY_URL 一行即可用：
+printf 'RELAY_URL=%s\n' "{{.ServerAddr}}" > ~/workspace/task-relay/relay-watch.env
+# 可选覆盖层（仅非 Hatch runtime 需要）：在 ~/workspace/task-relay/relay-watch.local.sh
+# 定义 watch_wake/watch_silent；Hatch 节点会自动探测 HATCH_HOOK_RUNTIME，无需覆盖层。
 # 注意：二进制地址返回 302，curl 必须加 -L（否则下到 111 字节 Found 页面）；本脚本是直链，不加 -L 也可。
 # 千万别用 setsid ... & + $! 写 pidfile（setsid 会 fork，pidfile 失准致双 daemon 重复拉流）；用 nohup（$! 准确）。
 # 方式 B · shell 脚本（跑不了二进制时才用，poll/tail 二选一）：
@@ -74,11 +77,13 @@ chmod +x ~/workspace/task-relay/relay-watch.sh
 > relay-watch.sh 薄层做唤醒决策，有新消息或 prompt_update/client_update 事件才唤醒 worker，
 > 无事时零 token 空转。如果你已经建了这类 schedule，拆掉它，换成看门狗方案。
 >
-> **落地：5 秒一次的轻量调度（示例：Hatch hook）。**
+> **落地：5 秒一次的轻量调度（Hatch hook 零适配）。**
 > 用你 runtime 的轻量定时机制 5 秒跑一次 relay-watch.sh。Hatch 参考配置：hook id
-> `agent-relay-poll`；script 用下载后按 CONFIG 改好的 relay-watch.sh，顶部加
-> `source "$HATCH_HOOK_RUNTIME"`，以真 `wake`/`silent`/`log` 原语替换默认 stub；
-> `poll_interval_secs=5`，`script_timeout_secs=30`。worker 指令要点：wake payload 只含
+> `agent-relay-poll`；script 直接指向下载后的 relay-watch.sh，**不需要改脚本正文，
+> 也不需要手动 source `HATCH_HOOK_RUNTIME`**——1.1.0 会自动探测并把 runtime 的
+> wake/silent 包进子 shell；`poll_interval_secs=5`，`script_timeout_secs=30`。
+> 非 Hatch runtime 才写 `$BASE/relay-watch.local.sh`（定义 watch_wake/watch_silent）。
+> worker 指令要点：wake payload 只含
 > 元数据（id/from/kind/in_reply_to + 前 120 字预览），执行前先按 id 去 `spool/wake.jsonl`
 > 取全文；逐条执行后先回 result 再 ack；幂等——执行前查 `.done_ids`，完成后追加。
 > 其他 runtime 用等价的 cron/interval job（5 秒）。铁律：这个 tick 只跑 shell 做序号对比，

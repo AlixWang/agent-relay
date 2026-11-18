@@ -23,7 +23,9 @@
 
 | 文件 | 说明 |
 |---|---|
-| `relay-watch.sh` | 薄层脚本：看门狗 + drain spool + 唤醒决策，每 5 秒运行一次 |
+| `relay-watch.sh` | 稳定 core：看门狗 + drain spool + 唤醒决策，每 5 秒运行一次；自更新只替换这个文件 |
+| `relay-watch.env` | 节点配置（一行一个 `KEY=VALUE`）：`RELAY_URL` 必填，其余可选；永不被自更新覆盖 |
+| `relay-watch.local.sh` | 可选覆盖层：定义 `watch_wake`/`watch_silent`；标准 Hatch 节点不需要 |
 | `worker-prompt.md` | 指引文件（不含规则）：守则以 `GET /prompts/current` 下发版本为准 |
 
 ## 搭建步骤
@@ -48,10 +50,18 @@ echo $! > relay-tail.pid
 # pidfile 失准后看门狗误判 daemon 已死、重复拉起（两个 daemon 各持一条 SSE 流，
 # spool 会出现重复行）。用 nohup（不 fork，$! 准确）。
 
-# 3. 配薄层：从服务端下载后把 relay-watch.sh 里 CONFIG 区的 <RELAY_URL> / <BASE> 改成你的，
-#    把 wake()/log()/silent() 换成你的 runtime 能用的唤醒/日志方式，
-#    然后每 5 秒跑一次（cron / hook / 定时任务）。
-#    下载：curl -s "<RELAY_URL>/clients/relay-watch.sh" -o <BASE>/relay-watch.sh && chmod +x <BASE>/relay-watch.sh
+# 3. 配薄层（1.1.0+ 脚本是稳定 core，不改正文）
+#    节点差异只写配置；RELAY_URL 一行即可用：
+printf 'RELAY_URL=%s\n' "<RELAY_URL>" > <BASE>/relay-watch.env
+#    可选键：SCRIPT_AUTO_UPDATE=1、AGENT_LOG_UPLOAD=1、AGENT_LOG_LEVEL=info、
+#    AGENT_LOG_MAX_BYTES=1048576、AGENT_LOG_BATCH=20、
+#    RELAY_DAEMON_PROXY=inherit|strip|direct、WATCH_WAKE_MODE=auto|hatch|generic|overlay、
+#    WATCH_RUNTIME_LOG=0。
+#    下载并每 5 秒跑一次（cron / hook / 定时任务）：
+curl -s "<RELAY_URL>/clients/relay-watch.sh" -o <BASE>/relay-watch.sh && chmod +x <BASE>/relay-watch.sh
+#    Hatch 会自动探测 HATCH_HOOK_RUNTIME（wake/silent 包进子 shell，offset 在 wake
+#    返回后推进）；非 Hatch runtime 才写 <BASE>/relay-watch.local.sh，定义
+#    watch_wake/watch_silent。旧版的 CONFIG 改动与手写 source HATCH_HOOK_RUNTIME 不再需要。
 
 # 4. 验证
 curl -s <RELAY_URL>/peers -H "Authorization: Bearer $TOKEN" | jq '.peers[] | select(.id=="<YOUR_IDENTITY>") | {transport, client_version, online}'
@@ -66,6 +76,18 @@ curl -s <RELAY_URL>/peers -H "Authorization: Bearer $TOKEN" | jq '.peers[] | sel
 `AGENT_LOG_UPLOAD=0` 关闭；上报失败只保留本地 `relay-watch.log`，不影响任务。
 旧版脚本没有该能力，需要重新下载 `GET /clients/relay-watch.sh`。
 
+## 升级 / 迁移（1.1.0）
+
+- **发布顺序是硬约束**：服务端先上 1.1.0（`/health` 的 `script_version` 变为 `1.1.0`），
+  节点再更新。服务端有防降级守卫（不会把已报更高 semver 的节点拉回旧脚本），但不要依赖它。
+- 自更新只替换 `relay-watch.sh`（应用前写 `relay-watch.sh.rollback`），
+  `relay-watch.env` 与 `relay-watch.local.sh` 永不被碰。
+- 从 1.0.x 手工迁移：备份当前脚本 → 写 `relay-watch.env`（先 `SCRIPT_AUTO_UPDATE=0`）→
+  下载 1.1.0 覆盖 → 验证 `wake` 后 `.spool_offset` 推进、第二次运行 silent、
+  `relay-watch.log` 出现 `script.mode=hatch` → 再把 `SCRIPT_AUTO_UPDATE` 设回 1。
+- 旧脚本顶部的 CONFIG 改动与手写 `source "$HATCH_HOOK_RUNTIME"` 在 1.1.0 中删除；
+  Hatch 节点零覆盖层。未知 runtime 才需要 `relay-watch.local.sh`。
+
 ## 常见坑
 
 1. **双 daemon**：`ps` 看到两个 relay-tail 进程 → pidfile 写错了（见上 setsid 坑）。
@@ -79,13 +101,20 @@ curl -s <RELAY_URL>/peers -H "Authorization: Bearer $TOKEN" | jq '.peers[] | sel
    /peers 的 client_version），再写 `.client_version` 确认文件。只写文件不换二进制
    会导致服务端反复推送更新。
 6. **WAF/代理**：relay-tail v0.9.0+ 已修复旧版"HTTPS_PROXY 非空就强制 :3130"
-   的 bug；旧版在公网+正常出口代理环境下走不通。
+   的 bug；旧版在公网+正常出口代理环境下走不通。1.1.0 默认 `RELAY_DAEMON_PROXY=inherit`
+   （daemon 原样继承环境代理）；旧二进制/沙箱 tunnel 才用 `strip`（只 unset
+   HTTPS/HTTP 代理，保留 `ALL_PROXY`），代理故障逃生口是 `direct`（全部 unset）。
+7. **tick 重叠**：1.1.0 用 `flock` 锁 `$BASE/.relay-watch.tick.lock`，同一时间只跑一份
+   core；拿不到锁的 tick 静默退出，不会重复 drain/写 offset。
 
 ## 目录布局（`<BASE>` 下）
 
 ```
 identity                 单行身份
 .token                   个人 token（0600）
+relay-watch.sh           稳定 core（自更新唯一替换目标）
+relay-watch.env          节点配置（RELAY_URL 等，永不被自更新覆盖）
+relay-watch.local.sh     可选唤醒覆盖层（watch_wake/watch_silent）
 bin/relay-tail           Go 二进制
 spool/wake.jsonl         daemon 事件行（append-only）
 spool/relay-tail.err     daemon stderr（401/426 判读）
@@ -93,6 +122,8 @@ spool/pending.log        无 hook 体系时的待处理事件（wake 默认实�
 relay-context.md         只读背景：本批次群作用域最近消息（refresh_context 生成，无群作用域时不生成；唤醒时只以指针 {file, room, bytes} 并进唤醒交接，worker 按指针读文件）
 layer0-experiment.log    Layer 0 对照日志：脚本直发 ack / 真正唤醒 worker 的任务 id
 relay-tail.pid           daemon pidfile（单实例锁）
+.relay-watch.tick.lock   tick 互斥锁（flock）
+.missing_relay_url.logged_at  RELAY_URL 缺失日志的每小时限流标记
 .spool_offset            已消费行数
 .last_seq                游标（daemon 原子写入）
 .prompt_version[.staged] 指令版本 / 待确认版本

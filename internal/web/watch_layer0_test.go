@@ -197,15 +197,20 @@ printf '{"ok":true}'
 
 	cmd := exec.Command("bash", watchPath)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(),
-		"BASE="+base,
+	// Hermetic: never inherit HATCH_HOOK_RUNTIME / RELAY_URL / proxy vars /
+	// BASE from the host. A Hatch session running `go test` would otherwise
+	// switch this Layer-0 test onto the Hatch adapter.
+	cmd.Env = []string{
+		"BASE=" + base,
 		"RELAY_URL=http://relay.invalid",
 		"AGENT_LOG_UPLOAD=0",
 		"SCRIPT_AUTO_UPDATE=0",
-		"FAKE_CURL_DIR="+curlDir,
-		"FAKE_ACK_RESULT="+ackResult,
-		"PATH="+fakebin+string(os.PathListSeparator)+os.Getenv("PATH"),
-	)
+		"FAKE_CURL_DIR=" + curlDir,
+		"FAKE_ACK_RESULT=" + ackResult,
+		"PATH=" + fakebin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + root,
+		"LC_ALL=C",
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("relay-watch.sh failed: %v\n%s", err, out)
