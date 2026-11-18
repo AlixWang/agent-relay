@@ -513,6 +513,17 @@ func (s *Service) Wake(ctx context.Context, id string) (*Result, error) {
 	return s.wakeLocked(ctx, id)
 }
 
+// wakeWithPrior runs one wake while holding opMu and returns the account row
+// exactly as it was before Wake wrote the new state. That pre-wake snapshot is
+// what the auto-wake audit decision compares against.
+func (s *Service) wakeWithPrior(ctx context.Context, id string) (*store.MuseAccount, *Result, error) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	prev, _ := s.st.GetMuseAccount(id)
+	res, err := s.wakeLocked(ctx, id)
+	return prev, res, err
+}
+
 // wakeLocked is Wake's implementation; the caller holds opMu. Splitting it out
 // lets autoWake snapshot the pre-wake row under the same lock, so the
 // "changed since last time" comparison cannot race a concurrent keepalive.
@@ -830,10 +841,7 @@ func (s *Service) autoWake(accountID, peerID string) {
 	// Snapshot the previous wake state before Wake writes the new one. A
 	// routine success that changes nothing is operational noise, not an audit
 	// event; failures and state transitions are what an operator needs.
-	s.opMu.Lock()
-	prev, _ := s.st.GetMuseAccount(accountID)
-	res, err := s.wakeLocked(ctx, accountID)
-	s.opMu.Unlock()
+	prev, res, err := s.wakeWithPrior(ctx, accountID)
 	now := s.now().Unix()
 	detail := fmt.Sprintf("peer=%s account=%s ok=false", peerID, accountID)
 	if err != nil {

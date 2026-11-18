@@ -94,9 +94,10 @@ type Service struct {
 	st            store.Store
 	onlineTimeout int64
 	webhookURL    string
-	// OnOffline is called after an online→offline transition is audited and
-	// before the webhook. It must not block: the Muse integration spawns its
-	// own goroutine. Nil disables the hook.
+	// OnOffline is called after an online→offline transition is persisted
+	// (audit row and/or webhook effect) and before the webhook. It must not
+	// block: the Muse integration spawns its own goroutine. Nil disables the
+	// hook.
 	OnOffline func(peerID string, offlineSecs int64)
 
 	mu        sync.Mutex
@@ -274,13 +275,11 @@ func (s *Service) Sweep(now int64) {
 			s.mu.Unlock()
 			continue
 		}
+		lastAudit := s.lastOfflineAudit[p.ID]
 		s.mu.Unlock()
 
 		offlineSecs := now - p.LastSeen
 		kind, key, payload := s.webhookEffect(p.ID, offlineSecs, now)
-		s.mu.Lock()
-		lastAudit := s.lastOfflineAudit[p.ID]
-		s.mu.Unlock()
 		throttled := lastAudit > 0 && now-lastAudit < offlineAuditWindowSecs
 		if throttled {
 			// Keep the offline notification itself unchanged; only the audit
