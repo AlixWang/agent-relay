@@ -27,11 +27,17 @@ const (
 	chatEchoBudget     = 10 * time.Second
 	chatEchoMaxBytes   = 64 * 1024
 	chatEchoMaxLines   = 100
-	chatConfirmBudget  = 5 * time.Second
-	chatConfirmEvery   = 250 * time.Millisecond
 	chatHistoryTimeout = 4 * time.Second
 	chatDialTimeout    = 6 * time.Second
 	chatHandshakeTMO   = 6 * time.Second
+)
+
+// Variables, not constants, so the orchestration tests can shorten the
+// confirmation window without a real 5s sleep. Tests in this package do not
+// run in parallel.
+var (
+	chatConfirmBudget = 5 * time.Second
+	chatConfirmEvery  = 250 * time.Millisecond
 )
 
 // liveChatSession is the production chatSession. Close is the only reliable

@@ -272,15 +272,20 @@ func (s *Service) StartChat(ctx context.Context, req ChatStartRequest) (*ChatJob
 	s.chatMu.Lock()
 	s.gcChatLocked(now.Unix())
 	if requestID != "" {
-		if e, ok := s.chatRequests[chatIdemKey(peerID, requestID)]; ok && e.expires >= now.Unix() {
-			s.chatMu.Unlock()
+		key := chatIdemKey(peerID, requestID)
+		if e, ok := s.chatRequests[key]; ok && e.expires >= now.Unix() {
 			if e.hash != hash {
+				s.chatMu.Unlock()
 				return nil, admissionErr(409, "idempotency_conflict", 0)
 			}
 			if v := s.viewChatLocked(e.jobID); v != nil {
+				s.chatMu.Unlock()
 				v.Duplicate = true
 				return v, nil
 			}
+			// The referenced job has been GC'd but its idempotency window
+			// has not. Drop the stale key and admit this request.
+			delete(s.chatRequests, key)
 		}
 	}
 	if !s.chatRuntime {
@@ -354,9 +359,15 @@ func (s *Service) chatRequestLimits(req ChatStartRequest) (time.Duration, time.D
 	budgetSecs := req.BudgetSecs
 	if budgetSecs == 0 {
 		budgetSecs = int(s.opts.ChatDefaultBudget / time.Second)
+		if budgetSecs <= 0 {
+			budgetSecs = int(chatDefaultBudgetHard / time.Second)
+		}
 	}
 	minBudget := int(chatMinBudget / time.Second)
 	maxBudget := int(s.opts.ChatMaxBudget / time.Second)
+	if maxBudget <= 0 {
+		maxBudget = int(chatMaxBudgetCeiling / time.Second)
+	}
 	if budgetSecs < minBudget || budgetSecs > maxBudget {
 		return 0, 0, "", admissionErr(400, "budget_out_of_range", 0)
 	}
@@ -466,7 +477,7 @@ func (s *Service) SetChatRuntime(enabled bool, actor string) (ChatStatusView, er
 	var ids []string
 	if !enabled {
 		active = len(s.chatActive)
-		for id := range s.chatActive {
+		for _, id := range s.chatActive {
 			ids = append(ids, id)
 		}
 	}
@@ -477,7 +488,7 @@ func (s *Service) SetChatRuntime(enabled bool, actor string) (ChatStatusView, er
 		fmt.Sprintf("enabled=%v by=%s", enabled, chatAuditValue(actor)), now); err != nil {
 		log.Printf("muse chat: audit runtime_flag failed: %v", err)
 	}
-	if !enabled && active > 0 {
+	if !enabled {
 		detail := fmt.Sprintf("active_jobs=%d reason=kill_switch", active)
 		if err := s.st.AppendAudit(actor, "muse.chat.disabled", detail, now); err != nil {
 			log.Printf("muse chat: audit disabled failed: %v", err)
@@ -615,6 +626,7 @@ func (s *Service) stopChat(job *ChatJob, actor string, sendCancel bool) (*ChatJo
 		Status: ChatStatusCancelled,
 		Error:  &ChatError{Code: "muse_cancelled", Class: "cancel", Retryable: false},
 		Cancel: result,
+		Actor:  actor,
 	}
 	if job.finish(out, now) {
 		s.auditOutcome(job, out, now)
@@ -626,7 +638,7 @@ func (s *Service) stopChat(job *ChatJob, actor string, sendCancel bool) (*ChatJo
 func (s *Service) cancelChatsForAccount(accountID, reason string) {
 	s.chatMu.Lock()
 	var ids []string
-	for id := range s.chatActive {
+	for _, id := range s.chatActive {
 		job := s.chatJobs[id]
 		if job != nil && job.AccountID == accountID {
 			ids = append(ids, id)
@@ -685,11 +697,18 @@ func (s *Service) runChatWorker(ctx context.Context, job *ChatJob) {
 	s.recordChatStatus(job, s.now().Unix())
 }
 
+func (s *Service) openChatSession(ctx context.Context, accountID string) (chatSession, error) {
+	if s.chatOpen != nil {
+		return s.chatOpen.Open(ctx, accountID)
+	}
+	return s.Open(ctx, accountID)
+}
+
 func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 	if job.cancelRequested() {
 		return cancelledOutcome(job)
 	}
-	sess, err := s.Open(ctx, job.AccountID)
+	sess, err := s.openChatSession(ctx, job.AccountID)
 	if err != nil {
 		if job.cancelRequested() || ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled) {
 			return cancelledOutcome(job)
@@ -702,7 +721,7 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 		return cancelledOutcome(job)
 	}
 
-	job.advance(ChatStatusSending)
+	job.advance(ChatStatusSending, s.now().Unix())
 	baselineEvents, berr := sess.History(ctx, job.SessionID, 5, 0)
 	if berr != nil {
 		if job.cancelRequested() {
@@ -736,6 +755,7 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 		}
 		cf := chatErrorFromFailure(serr)
 		if sendRes.Wrote && shouldConfirmAfterSend(cf) {
+			job.advance(ChatStatusConfirming, s.now().Unix())
 			if seq, _, cerr := s.confirmChat(ctx, sess, job); seq > 0 {
 				job.setConfirmed(seq, s.now().Unix())
 				// Fall through to the wait phase; the message did land.
@@ -753,6 +773,7 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 			return chatOutcome{Status: ChatStatusFailed, Error: cf, Stage: cf.Class}
 		}
 	} else {
+		job.advance(ChatStatusConfirming, s.now().Unix())
 		seq, _, cerr := s.confirmChat(ctx, sess, job)
 		if seq <= 0 {
 			if job.cancelRequested() {
@@ -768,7 +789,7 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 	}
 
 	job.setDeadline(job.Confirmed() + int64(job.Budget/time.Second))
-	job.advance(ChatStatusWaiting)
+	job.advance(ChatStatusWaiting, s.now().Unix())
 	if seq := job.UserSeqValue(); seq > 0 {
 		now := s.now().Unix()
 		detail := fmt.Sprintf("chat=%s echo=yes user_seq=%d delivery=confirmed elapsed_ms=%d",
@@ -867,7 +888,7 @@ func (s *Service) waitForReply(ctx context.Context, sess chatSession, job *ChatJ
 					job.setSession(nil)
 					old.Close()
 				}
-				next, oerr := s.Open(ctx, job.AccountID)
+				next, oerr := s.openChatSession(ctx, job.AccountID)
 				if oerr != nil {
 					return chatOutcome{Status: ChatStatusReplyUnknown, Stage: "poll",
 						Error: &ChatError{Code: "muse_reply_unknown", Class: "poll", Retryable: true}}
@@ -982,6 +1003,10 @@ func (s *Service) auditSending(job *ChatJob) error {
 func (s *Service) auditOutcome(job *ChatJob, o chatOutcome, now int64) {
 	action := ""
 	detail := ""
+	actor := o.Actor
+	if actor == "" {
+		actor = "system"
+	}
 	switch o.Status {
 	case ChatStatusReplied:
 		action = "muse.chat.replied"
@@ -1027,7 +1052,7 @@ func (s *Service) auditOutcome(job *ChatJob, o chatOutcome, now int64) {
 	if action == "" {
 		return
 	}
-	if err := s.st.AppendAudit("system", action, truncate(detail, chatAuditDetail), now); err != nil {
+	if err := s.st.AppendAudit(actor, action, truncate(detail, chatAuditDetail), now); err != nil {
 		log.Printf("muse chat: audit %s failed for %s: %v", action, job.ID, err)
 	}
 }
@@ -1220,6 +1245,7 @@ type chatOutcome struct {
 	Draft      bool
 	Stage      string
 	Cancel     string
+	Actor      string
 }
 
 func cancelledOutcome(job *ChatJob) chatOutcome {
@@ -1307,7 +1333,7 @@ func (j *ChatJob) finish(o chatOutcome, now int64) bool {
 	}
 	if j.Canceled {
 		o = chatOutcome{Status: ChatStatusCancelled, Cancel: firstNonEmpty(o.Cancel, j.Cancel),
-			Error: &ChatError{Code: "muse_cancelled", Class: "cancel"}}
+			Error: &ChatError{Code: "muse_cancelled", Class: "cancel"}, Actor: o.Actor}
 	}
 	j.Status = o.Status
 	j.Reply = o.Reply
@@ -1321,10 +1347,12 @@ func (j *ChatJob) finish(o chatOutcome, now int64) bool {
 	return true
 }
 
-func (j *ChatJob) advance(status string) {
+func (j *ChatJob) advance(status string, now int64) {
 	j.mu.Lock()
 	j.Status = status
-	j.Updated = time.Now().Unix()
+	if now > 0 {
+		j.Updated = now
+	}
 	j.mu.Unlock()
 }
 

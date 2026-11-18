@@ -235,6 +235,11 @@ type Service struct {
 	chatPerMin   map[string][]int64
 	chatPerHour  map[string][]int64
 	chatGlobal   []int64
+
+	// chatOpen is nil in production (the Service is its own gateway). Unit
+	// tests replace it with a fake session so the orchestration state machine
+	// can run without a Noise server.
+	chatOpen chatGateway
 }
 
 // New validates the endpoint/proxy, loads the cookie key and builds the HTTP
@@ -1125,7 +1130,7 @@ func (s *Service) toAccount(a *store.MuseAccount) *Account {
 		ChatEnabled: a.ChatEnabled, ChatConsentAt: a.ChatConsentAt,
 		ChatConsentBy: a.ChatConsentBy, ChatConsentVersion: a.ChatConsentVersion,
 		ChatConsentEvidence: a.ChatConsentEvidence,
-		LastChatAt: a.LastChatAt, LastChatStatus: a.LastChatStatus,
+		LastChatAt:          a.LastChatAt, LastChatStatus: a.LastChatStatus,
 		AuthorizedAt: a.AuthorizedAt, UpdatedAt: a.UpdatedAt,
 	}
 	v.CookiesExp = parseCookiesExp(a.CookiesExp)
