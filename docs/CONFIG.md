@@ -56,10 +56,10 @@
 | `muse_chat_max_concurrent` | int | `4` | 全局活跃对话硬顶，1–4；不排队，超出 429 + `Retry-After:5` |
 | `muse_chat_default_budget_secs` | int | `180` | 默认等回复预算（30–300），从投递确认起算 |
 | `muse_chat_max_budget_secs` | int | `300` | 单次对话可请求的最大预算（30–300，且 ≥ 默认值） |
-| `muse_chat_poll_secs` | int | `2` | history 轮询间隔（1–10；`internal/muse` 仍硬压到 ≤2s，抖动 ±10%） |
-| `muse_chat_per_peer_per_minute` | int | `6` | 每成员每分钟发送上限（≥1，服务内硬顶 6） |
-| `muse_chat_per_peer_per_hour` | int | `30` | 每成员每小时发送上限（≥1，硬顶 30） |
-| `muse_chat_global_per_minute` | int | `30` | 全局每分钟发送上限（≥1，硬顶 30） |
+| `muse_chat_poll_secs` | int | `2` | history 轮询间隔（1–2；抖动 ±10%） |
+| `muse_chat_per_peer_per_minute` | int | `6` | 每成员每分钟发送上限（1–6） |
+| `muse_chat_per_peer_per_hour` | int | `30` | 每成员每小时发送上限（1–30） |
+| `muse_chat_global_per_minute` | int | `30` | 全局每分钟发送上限（1–30） |
 
 > v1.10.1 日志降噪：审计默认保留 30 天、Agent 日志默认保留 7 天。生产 `config.toml` 若显式设置过这两个键，默认值不会生效，升级时需同步改配置。升级后的首次 retention 会一次性清理历史 `muse.auto_wake` 成功行与全部 `peer.offline` 行（写一条 `retention.purged` 审计记录删行数），失败/带错误的 auto_wake 行保留；该清理由 settings 标记守卫，之后不再扫描全表。
 

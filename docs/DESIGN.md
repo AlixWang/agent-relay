@@ -266,6 +266,19 @@ needs two things the relay cannot infer: a valid Muse session cookie and the
   For databases written before the split, known wake-only `last_error` values
   are promoted to `last_wake_error` on read (never discarded) and marked
   `last_wake_state=unconfirmed`/`last_wake_ok=false`.
+- **Direct chat (v1, default off):** an admin may, per opted-in member, send one
+  pure-text message to that member's Muse main chat (or an existing side chat)
+  and read one reply over the same Noise transport. Three gates apply: config
+  deploy flag, runtime kill switch, and per-account `chat_enabled` consent
+  (reset by re-authorization or a peer rebind). A dialogue holds an account
+  lease, so keepalive/wake/offline recovery skip that account for the job's
+  lifetime; the preparation phase alone takes `opMu`, never the stream or
+  polling. Each job uses a short-lived connection with one reader multiplexing
+  `chat.stream` and `chat.history` by stream id. The budget (default 180s, max
+  300s) starts at delivery confirmation; timeouts never auto-cancel, and the
+  relay never deletes/withdraws a sent message. Audit rows carry only
+  `text_len`/`text_sha256`/seq/status/error class; replies live in the member's
+  Muse session, not in relay storage. See `docs/MUSE-CHAT.md`.
 - **Live acceptance:** because the relay host's egress and Go's TLS
   fingerprint cannot be proven from the development sandbox, merge requires the
   controlled runbook in `docs/muse-noise-live-check.md`: three consecutive
@@ -273,7 +286,8 @@ needs two things the relay cannot infer: a valid Muse session cookie and the
 - **Out of scope:** no headless-browser/CDP chat automation, no cookie importer
   extension, no multi-account rotation. One Muse account should have one
   keepalive owner; running muse2api's keepalive on the same account will rotate
-  cookies against this service.
+  cookies against this service. Direct chat is not an approval channel and has
+  no structured task/permission payloads.
 
 ### 4.10 Work item layer (`internal/work`)
 

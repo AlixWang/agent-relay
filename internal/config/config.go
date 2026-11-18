@@ -348,12 +348,17 @@ func (c *Config) Validate() error {
 		c.MuseChatDefaultBudgetSecs > c.MuseChatMaxBudgetSecs {
 		return fmt.Errorf("muse_chat_max_budget_secs must be 30-300 and >= default")
 	}
-	if c.MuseChatPollSecs < 1 || c.MuseChatPollSecs > 10 {
-		return fmt.Errorf("muse_chat_poll_secs must be 1-10")
+	if c.MuseChatPollSecs < 1 || c.MuseChatPollSecs > 2 {
+		return fmt.Errorf("muse_chat_poll_secs must be 1-2")
 	}
-	if c.MuseChatPerPeerPerMinute < 1 || c.MuseChatPerPeerPerHour < 1 ||
-		c.MuseChatGlobalPerMinute < 1 {
-		return fmt.Errorf("muse chat rate limits must be >= 1")
+	if c.MuseChatPerPeerPerMinute < 1 || c.MuseChatPerPeerPerMinute > 6 {
+		return fmt.Errorf("muse_chat_per_peer_per_minute must be 1-6")
+	}
+	if c.MuseChatPerPeerPerHour < 1 || c.MuseChatPerPeerPerHour > 30 {
+		return fmt.Errorf("muse_chat_per_peer_per_hour must be 1-30")
+	}
+	if c.MuseChatGlobalPerMinute < 1 || c.MuseChatGlobalPerMinute > 30 {
+		return fmt.Errorf("muse_chat_global_per_minute must be 1-30")
 	}
 	return nil
 }

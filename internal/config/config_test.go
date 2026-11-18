@@ -283,7 +283,11 @@ func TestMuseDirectChatConfig(t *testing.T) {
 		func(c *Config) { c.MuseChatDefaultBudgetSecs = 301 },
 		func(c *Config) { c.MuseChatDefaultBudgetSecs = 200; c.MuseChatMaxBudgetSecs = 100 },
 		func(c *Config) { c.MuseChatPollSecs = 0 },
+		func(c *Config) { c.MuseChatPollSecs = 3 },
 		func(c *Config) { c.MuseChatPerPeerPerMinute = 0 },
+		func(c *Config) { c.MuseChatPerPeerPerMinute = 7 },
+		func(c *Config) { c.MuseChatPerPeerPerHour = 31 },
+		func(c *Config) { c.MuseChatGlobalPerMinute = 31 },
 	} {
 		c := Default()
 		bad(c)
