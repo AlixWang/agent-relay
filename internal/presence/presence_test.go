@@ -146,6 +146,60 @@ func TestSweepTransitionFiresOnce(t *testing.T) {
 	if offCalls.Load() != 2 {
 		t.Fatalf("offline callback second transition: %d", offCalls.Load())
 	}
+	// The second flap is inside the 30-minute audit window: the webhook and
+	// callback still fire, but the audit trail gets no duplicate row.
+	entries, _ = st.ListAudit("system", "peer.offline", 0, 10)
+	if len(entries) != 1 {
+		t.Fatalf("throttled transition wrote audit: %+v", entries)
+	}
+}
+
+func TestOfflineAuditThrottledPerPeer(t *testing.T) {
+	st := openTest(t)
+	if err := st.CreatePeer(&store.Peer{ID: "a", Status: "active", CreatedAt: 1000, LastSeen: 2000}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, 300, "")
+	var offCalls atomic.Int32
+	s.OnOffline = func(string, int64) { offCalls.Add(1) }
+	audits := func() []*store.AuditEntry {
+		t.Helper()
+		entries, err := st.ListAudit("system", "peer.offline", 0, 10)
+		if err != nil {
+			t.Fatalf("list audit: %v", err)
+		}
+		return entries
+	}
+
+	s.Sweep(2100) // baseline
+	s.Sweep(2301) // first transition -> 1 audit row
+	if got := audits(); len(got) != 1 {
+		t.Fatalf("first transition audits: %+v", got)
+	}
+	// Online again, then drop 400s after the first audit.
+	if err := s.Beat("a", 0, "", 0, "", "", "", "", 2500); err != nil {
+		t.Fatal(err)
+	}
+	s.Sweep(2550)
+	s.Sweep(2900)
+	if got := audits(); len(got) != 1 {
+		t.Fatalf("flap inside window wrote audit: %+v", got)
+	}
+	if offCalls.Load() != 2 {
+		t.Fatalf("flap notification count: %d", offCalls.Load())
+	}
+	// 31 minutes after the last audit, a new transition is recorded again.
+	if err := s.Beat("a", 0, "", 0, "", "", "", "", 4400); err != nil {
+		t.Fatal(err)
+	}
+	s.Sweep(4450)
+	s.Sweep(4701)
+	if got := audits(); len(got) != 2 {
+		t.Fatalf("transition after window missing audit: %+v", got)
+	}
+	if offCalls.Load() != 3 {
+		t.Fatalf("notifications: %d", offCalls.Load())
+	}
 }
 
 func TestPromptVersionForwardOnly(t *testing.T) {
