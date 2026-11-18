@@ -154,7 +154,7 @@ POST /admin/muse/accounts { peer_id, label?, cookies, auto_wake?, enabled? } →
 PATCH /admin/muse/accounts/{id} { label?, peer_id?, cookies?, auto_wake?, enabled? } → { account, warning? }
 DELETE /admin/muse/accounts/{id} → { ok:true }（立即删除 Cookie 密文）
 POST /admin/muse/accounts/{id}/keepalive → { result }（Muse 失败仍 200，看 result.ok）
-POST /admin/muse/accounts/{id}/wake → { result }（Muse 失败仍 200；result.ok 只代表 session 有效，result.wake_ok 才是 VM RUNNING）
+POST /admin/muse/accounts/{id}/wake → { result }（Muse 失败仍 200；result.ok 只代表 session 有效，result.wake_ok 才是 Noise 验证通过）
 POST /admin/muse/keepalive → { summary }；后台正在跑 → 409 muse_busy
 GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last_result} }
 ```
@@ -173,9 +173,11 @@ GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last
   瞬时失败保留上次的 `last_attempt_ok` / `last_error` 和原状态。
 - `result.ok` = 本次 **session** 有效（session/auth/HTTP 成功），不包含唤醒结果；`result.error`
   也只放 session/auth/HTTP 错误。`result.wake_requested` = wake POST 返回 HTTP 200（请求被接受；
-  非 200 不置位）；`result.wake_ok` = 第二次 `/api/session` 复核到 `vm_state == RUNNING`。唤醒失败单独放 `result.wake_error`，
-  `result.wake_state` 为 `unconfirmed`（未确认 RUNNING）或 `running`（已确认）；保活/手动唤醒
-  未走到唤醒步骤时仍记为 `unconfirmed`（保活从选项 B 起每次都记录结果），授权探测未走到唤醒步骤时省略。
+  非 200 不置位）；`result.wake_ok` = 第二次 `/api/session` 为 `assigned` 后，Noise XX 握手成功
+  且一次只读 RPC（`chat.unread_count`，404/405 时 `identity`）成功。`vm_state` 只做展示，
+  不参与该判定。唤醒失败单独放 `result.wake_error`，`result.wake_state` 为 `unconfirmed`
+  （未确认）或 `noise_confirmed`（已确认）；保活/手动唤醒未走到唤醒步骤时仍记为
+  `unconfirmed`（保活从选项 B 起每次都记录结果），授权探测未走到唤醒步骤时省略。
   wake HTTP 200 不等于成功：`ok=true` + `wake_ok=false` 表示“会话正常、唤醒未确认”。
 - 账号持久化同样分域：`last_error` 只记录 session/auth 错误；`last_wake_error` /
   `last_wake_state` 单独记录最近一次唤醒诊断；保活/手动唤醒在 session 检查阶段失败也会记为
@@ -188,10 +190,12 @@ GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last
     超时/非 JSON 等瞬时失败不覆写它，也不把 `last_attempt_ok` 从 `true` 改成 `false`；
     此时保留上次确认的 `auth_state`、`vm_state` 和 `vm_state_at`。`401` 才置
     `auth_state=needs_reauth`。
-  - `last_wake_error`：最近一次**唤醒步骤**的诊断，只由 wake/二次 session 复核写入，
-    不会写入 `last_error`。wake HTTP 200 仅表示请求被接受，只有复核到
-    `status=assigned` 且 `vm_state=RUNNING` 才清空它；`last_wake_state=unconfirmed`
-    表示请求已发出但未确认上线。
+  - `last_wake_error`：最近一次**唤醒步骤**的诊断，只由 wake/二次 session 复核/Noise
+    验证写入，不会写入 `last_error`。wake HTTP 200 仅表示请求被接受，只有复核到
+    `status=assigned` 且 Noise 握手 + 只读 RPC 成功才清空它；格式为
+    `noise <stage>: <class> (attempt N/3, Xs)`（stage：auth/token/dial/handshake/rpc），
+    有界 500 字符，禁止包含 token/cookie/完整 WSS URL/响应正文。
+    `last_wake_state=unconfirmed` 表示请求已发出但未确认上线。
   - `last_wake_at` / `last_wake_ok`：最近一次走到唤醒步骤的尝试（**后台保活也计入**，
     因此不会再出现保活唤醒了但时间戳纹不动的陈旧值）。失败会同时写
     `last_wake_state=unconfirmed` + `last_wake_error`，但不会污染 `last_error`。
@@ -199,16 +203,18 @@ GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last
     刷新后把 `presence.OnOffline` 的恢复唤醒挡在冷却期内。
   - `wake_recovered`：仅当 `wake_ok=true`、`last_wake_error` 为空、
     `wake_state != "unconfirmed"`，且 `peer_last_seen >= last_wake_at` 时为 `true`；
-    它表示唤醒后确实收到了心跳，而不只是 API 复核成功。
+    它表示唤醒后确实收到了心跳，而不只是 Noise 握手成功。
   - `vm_state_at`：最近一次**成功的** `/api/session` 观察到 `vm_state` 的 Unix 秒时间戳。
     只有本次 session 成功（`result.ok=true`）才推进；瞬时失败保留旧值。成功响应缺少
     `vm_state` 时，`vm_state` 归一化为字符串 `UNKNOWN`，但 `vm_state_at` 仍会更新为本次
-    确认时间。控制台显示“未知（休眠/未分配）”，tooltip 同时给出原始值和确认时间。
+    确认时间。控制台显示“未知（休眠/未分配）”，tooltip 同时给出原始值、确认时间和
+    “仅展示，不参与唤醒判定”。
 - `account` 列表行另带 `peer_online` / `peer_last_seen` / `peer_status` / `wake_state` /
   `wake_recovered` / `wake_pending` / `wake_unconfirmed`。`wake_state` 取值：
-  `none`（无唤醒记录）、`pending`（刚发出、等待心跳）、`unconfirmed`（唤醒未确认 RUNNING，
-  即使之后又收到心跳也仍是此值）、`running`（已确认 RUNNING）、`recovered`（已确认 RUNNING 且之后
-  收到过心跳）。
+  `none`（无唤醒记录）、`pending`（旧口径：刚发出、等待心跳窗口）、`unconfirmed`（唤醒未确认，
+  即使之后又收到心跳也仍是此值）、`noise_confirmed`（Noise 已验证但尚未收到唤醒后心跳）、
+  `running`（旧口径：已确认 RUNNING，仅用于回滚/老数据）、`recovered`（已确认且之后收到过心跳）。
+  `noise_confirmed` 不进入 120 秒 `pending` 窗口。
 - 列表 `facets`：`ok` = 已启用 + `auth_state=ok` + `last_attempt_ok=true` + `last_error` 为空 +
   非 `wake_unconfirmed`；`wake_unconfirmed` = 前四项成立但唤醒未确认。两者与行 badge
   “正常”/“唤醒未确认”使用同一判定，因此不会同时把同一账号算作正常和异常。`disabled` 单独计数。

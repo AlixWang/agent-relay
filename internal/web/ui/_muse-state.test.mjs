@@ -56,10 +56,14 @@ assert(museWakeTone(wakeFailed) === 'warn', 'wake failure tone');
 assert(museWakeLabel(wakeFailed) === '唤醒未确认', 'wake failure label');
 assert(museWakeLabel({ last_wake_at: now, last_wake_ok: true, wake_state: 'recovered' }) === '已上线', 'recovered label');
 assert(museWakeLabel({ wake_state: 'pending' }) === '唤醒中', 'pending label');
-assert(museWakeLabel({ wake_state: 'running' }) === '已唤醒', 'running label');
+assert(museWakeLabel({ wake_state: 'noise_confirmed' }) === 'Noise 已验证', 'noise label');
+assert(museWakeLabel({ wake_state: 'running' }) === '已唤醒', 'running label (legacy)');
 assert(museWakeLabel({}) === '未上线', 'no wake label');
 assert(museWakeTone({ wake_state: 'recovered' }) === 'ok', 'recovered tone');
+assert(museWakeTone({ wake_state: 'noise_confirmed' }) === 'ok', 'noise tone');
 assert(museWakeTone({ wake_state: 'pending' }) === 'info', 'pending tone');
+assert(!museWakeUnconfirmed({ wake_state: 'noise_confirmed', last_wake_ok: true }), 'noise-confirmed is not unconfirmed');
+assert(museWakeUnconfirmed({ wake_state: 'noise_confirmed', last_wake_ok: false }), 'inconsistent noise state is unconfirmed');
 
 assert(museExpiryText(0, now) === '未知', 'unknown expiry');
 assert(museExpiryText(now - 1, now) === '已过期', 'expired expiry');
@@ -86,5 +90,6 @@ assert(vmTip.includes('原始值: UNKNOWN'), 'tooltip keeps raw vm value');
 assert(vmTip.includes('确认于') && vmTip.includes('2030'), 'tooltip shows confirmation time');
 assert(museVMTitle({ vm_state: '' }).includes('原始值: (空)'), 'tooltip marks empty raw value');
 assert(museVMTitle({ vm_state: 'UNKNOWN' }).includes('尚无确认时间'), 'tooltip handles missing timestamp');
+assert(museVMTitle({ vm_state: 'RUNNING' }).includes('仅展示，不参与唤醒判定'), 'vm state is display-only');
 
 console.log('PASS: muse URL/state helpers');

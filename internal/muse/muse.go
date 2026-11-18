@@ -4,7 +4,8 @@
 // The control plane is deliberately tiny: GET /api/session refreshes the
 // hatch_sess/hatch_vml cookies and reports the current vm_id/vm_state, and
 // POST /api/hatch/vm/wake asks Muse to boot the sandbox. Waking is never
-// inferred from the wake HTTP 200: a second /api/session must report RUNNING.
+// inferred from the wake HTTP 200: a second /api/session must be assigned and
+// the VM must complete a Noise XX handshake plus one read-only RPC.
 package muse
 
 import (
@@ -58,6 +59,10 @@ type Options struct {
 	DataDir           string
 	AutoWake          bool
 	Now               func() time.Time
+	// GatewayURL overrides the shared hatch WSS endpoint. Empty selects the
+	// production host. It exists so tests can point at a loopback Noise server;
+	// there is no config key for it.
+	GatewayURL string
 }
 
 // Account is the write-only-safe view of one authorization. It intentionally
@@ -98,9 +103,9 @@ type Account struct {
 }
 
 // Result is one keepalive/wake attempt. OK means the Muse session was valid;
-// WakeOK separately proves the VM reached RUNNING. Error is session/auth/HTTP
-// scoped; WakeError is wake scoped, so a failed wake does not turn a healthy
-// session result into a general failure.
+// WakeOK separately proves the VM completed the Noise verification. Error is
+// session/auth/HTTP scoped; WakeError is wake scoped, so a failed wake does not
+// turn a healthy session result into a general failure.
 type Result struct {
 	ID            string `json:"id"`
 	PeerID        string `json:"peer_id"`
@@ -147,12 +152,17 @@ type Status struct {
 // so concurrent keepalive/settings updates must not interleave) and prevents
 // two full keepalive runs through runMu.
 type Service struct {
-	st      store.Store
-	opts    Options
-	key     []byte
-	baseURL string
-	client  *http.Client
-	now     func() time.Time
+	st         store.Store
+	opts       Options
+	key        []byte
+	baseURL    string
+	gatewayURL string
+	client     *http.Client
+	now        func() time.Time
+
+	// verifyWake is verifyNoise in production. Tests that exercise the renew
+	// state machine without a Noise server override it.
+	verifyWake func(context.Context, *renewResult, *sessionResponse) error
 
 	mu         sync.Mutex
 	runMu      sync.Mutex
@@ -200,6 +210,10 @@ func New(st store.Store, opt Options) (*Service, error) {
 	if opt.KeepaliveInterval < 0 {
 		opt.KeepaliveInterval = 0
 	}
+	gatewayURL, err := normalizeGatewayURL(opt.GatewayURL)
+	if err != nil {
+		return nil, err
+	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	if strings.TrimSpace(opt.ProxyURL) != "" {
 		pu, err := url.Parse(opt.ProxyURL)
@@ -223,11 +237,12 @@ func New(st store.Store, opt Options) (*Service, error) {
 	opt.HTTPTimeout = timeout
 	opt.WakeCooldown = cooldown
 	s := &Service{
-		st:      st,
-		opts:    opt,
-		key:     key,
-		baseURL: base,
-		now:     now,
+		st:         st,
+		opts:       opt,
+		key:        key,
+		baseURL:    base,
+		gatewayURL: gatewayURL,
+		now:        now,
 		client: &http.Client{
 			Timeout:   timeout,
 			Transport: tr,
@@ -239,6 +254,7 @@ func New(st store.Store, opt Options) (*Service, error) {
 		backoff:    map[string]int64{},
 		wakeEvents: map[string]int64{},
 	}
+	s.verifyWake = s.verifyNoise
 	if created {
 		if accounts, err := st.ListMuseAccounts(); err == nil && len(accounts) > 0 {
 			log.Printf("WARN: muse: created a new cookie key; %d existing authorization(s) must be re-entered", len(accounts))
@@ -1038,6 +1054,29 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
+}
+
+// normalizeGatewayURL validates the Noise endpoint. Production must use wss;
+// ws is allowed only on loopback so tests never require a TLS certificate.
+func normalizeGatewayURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return noiseGatewayDefault, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" {
+		return "", errors.New("muse: gateway URL is not valid")
+	}
+	switch u.Scheme {
+	case "wss":
+	case "ws":
+		if !isLoopbackHost(u.Hostname()) {
+			return "", errors.New("muse: gateway URL must use wss unless loopback")
+		}
+	default:
+		return "", errors.New("muse: gateway URL must be ws(s)")
+	}
+	return raw, nil
 }
 
 func validateBaseURL(raw string) error {

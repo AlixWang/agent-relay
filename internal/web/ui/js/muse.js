@@ -38,10 +38,12 @@ export function museSessionOK(a) {
 }
 
 // A failed wake stays unconfirmed even if the peer heartbeat later returns.
-// wake_recovered is only meaningful when the wake itself verified RUNNING.
+// wake_recovered is only meaningful when the wake itself was verified (Noise
+// handshake + one read-only RPC; legacy rows used vm_state=RUNNING).
 export function museWakeUnconfirmed(a) {
   if (!a) return false;
   if (a.wake_unconfirmed || a.wake_state === 'unconfirmed' || a.last_wake_error) return true;
+  if (a.wake_state === 'noise_confirmed' && a.last_wake_ok === false) return true;
   // Older list payloads lack wake_state; only then fall back to the recorded
   // wake booleans. A newer keepalive may clear a failed manual wake without
   // rewriting last_wake_at, so wake_state is authoritative when present.
@@ -51,7 +53,7 @@ export function museWakeUnconfirmed(a) {
 
 export function museWakeTone(a) {
   if (museWakeUnconfirmed(a)) return 'warn';
-  if (a && (a.wake_recovered || a.wake_state === 'recovered')) return 'ok';
+  if (a && (a.wake_recovered || a.wake_state === 'recovered' || a.wake_state === 'noise_confirmed')) return 'ok';
   if (a && (a.wake_pending || a.wake_state === 'pending' || a.wake_state === 'running')) return 'info';
   return 'warn';
 }
@@ -60,6 +62,7 @@ export function museWakeLabel(a) {
   if (!a) return '—';
   if (museWakeUnconfirmed(a)) return '唤醒未确认';
   if (a.wake_recovered || a.wake_state === 'recovered') return '已上线';
+  if (a.wake_state === 'noise_confirmed') return 'Noise 已验证';
   if (a.wake_pending || a.wake_state === 'pending') return '唤醒中';
   if (a.wake_state === 'running') return '已唤醒';
   return '未上线';
@@ -119,7 +122,7 @@ export function museVMTitle(a) {
   const at = a && a.vm_state_at
     ? `确认于 ${fmtTime(a.vm_state_at)}（${ago(a.vm_state_at)}）`
     : '尚无确认时间';
-  return `原始值: ${raw} · ${at}`;
+  return `原始值: ${raw} · ${at} · 仅展示，不参与唤醒判定`;
 }
 
 const toneClass = (tone) => (tone && tone !== 'muted' ? ' ' + tone : '');
@@ -143,7 +146,7 @@ const wakeCell = (a) => {
   const unconfirmed = museWakeUnconfirmed(a);
   if (!a.last_wake_at && !unconfirmed) return '<span class="muted xs">—</span>';
   const tone = museWakeTone(a);
-  const tip = a.last_wake_error || (unconfirmed ? '唤醒后尚未确认 VM 进入 RUNNING' : '');
+  const tip = a.last_wake_error || (unconfirmed ? '唤醒后尚未确认 VM 可连接' : '');
   const when = a.last_wake_at
     ? `<small class="muted xs" title="${esc(fmtTime(a.last_wake_at))}">${esc(ago(a.last_wake_at))}</small>`
     : '';
@@ -526,7 +529,7 @@ async function submitMuseForm(e) {
 function toastResult(res, verb) {
   if (!res) return;
   if (res.ok && res.wake_ok) {
-    toast(`${verb}成功 · VM RUNNING`, 'ok');
+    toast(`${verb}成功 · Noise 已验证`, 'ok');
   } else if (res.ok) {
     toast(`${verb}：会话有效，但 VM 唤醒未确认${res.error ? '：' + res.error : ''}`, 'warn', 6000);
   } else if (res.auth_state === 'needs_reauth') {

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/AlixWang/agent-relay/internal/muse"
+	"github.com/AlixWang/agent-relay/internal/muse/musetest"
+	"github.com/AlixWang/agent-relay/internal/presence"
 	"github.com/AlixWang/agent-relay/internal/store"
 )
 
@@ -64,6 +66,12 @@ func newFakeMuseAPI(t *testing.T) (*fakeMuseAPI, *httptest.Server) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"accepted":true}`))
 	})
+	mux.HandleFunc("/api/auth/check", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"gateway-test-access"}`))
+	})
+	mux.HandleFunc("/api/hatch/token", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"token":"gateway-test-hatch"}`))
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return f, srv
@@ -71,8 +79,10 @@ func newFakeMuseAPI(t *testing.T) (*fakeMuseAPI, *httptest.Server) {
 
 func (f *fixture) enableMuse(t *testing.T, baseURL string) *muse.Service {
 	t.Helper()
+	noise := musetest.New(t)
 	svc, err := muse.New(f.srv.st, muse.Options{
 		BaseURL:           baseURL,
+		GatewayURL:        noise.URL,
 		HTTPTimeout:       2 * time.Second,
 		KeepaliveInterval: time.Hour,
 		WakeCooldown:      time.Minute,
@@ -243,6 +253,26 @@ func TestMuseFacetsMatchRowWakeBadge(t *testing.T) {
 			row["wake_recovered"] != false {
 			t.Fatalf("row badge scope: %+v", row)
 		}
+	}
+}
+
+func TestMuseWakeStateNoiseConfirmedDoesNotPend(t *testing.T) {
+	a := &muse.Account{
+		LastWakeAt: 100, LastWakeOK: true, LastWakeState: "noise_confirmed",
+	}
+	if got := museWakeState(a, &presence.PeerView{LastSeen: 50}, 110); got != "noise_confirmed" {
+		t.Fatalf("noise-confirmed wake was downgraded to %q", got)
+	}
+	if got := museWakeState(a, &presence.PeerView{LastSeen: 101}, 110); got != "recovered" {
+		t.Fatalf("heartbeat after noise confirmation: %q", got)
+	}
+	// Legacy RUNNING wakes keep the old 120s heartbeat window.
+	legacy := &muse.Account{LastWakeAt: 100, LastWakeOK: true, LastWakeState: "running"}
+	if got := museWakeState(legacy, &presence.PeerView{LastSeen: 50}, 110); got != "pending" {
+		t.Fatalf("legacy running state changed: %q", got)
+	}
+	if got := museWakeState(a, &presence.PeerView{LastSeen: 50}, 110); got == "unconfirmed" {
+		t.Fatal("noise_confirmed counted as unconfirmed")
 	}
 }
 

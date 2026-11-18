@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AlixWang/agent-relay/internal/muse/musetest"
 	"github.com/AlixWang/agent-relay/internal/store"
 )
 
@@ -165,6 +166,12 @@ func newFakeMuse(t *testing.T) (*fakeMuse, *httptest.Server) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"accepted":true}`))
 	})
+	mux.HandleFunc("/api/auth/check", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "test-access"})
+	})
+	mux.HandleFunc("/api/hatch/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": "test-hatch"})
+	})
 	mux.HandleFunc("/should-not-hit", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.other++
@@ -210,6 +217,10 @@ func newTestEnv(t *testing.T, autoWake bool) *testEnv {
 	if err != nil {
 		t.Fatalf("muse.New: %v", err)
 	}
+	// Most tests exercise the renew state machine, not the Noise transport.
+	// The mock gateway has its own tests; here a successful verifier keeps the
+	// old wake expectations meaningful without opening a socket.
+	env.svc.verifyWake = func(context.Context, *renewResult, *sessionResponse) error { return nil }
 	return env
 }
 
@@ -412,14 +423,14 @@ func TestWakeUsesFreshVMIDAndVerifies(t *testing.T) {
 		t.Fatalf("wake: %v", err)
 	}
 	if !res.OK || !res.WakeRequested || !res.WakeOK || res.VMState != "RUNNING" ||
-		res.Error != "" || res.WakeError != "" || res.WakeState != "running" {
+		res.Error != "" || res.WakeError != "" || res.WakeState != "noise_confirmed" {
 		t.Fatalf("wake result: %+v", res)
 	}
 	if env.fake.lastWakeVMID() != "vm-1" {
 		t.Fatalf("wake used stale vm_id: %q", env.fake.lastWakeVMID())
 	}
 	row, _ = env.st.GetMuseAccountByPeer("alice")
-	if row.LastWakeAt == 0 || !row.LastWakeOK || row.LastWakeError != "" || row.LastWakeState != "running" {
+	if row.LastWakeAt == 0 || !row.LastWakeOK || row.LastWakeError != "" || row.LastWakeState != "noise_confirmed" {
 		t.Fatalf("wake not recorded: %+v", row)
 	}
 }
@@ -427,9 +438,9 @@ func TestWakeUsesFreshVMIDAndVerifies(t *testing.T) {
 func TestWakeNotConfirmedIsNotSuccess(t *testing.T) {
 	env := newTestEnv(t, true)
 	a := env.authorize(t, "alice")
-	env.fake.mu.Lock()
-	env.fake.verifyState = "SUSPENDED"
-	env.fake.mu.Unlock()
+	env.svc.verifyWake = func(context.Context, *renewResult, *sessionResponse) error {
+		return errors.New("noise rpc: unread 500 (attempt 3/3, 3.0s)")
+	}
 	res, err := env.svc.Wake(context.Background(), a.ID)
 	if err != nil {
 		t.Fatalf("wake: %v", err)
@@ -440,7 +451,7 @@ func TestWakeNotConfirmedIsNotSuccess(t *testing.T) {
 	if res.Error != "" {
 		t.Fatalf("wake failure leaked into session error: %+v", res)
 	}
-	if !strings.Contains(res.WakeError, "not confirmed") || res.WakeState != "unconfirmed" {
+	if !strings.Contains(res.WakeError, "noise rpc") || res.WakeState != "unconfirmed" {
 		t.Fatalf("missing wake diagnostic: %+v", res)
 	}
 	row, _ := env.st.GetMuseAccountByPeer("alice")
@@ -448,8 +459,125 @@ func TestWakeNotConfirmedIsNotSuccess(t *testing.T) {
 		t.Fatalf("wake failure marked session broken: %+v", row)
 	}
 	if row.LastWakeAt == 0 || row.LastWakeOK || row.LastWakeState != "unconfirmed" ||
-		!strings.Contains(row.LastWakeError, "not confirmed") {
+		!strings.Contains(row.LastWakeError, "noise rpc") {
 		t.Fatalf("wake diagnosis not persisted separately: %+v", row)
+	}
+}
+
+func TestRenewUsesRealNoiseVerifier(t *testing.T) {
+	env := newTestEnv(t, true)
+	ws := musetest.New(t)
+	env.svc.gatewayURL = ws.URL
+	env.svc.verifyWake = env.svc.verifyNoise
+	a := env.authorize(t, "alice") // authorize performs one real verification
+	if a.LastWakeState != "noise_confirmed" || !a.LastWakeOK {
+		t.Fatalf("authorize did not record a Noise-confirmed wake: %+v", a)
+	}
+	env.clock += 10
+	res, err := env.svc.Wake(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+	if !res.OK || !res.WakeOK || res.WakeState != "noise_confirmed" || res.WakeError != "" {
+		t.Fatalf("wake result: %+v", res)
+	}
+	if got := len(ws.Requests()); got < 2 {
+		t.Fatalf("real verifier did not issue RPCs: %d", got)
+	}
+}
+
+func TestRenewNoiseIgnoresRUNNINGVMState(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	calls := 0
+	env.svc.verifyWake = func(context.Context, *renewResult, *sessionResponse) error {
+		calls++
+		return nil
+	}
+	env.fake.mu.Lock()
+	env.fake.verifyState = "RUNNING"
+	env.fake.mu.Unlock()
+	env.clock += 10
+	res, err := env.svc.Wake(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("vm_state=RUNNING took a shortcut around Noise: calls=%d", calls)
+	}
+	if !res.WakeOK || res.WakeState != "noise_confirmed" {
+		t.Fatalf("result: %+v", res)
+	}
+}
+
+func TestRenewNoiseFailureKeepsSessionHealthyAndSealsCookies(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	env.svc.verifyWake = func(_ context.Context, res *renewResult, _ *sessionResponse) error {
+		res.Cookies["hatch_gw"] = "rotated-by-token"
+		res.Exp["hatch_gw"] = env.clock + 3600
+		return &noiseError{
+			Stage: "token", Class: "429", Cause: &MuseHTTPError{
+				Op: "noise token", StatusCode: http.StatusTooManyRequests, RetryAfter: 120 * time.Second,
+			},
+		}
+	}
+	env.clock += 10
+	res, err := env.svc.Wake(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+	if !res.OK || res.AuthState != "ok" || res.Error != "" {
+		t.Fatalf("Noise failure polluted session health: %+v", res)
+	}
+	if res.WakeOK || res.WakeState != "unconfirmed" || !strings.Contains(res.WakeError, "noise token: 429") {
+		t.Fatalf("wake result: %+v", res)
+	}
+	if at := env.svc.retryAt(a.ID); at < env.clock+119 {
+		t.Fatalf("Retry-After from wrapped token error lost: at=%d result=%+v", at, res)
+	}
+	row, _ := env.st.GetMuseAccountByPeer("alice")
+	if row.LastError != "" || !row.LastAttemptOK {
+		t.Fatalf("Noise failure leaked into session error: %+v", row)
+	}
+	cookies, err := env.svc.openCookies(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookies["hatch_gw"] != "rotated-by-token" {
+		t.Fatalf("cookie rotated during verification was not sealed: %+v", cookies)
+	}
+}
+
+func TestRenewNoiseErrorIsTruncatedTo500(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	env.svc.verifyWake = func(context.Context, *renewResult, *sessionResponse) error {
+		return errors.New("noise rpc: " + strings.Repeat("x", 800))
+	}
+	env.clock += 10
+	if _, err := env.svc.Wake(context.Background(), a.ID); err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+	row, _ := env.st.GetMuseAccountByPeer("alice")
+	if len(row.LastWakeError) != 500 {
+		t.Fatalf("last_wake_error length = %d, want 500", len(row.LastWakeError))
+	}
+	if !strings.HasPrefix(row.LastWakeError, "noise rpc: ") {
+		t.Fatalf("wake error prefix: %q", row.LastWakeError[:20])
+	}
+}
+
+func TestApplyRenewNoiseConfirmedClearsWakeError(t *testing.T) {
+	a := &store.MuseAccount{
+		LastWakeOK: false, LastWakeState: "unconfirmed", LastWakeError: "old failure",
+	}
+	applyRenew(a, &renewResult{
+		OK: true, AuthState: "ok", At: 30, WakeOK: true, WakeState: "noise_confirmed",
+	}, 30, true)
+	if a.LastError != "" || !a.LastWakeOK || a.LastWakeError != "" ||
+		a.LastWakeState != "noise_confirmed" || a.LastWakeAt != 30 {
+		t.Fatalf("noise-confirmed wake not applied cleanly: %+v", a)
 	}
 }
 
@@ -791,13 +919,15 @@ func TestKeepaliveRecordsWakeAttempt(t *testing.T) {
 	}
 	row, _ = env.st.GetMuseAccountByPeer("alice")
 	if row.LastWakeAt != env.clock || !row.LastWakeOK ||
-		row.LastWakeState != "running" || row.LastWakeError != "" {
+		row.LastWakeState != "noise_confirmed" || row.LastWakeError != "" {
 		t.Fatalf("keepalive wake record: %+v", row)
 	}
 
 	// A failed verification is recorded as unconfirmed (and stays out of the
 	// session-scoped last_error).
-	env.fake.setVerifyState("UNKNOWN")
+	env.svc.verifyWake = func(context.Context, *renewResult, *sessionResponse) error {
+		return errors.New("noise handshake: timeout (attempt 3/3, 24.0s)")
+	}
 	env.clock += 10
 	res, err = env.svc.Keepalive(context.Background(), a.ID)
 	if err != nil {
@@ -808,7 +938,7 @@ func TestKeepaliveRecordsWakeAttempt(t *testing.T) {
 	}
 	row, _ = env.st.GetMuseAccountByPeer("alice")
 	if row.LastWakeAt != env.clock || row.LastWakeOK ||
-		row.LastWakeState != "unconfirmed" || !strings.Contains(row.LastWakeError, "not confirmed") {
+		row.LastWakeState != "unconfirmed" || !strings.Contains(row.LastWakeError, "noise handshake") {
 		t.Fatalf("unconfirmed keepalive wake record: %+v", row)
 	}
 	if row.LastError != "" || !row.LastAttemptOK {
@@ -1285,16 +1415,12 @@ func TestKeepaliveAllLogsOneVerdictPerAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("all: %v", err)
 	}
-	if sum.Total != accounts || sum.OK != accounts || sum.Failed != 0 || sum.WakeOK != 0 {
+	if sum.Total != accounts || sum.OK != accounts || sum.Failed != 0 || sum.WakeOK != accounts {
 		t.Fatalf("summary: %+v", sum)
 	}
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) != accounts {
 		t.Fatalf("want one verdict per account, got %d: %s", len(lines), buf.String())
-	}
-	wantWakeError := "wake_error=wake not confirmed (vm_state=UNKNOWN)"
-	if got := strings.Count(buf.String(), wantWakeError); got != accounts {
-		t.Fatalf("UNKNOWN wake error distribution: got %d/%d %q: %s", got, accounts, wantWakeError, buf.String())
 	}
 	for _, id := range ids {
 		var line string
@@ -1308,11 +1434,14 @@ func TestKeepaliveAllLogsOneVerdictPerAccount(t *testing.T) {
 		}
 		for _, want := range []string{
 			"ok=true", "auth=ok", "vm_state=UNKNOWN", "vm_state_at=" + strconv.FormatInt(env.clock, 10),
-			"wake_requested=true", "wake_ok=false", "wake_state=unconfirmed", wantWakeError,
+			"wake_requested=true", "wake_ok=true", "wake_state=noise_confirmed", "wake_error=",
 		} {
 			if !strings.Contains(line, want) {
 				t.Fatalf("verdict missing %q: %s", want, line)
 			}
+		}
+		if strings.Contains(line, "wake_error=noise") || strings.Contains(line, "wake_ok=false") {
+			t.Fatalf("Noise-confirmed wake still reported as failed: %s", line)
 		}
 		if strings.Contains(line, "hatch_sess") || strings.Contains(line, "hatch_vml") {
 			t.Fatalf("verdict leaked cookies: %s", line)

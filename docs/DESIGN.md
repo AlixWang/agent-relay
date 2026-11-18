@@ -211,9 +211,25 @@ needs two things the relay cannot infer: a valid Muse session cookie and the
   and is never returned by the admin API. Deleting the binding deletes the
   ciphertext; deleting/pruning a peer cascades.
 - **Control plane:** `GET {base}/api/session` renews `hatch_vml`/`hatch_sess` and
-  returns `vm_id`/`vm_state`; `POST {base}/api/hatch/vm/wake` asks Muse to boot
-  the VM. A wake HTTP 200 is only an acknowledgement — a second `/api/session`
-  must report `vm_state == RUNNING`.
+  returns `vm_id`/`vm_state`/`endpoint_url`; `POST {base}/api/hatch/vm/wake`
+  asks Muse to boot the VM. A wake HTTP 200 is only an acknowledgement — a
+  second `/api/session` must still report `status=assigned`, then the relay
+  proves liveness over Noise.
+- **Wake verification (Noise):** after the second session read, the relay calls
+  `POST /api/auth/check` → `POST /api/hatch/token` with the merged cookie jar,
+  opens `wss://hatch.metaaivm.com/v1/noise?vm_id=…&auth_token=…`, runs a
+  standard `Noise_XX_25519_AESGCM_SHA256` initiator handshake (empty prologue,
+  no PSK), and issues one read-only RPC (`chat.unread_count`, falling back to
+  `identity` only on 404/405). One verification fetches the token once and gets
+  at most three dial attempts inside a 25s hard budget; a token 401/403 gets one
+  session refresh and one retry. Set-Cookie is merged on every response,
+  including failures, and the rotated jar is sealed once by `renew`. Errors are
+  stage/status-only and never contain tokens, cookie values or the full WSS URL.
+  `vm_state` remains displayed (`vm_state`/`vm_state_at`) but is **not** part of
+  the success predicate, so an upstream `UNKNOWN` no longer blocks wake
+  confirmation. `last_wake_state=noise_confirmed` means handshake + RPC passed;
+  the legacy `running` value is still read for rollback compatibility but is
+  never written.
 - **Background keepalive:** the loop still ticks every `muse_keepalive_secs`
   (default 900s = 15 minutes); each tick visits every enabled account, but
   renews only when due. It skips an account
@@ -238,16 +254,22 @@ needs two things the relay cannot infer: a valid Muse session cookie and the
   hook returns immediately; the wake runs in its own goroutine.
 - **Failure semantics:** 401 marks `needs_reauth` and preserves the old cookie;
   403/429/5xx/timeouts/non-JSON are transient and preserve the last confirmed
-  state; a wake that is not confirmed RUNNING is reported as `wake_ok=false` and
-  stored in `last_wake_error`/`last_wake_state=unconfirmed`, never as a session
-  failure (`last_error` stays empty when the session itself is healthy). Only a
-  confirmed wake followed by a heartbeat is `wake_recovered`; a later heartbeat
-  does not upgrade a failed wake to “已上线”. This mirrors the reference
-  implementation (`czg86389-hub/muse2api`) and avoids the field failures: stale
-  `vm_id` reuse, “wake 200 = success”, and wake errors masking healthy sessions.
+  state; a wake whose Noise handshake/RPC cannot be confirmed is reported as
+  `wake_ok=false` and stored in `last_wake_error`/`last_wake_state=unconfirmed`,
+  never as a session failure (`last_error` stays empty when the session itself
+  is healthy). Wake failures make the account badge yellow (“唤醒未确认”), never
+  red; only a `/api/session` 401 asks for re-authorization. Only a confirmed
+  wake followed by a heartbeat is `wake_recovered`; a later heartbeat does not
+  upgrade a failed wake to “已上线”. This avoids the field failures: stale
+  `vm_id` reuse, “wake 200 = success”, `vm_state=UNKNOWN` false negatives, and
+  wake errors masking healthy sessions.
   For databases written before the split, known wake-only `last_error` values
   are promoted to `last_wake_error` on read (never discarded) and marked
   `last_wake_state=unconfirmed`/`last_wake_ok=false`.
+- **Live acceptance:** because the relay host's egress and Go's TLS
+  fingerprint cannot be proven from the development sandbox, merge requires the
+  controlled runbook in `docs/muse-noise-live-check.md`: three consecutive
+  `noise_confirmed` wakes and an 11-account sweep under 10 minutes.
 - **Out of scope:** no headless-browser/CDP chat automation, no cookie importer
   extension, no multi-account rotation. One Muse account should have one
   keepalive owner; running muse2api's keepalive on the same account will rotate
@@ -568,7 +590,7 @@ CREATE TABLE muse_accounts (
     last_wake_at      INTEGER DEFAULT 0,
     last_wake_ok      INTEGER DEFAULT 0,
     last_wake_error   TEXT DEFAULT '', -- wake-scoped, never a session error
-    last_wake_state   TEXT DEFAULT '', -- '' | unconfirmed | running
+    last_wake_state   TEXT DEFAULT '', -- '' | unconfirmed | noise_confirmed | running (legacy)
     auto_wake         INTEGER DEFAULT 1,
     enabled           INTEGER DEFAULT 1,
     authorized_at     INTEGER NOT NULL,

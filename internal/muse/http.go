@@ -17,9 +17,10 @@ import (
 // sessionResponse is the subset of GET /api/session we rely on. muse2api's
 // probes pin these three fields; everything else is ignored.
 type sessionResponse struct {
-	Status  string `json:"status"`
-	VMID    string `json:"vm_id"`
-	VMState string `json:"vm_state"`
+	Status      string `json:"status"`
+	VMID        string `json:"vm_id"`
+	VMState     string `json:"vm_state"`
+	EndpointURL string `json:"endpoint_url"`
 }
 
 // MuseSessionUnavailable reports an HTTP 200 /api/session response whose
@@ -117,8 +118,10 @@ type renewResult struct {
 	RetryAt   int64 // 429 only: unix time before which the next keepalive must skip
 	Rotated   bool  // a 200 non-assigned response rotated the cookie jar
 	WakeError string
-	// WakeState is "unconfirmed" when a wake was attempted but RUNNING could
-	// not be verified, and "running" once it was. Empty means no wake attempt.
+	// WakeState is "unconfirmed" when a wake was attempted but Noise could not
+	// verify it, and "noise_confirmed" once the handshake plus one read-only
+	// RPC succeeded. "running" is legacy (vm_state=RUNNING) and is still read
+	// for rollback compatibility, never written. Empty means no wake attempt.
 	WakeState string
 	VMStateAt int64
 	At        int64
@@ -126,8 +129,9 @@ type renewResult struct {
 
 // renew calls /api/session, optionally wakes the VM and verifies it. The
 // sequence mirrors muse2api: always refresh the session first (the vm_id may
-// have changed after a sandbox restart), wake, then re-read the session to
-// prove vm_state == RUNNING. A wake HTTP 200 alone is not success.
+// have changed after a sandbox restart), wake, then re-read the session and
+// prove liveness with a Noise handshake plus one read-only RPC. vm_state is
+// recorded for display only; a wake HTTP 200 alone is not success.
 func (s *Service) renew(ctx context.Context, cookies map[string]string, exp map[string]int64, wake bool) (*renewResult, error) {
 	now := s.now().Unix()
 	res := &renewResult{
@@ -207,12 +211,21 @@ func (s *Service) renew(ctx context.Context, cookies map[string]string, exp map[
 					res.VMID = verify.VMID
 					res.VMState = normalizeVMState(verify.VMState)
 					res.VMStateAt = now
-					if verify.Status == "assigned" && res.VMState == "RUNNING" {
-						res.WakeOK = true
-						res.WakeState = "running"
-					} else {
-						res.WakeError = fmt.Sprintf("wake not confirmed (vm_state=%s)", res.VMState)
+					// vm_state is display-only: it is deliberately NOT a wake
+					// shortcut, even when upstream claims RUNNING. Only a
+					// completed Noise handshake plus one read-only RPC proves
+					// the VM is actually serving.
+					verr := s.verifyWake(ctx, res, verify)
+					if verr != nil {
+						if at := retryAtFromError(verr, now); at > 0 {
+							res.RetryAt = at
+						}
+						res.WakeError = verr.Error()
 						res.WakeState = "unconfirmed"
+					} else {
+						res.WakeOK = true
+						res.WakeState = "noise_confirmed"
+						res.WakeError = ""
 					}
 				}
 			}
