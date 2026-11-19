@@ -21,3 +21,6 @@ playwright-report/
 # checkout builds with plain `go build` — no CLI, no network, no build chain.
 # After editing a .templ file run `make generate` and commit the result; CI
 # and the release workflow fail if the two disagree.
+
+# Local Go build cache (workspace sandbox)
+/.gocache/

@@ -266,11 +266,14 @@ needs two things the relay cannot infer: a valid Muse session cookie and the
   For databases written before the split, known wake-only `last_error` values
   are promoted to `last_wake_error` on read (never discarded) and marked
   `last_wake_state=unconfirmed`/`last_wake_ok=false`.
-- **Direct chat (v1, default off):** an admin may, per opted-in member, send one
-  pure-text message to that member's Muse main chat (or an existing side chat)
-  and read one reply over the same Noise transport. Three gates apply: config
-  deploy flag, runtime kill switch, and per-account `chat_enabled` consent
-  (reset by re-authorization or a peer rebind). A dialogue holds an account
+- **Direct chat (v2, default off):** an admin may, per enabled member, send
+  pure-text messages to that member's Muse main chat (or an existing side chat)
+  and read replies over the same Noise transport. Three gates apply: config
+  deploy flag, runtime kill switch, and the per-account `chat_enabled`
+  administrator switch (one click in the member row; reset by re-authorization
+  or a peer rebind; v1 opt-in rows are grandfathered). The console page
+  `#muse-chat` keeps its one-hour thread from in-memory jobs, never from the
+  database or `chat.history` backfill. A dialogue holds an account
   lease, so keepalive/wake/offline recovery skip that account for the job's
   lifetime; the preparation phase alone takes `opMu`, never the stream or
   polling. Each job uses a short-lived connection with one reader multiplexing

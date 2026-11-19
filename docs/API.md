@@ -159,20 +159,23 @@ POST /admin/muse/keepalive → { summary }；后台正在跑 → 409 muse_busy
 GET  /admin/muse/status → { status{running,loop_enabled,last_run,next_run,last_result} }
 ```
 
-### Muse 直接对话（v1，默认关闭，admin-only）
+### Muse 直接对话（v2，默认关闭，admin-only）
 
-`GET /admin/muse/accounts` 的响应另带 `chat_status{deploy_enabled,runtime_enabled,active,capacity,jobs,...}`，控制台据此显示“直接对话”开关与入口。所有对话端点都要求 admin 会话；peer token / agent 无入口。请求体上限 16KB，拒绝未知字段与结构化审批字段。
+`GET /admin/muse/accounts` 的响应另带 `chat_status{deploy_enabled,runtime_enabled,active,capacity,jobs,...}`，控制台据此显示“直接对话”开关与入口。所有对话端点都要求 admin 会话；peer token / agent / webhook 无入口。请求体上限 16KB，拒绝未知字段与结构化任务/审批字段。
 
+- `POST /admin/muse/accounts/{id}/chat-access { enabled, reason? }` → `{ ok, account }`。开启是管理员操作开关：账号 `enabled` 且 `auth_state=ok`，部署门必须打开；写 `chat_enabled=1`、复用 `chat_consent_at/by` 作 `enabled_at/by`，同一事务写 `muse.chat.access_grant`（actor `admin`，detail 只含 account/peer/by/reason）。关闭写 `muse.chat.access_revoke` 并停止在途 job 的本地等待。旧路径 `/chat-consent` 已移除（404）。
 - `POST /admin/muse/chat { peer_id, text, session_id?, budget_secs?, block_secs?, mode?, client_request_id? }` → **202** + job 快照（即使 block 内已完成/失败仍是 202；HTTP 只表达准入）。
   - 文本：1–4000 Unicode 码点、≤16KB；`session_id` 留空=主聊天，非空必须是已存在的 side chat（`[A-Za-z0-9._:-]{1,128}`）。
   - `budget_secs` 30–300（默认 180）；`block_secs` 0–20（默认 0；`mode=async` 强制 0，`mode=wait` 仅在 block 内等快照）。
   - `client_request_id` ≤64 字符；同 peer 同 id 10 分钟内返回原 job（`duplicate:true`），同 id 不同文本 409 `idempotency_conflict`。
-  - 准入错误：503 `muse_chat_disabled`/`muse_vm_disabled`；409 `muse_chat_opt_in_required`/`muse_account_disabled`/`muse_needs_reauth`/`muse_account_unverified`/`muse_chat_in_progress`（带 `chat_id`）；429 `muse_chat_busy`/`muse_chat_rate_limited`（带 `Retry-After`）；400 文本/字段错误。
-- `GET /admin/muse/chat/{id}` → 200 + job 快照（存在即 200，含 failed/timeout；终态保留 1h，进程重启后 404）。
+  - 准入错误：503 `muse_chat_disabled`/`muse_vm_disabled`；409 `muse_chat_access_required`/`muse_account_disabled`/`muse_needs_reauth`/`muse_account_unverified`/`muse_chat_in_progress`（带 `chat_id`）；429 `muse_chat_busy`/`muse_chat_rate_limited`（带 `Retry-After`）；400 文本/字段错误。
+- `GET /admin/muse/chat/{id}` → 200 + job 快照（存在即 200，含 failed/timeout；终态保留 1h，进程重启后 404）。快照**不返回操作者文本**；回复只在该 job 的 `reply` 字段。
+- `GET /admin/muse/chat/thread?peer_id=...&session=...` → `{ ok, peer_id, session, retention_secs:3600, since, server_time, jobs[], sessions[] }`。jobs 为该成员在选定线程（空=主聊天）最近 1 小时的内存 job，含操作者已发 `text`、`reply`、`status`、`error`、`partial_text`、时间戳与 `budget_secs`；`sessions[]` 是这段时间见过的 side chat id。**不落库、不读 `chat.history`；重启/超 1 小时返回空 jobs**。仅供 admin，文本不写日志/审计。
 - `POST /admin/muse/chat/{id}/cancel {}` → `{ ok, status:"cancelled", cancel:"sent|unsupported|skipped", chat }`；终态 409 `chat_not_active`；不删除已发消息。
 - `POST /admin/muse/chat/settings { enabled }` → `{ ok, enabled, status }`；config 部署门关闭时开启 409 `deploy_flag_off`；关闭会停止在途 job（不发 `chat.cancel`）。
 - `GET /admin/muse/chat/status` → `{ status{deploy_enabled,runtime_enabled,active,capacity,jobs,default_budget_secs,max_budget_secs,poll_secs,...} }`。
-- `POST /admin/muse/accounts/{id}/chat-consent { enabled, consent_version?, consent_evidence?, reason? }` → `{ ok, account }`；开启要求 `consent_version=1` 且证据 8–200 字符，账号 `enabled` 且 `auth_state=ok`；写账号列与审计在同一个事务里。关闭保留历史 consent 字段。
+- `POST /admin/muse/chat/probe/approvals { chat_id, probe:true }` → `{ ok, service:1, upstream_status, bytes, body }`。隐藏探针，admin-only，默认关闭（缺 `probe:true` → 403 `muse_probe_disabled`）。复用该 chat job 的既有 Noise 连接/lease 发 service 1 的 `GET /approvals`；上游 2xx 时 HTTP 200，否则 502 且仍返回 `upstream_status`/`body`。不写审计、不写日志。无在途 session → 409 `chat_not_active`；未知 job → 404 `unknown_chat`。
+- `POST /admin/muse/chat/probe/decide { chat_id, probe:true, approval_id, decision, variant }` → 同上形状。只接受 `decision=deny|allow_once`（`allow_always` → 400 `probe_allow_always_forbidden`）；`variant=with_id|decision_only|empty` 对应三种请求体。2xx 只算“已提交”，须重查 `/probe/approvals` 看状态变化。每请求只做一步，不批量、不自动。
 
 job 快照关键字段：`status`（preparing/sending/confirming/waiting/replied/timeout/delivery_unknown/reply_unknown/failed/cancelled）、`baseline_seq`、`user_seq`、`sent_at`、`confirmed_at`、`deadline_at`、`reply`、`confidence`、`warnings`、`poll_count`、`last_seq`、`error{code,class,retryable,retry_after_secs}`、`partial_text/draft`、`duplicate`、`visibility`。错误/回复均不回显上游正文或凭证。
 
