@@ -455,8 +455,20 @@
                 </div>
               </div>
 
-              <template x-for="m in messages" :key="m.seq || m.id || Math.random()">
-                <div class="cmd-msg" :class="{
+              <div class="cmd-load-earlier" x-show="canLoadOlder || loadingOlder">
+                <button type="button" class="btn btn-outline btn-sm" @click="loadOlderMessages()" :disabled="loadingOlder">
+                  <svg class="icon xs"><use href="#i-clock"/></svg>
+                  <span x-text="loadingOlder ? '加载中…' : '加载更早消息'"></span>
+                </button>
+              </div>
+
+              <!-- Virtual stream: only visibleMessages (~50 rows) are in the
+                   DOM. The two spacers stand in for loaded history above and
+                   below the window, so the scrollbar and anchor stay honest. -->
+              <div class="cmd-vpad" :style="{ height: topPad + 'px' }" x-show="topPad > 0" aria-hidden="true"></div>
+
+              <template x-for="m in visibleMessages" :key="m.seq || m.id || Math.random()">
+                <div class="cmd-msg" :data-vseq="m.seq" :class="{
                   'msg-self': m.from === 'operator',
                   'msg-peer': m.from !== 'operator' && m.from !== 'system',
                   'msg-sys': m.from === 'system'
@@ -541,6 +553,8 @@
                   </template>
                 </div>
               </template>
+
+              <div class="cmd-vpad" :style="{ height: bottomPad + 'px' }" x-show="bottomPad > 0" aria-hidden="true"></div>
 
               <button type="button" class="cmd-jump-bottom" x-show="newBelow" x-transition.opacity @click="scrollToBottom(false)">
                 <svg class="icon xs"><use href="#i-chev-d"/></svg> 有新消息 · 回到底部

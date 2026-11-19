@@ -1973,3 +1973,107 @@ func TestAdminSessionSurvivesRestart(t *testing.T) {
 		return r
 	}())
 }
+
+// GET /admin/messages?thread= used to return the OLDEST 1000 rows, so a busy
+// thread (op/Lisa: 1036 status messages) could never show anything newer than
+// #1000. The default is now the newest page; before_seq walks into history and
+// after_seq is the 3s poll cursor.
+func TestAdminThreadCursorPagination(t *testing.T) {
+	f := newFixture(t)
+	for i := int64(1); i <= 60; i++ {
+		_, err := f.srv.st.InsertMessage(&store.Message{
+			ID: "m" + itoa(i), Sender: "lisa", Recipient: "operator", Kind: "status",
+			RootID: "op/lisa", Payload: "status " + itoa(i), CreatedAt: 1000 + i,
+		})
+		if err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+	cookie := f.adminLogin(t)
+
+	seqList := func(out map[string]any) string {
+		items, _ := out["items"].([]any)
+		var b strings.Builder
+		for i, it := range items {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			m := it.(map[string]any)
+			b.WriteString(itoa(int64(m["seq"].(float64))))
+		}
+		return b.String()
+	}
+	num := func(out map[string]any, key string) int64 {
+		v, _ := out[key].(float64)
+		return int64(v)
+	}
+
+	// Default: newest page (50 rows), oldest-first, with accurate cursors.
+	code, out := f.doCookie(t, "GET", "/admin/messages?thread=op/lisa", nil, cookie)
+	if code != 200 {
+		t.Fatalf("thread: %d %+v", code, out)
+	}
+	if got := seqList(out); got != seqRange(11, 60) {
+		t.Fatalf("default thread page must be the newest 50 rows, oldest-first: %s", got)
+	}
+	if !out["has_more"].(bool) || num(out, "total") != 60 || num(out, "page_size") != 50 {
+		t.Fatalf("default meta: %+v", out)
+	}
+	if num(out, "oldest_seq") != 11 || num(out, "newest_seq") != 60 {
+		t.Fatalf("page cursors: %+v", out)
+	}
+
+	// An explicit large page returns everything and clears has_more.
+	_, out = f.doCookie(t, "GET", "/admin/messages?thread=op/lisa&page_size=200", nil, cookie)
+	if got := seqList(out); got != seqRange(1, 60) || out["has_more"].(bool) {
+		t.Fatalf("page_size=200: %s more=%v", got, out["has_more"])
+	}
+
+	// before_seq walks backwards; has_more points further into history.
+	_, out = f.doCookie(t, "GET", "/admin/messages?thread=op/lisa&before_seq=31&page_size=20", nil, cookie)
+	if got := seqList(out); got != seqRange(11, 30) || !out["has_more"].(bool) {
+		t.Fatalf("before_seq=31: %s more=%v", got, out["has_more"])
+	}
+	_, out = f.doCookie(t, "GET", "/admin/messages?thread=op/lisa&before_seq=11&page_size=20", nil, cookie)
+	if got := seqList(out); got != seqRange(1, 10) || out["has_more"].(bool) {
+		t.Fatalf("oldest before_seq page: %s more=%v", got, out["has_more"])
+	}
+
+	// after_seq is the poll cursor: strictly newer rows, oldest-first.
+	_, out = f.doCookie(t, "GET", "/admin/messages?thread=op/lisa&after_seq=55&page_size=10", nil, cookie)
+	if got := seqList(out); got != seqRange(56, 60) || out["has_more"].(bool) {
+		t.Fatalf("after_seq=55: %s more=%v", got, out["has_more"])
+	}
+	_, out = f.doCookie(t, "GET", "/admin/messages?thread=op/lisa&after_seq=55&page_size=2", nil, cookie)
+	if got := seqList(out); got != "56,57" || !out["has_more"].(bool) {
+		t.Fatalf("after_seq paging: %s more=%v", got, out["has_more"])
+	}
+
+	// page_size is capped, and after_seq wins over a stale before_seq.
+	_, out = f.doCookie(t, "GET", "/admin/messages?thread=op/lisa&page_size=9999", nil, cookie)
+	if num(out, "page_size") != 200 {
+		t.Fatalf("page_size cap: %+v", out)
+	}
+	_, out = f.doCookie(t, "GET", "/admin/messages?thread=op/lisa&before_seq=31&after_seq=55", nil, cookie)
+	if got := seqList(out); got != seqRange(56, 60) {
+		t.Fatalf("after_seq must win over before_seq: %s", got)
+	}
+
+	// Unknown thread is an empty page, not an error.
+	code, out = f.doCookie(t, "GET", "/admin/messages?thread=op/nobody", nil, cookie)
+	if code != 200 || seqList(out) != "" || out["has_more"].(bool) || num(out, "total") != 0 {
+		t.Fatalf("empty thread: %d %+v", code, out)
+	}
+}
+
+// seqRange formats "lo,lo+1,...,hi" for page assertions.
+func seqRange(lo, hi int64) string {
+	var b strings.Builder
+	for i := lo; i <= hi; i++ {
+		if i > lo {
+			b.WriteByte(',')
+		}
+		b.WriteString(itoa(i))
+	}
+	return b.String()
+}

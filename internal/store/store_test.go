@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -123,6 +124,101 @@ func TestThreadAndFuseWatermark(t *testing.T) {
 	if ts, _ := st.ThreadOldestTs("nope"); ts != 0 {
 		t.Fatalf("missing thread oldest: %d", ts)
 	}
+}
+
+func TestThreadPageCursor(t *testing.T) {
+	st := openTest(t)
+	for i := 0; i < 7; i++ {
+		mustMsg(t, st, &Message{ID: string(rune('a' + i)), Sender: "a", Recipient: "b",
+			RootID: "r1", Payload: "p", CreatedAt: 100 + int64(i)})
+	}
+
+	page, err := st.ThreadPage("r1", 0, 0, 3)
+	if err != nil {
+		t.Fatalf("latest: %v", err)
+	}
+	if got := seqs(page.Messages); got != "5,6,7" {
+		t.Fatalf("default page must be the newest rows, oldest-first: %s", got)
+	}
+	if !page.HasMore || page.Total != 7 {
+		t.Fatalf("latest has_more/total: %v/%d", page.HasMore, page.Total)
+	}
+
+	page, err = st.ThreadPage("r1", 5, 0, 3)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if got := seqs(page.Messages); got != "2,3,4" {
+		t.Fatalf("before_seq page: %s", got)
+	}
+	if !page.HasMore {
+		t.Fatal("before_seq must report older rows")
+	}
+
+	page, err = st.ThreadPage("r1", 2, 0, 3)
+	if err != nil {
+		t.Fatalf("before oldest: %v", err)
+	}
+	if got := seqs(page.Messages); got != "1" {
+		t.Fatalf("oldest page: %s", got)
+	}
+	if page.HasMore {
+		t.Fatal("oldest page must not report more")
+	}
+
+	page, err = st.ThreadPage("r1", 0, 5, 2)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if got := seqs(page.Messages); got != "6,7" {
+		t.Fatalf("after_seq page: %s", got)
+	}
+	if page.HasMore {
+		t.Fatal("tail after_seq page must not report more")
+	}
+
+	page, err = st.ThreadPage("r1", 0, 1, 2)
+	if err != nil {
+		t.Fatalf("after head: %v", err)
+	}
+	if got := seqs(page.Messages); got != "2,3" || !page.HasMore {
+		t.Fatalf("after_seq must walk forward and report newer rows: %s more=%v", got, page.HasMore)
+	}
+
+	// No cursor, no rows: not an error, just an empty page.
+	page, err = st.ThreadPage("missing", 0, 0, 10)
+	if err != nil || len(page.Messages) != 0 || page.Total != 0 || page.HasMore {
+		t.Fatalf("empty thread: %+v (%v)", page, err)
+	}
+
+	// A zero limit uses the console default rather than returning nothing.
+	page, err = st.ThreadPage("r1", 0, 0, 0)
+	if err != nil || len(page.Messages) != 7 {
+		t.Fatalf("default limit: %d (%v)", len(page.Messages), err)
+	}
+}
+
+func seqs(msgs []*Message) string {
+	var b strings.Builder
+	for i, m := range msgs {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(itoa(m.Seq))
+	}
+	return b.String()
+}
+
+func itoa(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
 }
 
 func TestSearchEscapesLike(t *testing.T) {

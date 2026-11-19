@@ -145,7 +145,7 @@ GET  /admin/attention?page=&page_size= → { ready, counts{stage→n}, items[] }
 POST /admin/tickets/{id}/reassign { assignee, lease_secs? } → { ok, ticket }：结束旧 assignment，开启新 pending；lease 到期后 assignment 结束并要求显式改派（Phase 2）
 GET  /admin/prompts/versions → { ok, prompt_version, current{type→revision}, revisions[{revision,agent_type,base_revision,created_at}] }（Phase 4）
 GET  /admin/prompts/diff?agent_type=muse&from=&to= → { ok, agent_type, from, to, added[], removed[] }（缺省 to=当前 revision，from=该 revision 的 base_revision；旧数据没有 base 时回退到上一条同类型 revision）
-GET  /admin/messages?thread=grp_<slug> → 群线程明细，每条带 acked_by 与 room.members
+GET  /admin/messages?thread=grp_<slug>&page_size=50[&before_seq=N|&after_seq=N] → 线程分页（默认最新一页，oldest-first；返回 items/total/has_more/oldest_seq/newest_seq，每条带 acked_by 与 room.members）
 GET  /admin/update/status → { current{version,tag,protocol,min_client,prompt_version}, mode, job }
 POST /admin/update/check  { version }（空=GitHub 最新）→ { version, protocol_change, min_client_change, unknown }
 POST /admin/update/apply  { version, acknowledge_protocol_change } → { job_id }；409 update_in_progress
@@ -266,7 +266,7 @@ job 快照关键字段：`status`（preparing/sending/confirming/waiting/replied
 
 ### 群聊已读明细与解散（DESIGN §9.5）
 
-`GET /admin/messages?thread=grp_<slug>` 的每条消息带服务端计算的 `read` 与 `total`，以及用于
+`GET /admin/messages?thread=grp_<slug>` 默认返回**最新**一页（`page_size` 默认 50、上限 200）；`before_seq` 向更早翻页，`after_seq` 供 3 秒轮询取新消息。响应的 `has_more` 在默认/before 模式下表示还有更早消息，在 after 模式下表示还有更新的消息；`oldest_seq`/`newest_seq` 是本页边界，`total` 是线程总条数。每条消息带服务端计算的 `read` 与 `total`，以及用于
 弹层展示具体成员的 `acked_by: [peer_id…]`。`read` 来自 `peer_read_watermarks`，`total` 按消息级
 audience 计算（广播、房间成员、私聊收件人；操作者回复走收件箱水位，不计入逐条 ack）：
 

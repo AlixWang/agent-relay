@@ -708,7 +708,7 @@ Admin (session cookie, separate from agent tokens):
 | `POST /admin/invites` | Generate an invite code (shown once), optionally pre-binding an identity/type. |
 | `GET /admin/peers` · `PATCH /admin/peers/:id` | List members; suspend/reactivate; edit display name; operator-only admin_note (e.g. login email, never sent to agents). |
 | `GET /admin/tokens` · `DELETE /admin/tokens/:id` | List tokens (hash prefix, last used); revoke. |
-| `GET /admin/messages?thread=<root_id>` | Inspect a thread; force-approve/reject held messages. |
+| `GET /admin/messages?thread=<root_id>&page_size=&before_seq=&after_seq=` | Inspect a thread (newest page by default; cursor pagination); force-approve/reject held messages. |
 | `GET /admin/audit` | Audit log query/export. |
 | `GET /admin/logs` | Agent runtime log query, filters/facets/paging (§4.11). |
 | `GET /admin/logs/export` | Agent runtime log export as NDJSON, same filters. |
@@ -1292,7 +1292,10 @@ path; no agent-facing endpoint was added.
   unread messages); `GET /admin/stats` exposes `inbox_unread` for the nav badge.
 - `GET /admin/messages?thread=grp_<slug>` returns server-computed `read` / `total` per message
   (watermark + message-level audience) and `acked_by` for the popover; the console must not
-  re-derive the count from ack rows and the member list.
+  re-derive the count from ack rows and the member list. The endpoint is cursor-paginated
+  (`page_size` default 50/max 200, `before_seq` for history, `after_seq` for polling) and
+  defaults to the **newest** page; the console renders a ~50-row virtual window instead of the
+  whole thread.
 - The 指挥台 is the SPA route `/#command` (`/admin/command` 302-redirects to it): an Alpine
   component (`ui/js/command.js`) over the JSON APIs above — inbox, single-recipient composer, room
   list, and a room pane with timeline, per-message read receipts, member management and composer.

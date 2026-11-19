@@ -42,6 +42,36 @@ func parsePage(r *http.Request) pageReq {
 
 func (p pageReq) offset() int { return (p.Page - 1) * p.Size }
 
+// Thread messages use cursor pagination, not page numbers: chat history is
+// append-only and the client anchors on a sequence. page_size defaults to 50
+// (the visible window) and caps at the same 200 as every other console list.
+// before_seq walks towards older rows; after_seq walks towards newer rows and
+// wins if both are supplied (a poll must never go backwards).
+const defaultThreadPageSize = 50
+
+func parseThreadPage(r *http.Request) (size int, beforeSeq, afterSeq int64) {
+	q := r.URL.Query()
+	size = defaultThreadPageSize
+	if v := q.Get("page_size"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			size = n
+		}
+	}
+	if size > maxPageSize {
+		size = maxPageSize
+	}
+	if n, err := strconv.ParseInt(q.Get("after_seq"), 10, 64); err == nil && n > 0 {
+		afterSeq = n
+	}
+	if n, err := strconv.ParseInt(q.Get("before_seq"), 10, 64); err == nil && n > 0 {
+		beforeSeq = n
+	}
+	if afterSeq > 0 {
+		beforeSeq = 0
+	}
+	return size, beforeSeq, afterSeq
+}
+
 func (p pageReq) meta(total int) map[string]any {
 	return map[string]any{"total": total, "page": p.Page, "page_size": p.Size}
 }

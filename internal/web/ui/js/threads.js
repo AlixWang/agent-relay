@@ -311,18 +311,21 @@ export async function viewThread(root) {
   }
 
   try {
-    const r = await api('/admin/messages?thread=' + encodeURIComponent(root));
-    const items = r.items || [];
-    window.__currentThreadItems = items;
-    items.forEach((m) => msgPayloadMap.set(m.seq, m.payload));
-    $('drawerMeta').textContent = `共 ${items.length} 条消息 · 参与者: ${[...new Set(items.flatMap((m) => [m.sender, m.recipient]))].filter((x) => x && x !== '*').join(', ')}`;
+    // The drawer opens on the newest page only. Handing all ~1000 rows to
+    // innerHTML here was the second half of the slow console (and the old
+    // ORDER BY seq ASC path never showed anything past #1000 at all).
+    let items = [];
+    let total = 0;
+    let hasOlder = false;
+    let oldestSeq = 0;
 
-    if (!items.length) {
-      body.innerHTML = `<div class="empty">${icon('message')}<p>该线程无消息记录</p></div>`;
-      return;
-    }
+    const absorb = (res) => {
+      total = Number.isFinite(res.total) ? res.total : items.length;
+      hasOlder = !!res.has_more;
+      oldestSeq = res.oldest_seq || (items[0] && items[0].seq) || 0;
+    };
 
-    body.innerHTML = `<div class="timeline">${items.map((m) => {
+    const rowHTML = (m) => {
       const isPending = m.approval_state === 'pending';
       return `<div class="msg ${isPending ? 'held' : ''}">
         <div class="msg-head">
@@ -362,36 +365,92 @@ export async function viewThread(root) {
           </div>
         ` : ''}
       </div>`;
-    }).join('')}</div>`;
+    };
 
-    body.querySelectorAll('button[data-copy-msg]').forEach((btn) => {
-      btn.onclick = async () => {
-        const payload = msgPayloadMap.get(Number(btn.dataset.copyMsg));
-        if (payload) {
-          const ok = await copyToClipboard(payload);
-          toast(ok ? '已复制消息内容' : '复制失败', ok ? 'ok' : 'bad');
-        }
-      };
-    });
+    const render = () => {
+      window.__currentThreadItems = items;
+      items.forEach((m) => msgPayloadMap.set(m.seq, m.payload));
+      const participants = [...new Set(items.flatMap((m) => [m.sender, m.recipient]))]
+        .filter((x) => x && x !== '*').join(', ');
+      $('drawerMeta').textContent = `共 ${total} 条消息 · 已显示 ${items.length} 条 · 参与者: ${participants}`;
 
-    body.querySelectorAll('button[data-approve]').forEach((btn) => {
-      btn.onclick = async () => {
-        const seq = Number(btn.dataset.seq);
-        const approve = btn.dataset.approve === '1';
-        try {
-          await api('/admin/messages/approve', {
-            method: 'POST',
-            body: JSON.stringify({ seq, approve }),
-          });
-          toast(approve ? '已批准放行' : '已拒绝该消息', approve ? 'ok' : 'info');
-          viewThread(root);
-          refreshThreads();
-          refreshStats();
-        } catch (err) {
-          toast('审批失败：' + err.message, 'bad');
+      if (!items.length) {
+        body.innerHTML = `<div class="empty">${icon('message')}<p>该线程无消息记录</p></div>`;
+        return;
+      }
+
+      const remaining = Math.max(0, total - items.length);
+      body.innerHTML = `
+        ${hasOlder || remaining > 0 ? `<div class="thread-load-more">
+          <button type="button" class="btn btn-outline btn-sm" id="loadOlderThread">
+            ${icon('clock', 'xs')}加载更早消息${remaining > 0 ? `（还有 ${remaining} 条）` : ''}
+          </button>
+        </div>` : ''}
+        <div class="timeline">${items.map(rowHTML).join('')}</div>`;
+
+      body.querySelectorAll('button[data-copy-msg]').forEach((btn) => {
+        btn.onclick = async () => {
+          const payload = msgPayloadMap.get(Number(btn.dataset.copyMsg));
+          if (payload) {
+            const ok = await copyToClipboard(payload);
+            toast(ok ? '已复制消息内容' : '复制失败', ok ? 'ok' : 'bad');
+          }
+        };
+      });
+
+      body.querySelectorAll('button[data-approve]').forEach((btn) => {
+        btn.onclick = async () => {
+          const seq = Number(btn.dataset.seq);
+          const approve = btn.dataset.approve === '1';
+          try {
+            await api('/admin/messages/approve', {
+              method: 'POST',
+              body: JSON.stringify({ seq, approve }),
+            });
+            toast(approve ? '已批准放行' : '已拒绝该消息', approve ? 'ok' : 'info');
+            viewThread(root);
+            refreshThreads();
+            refreshStats();
+          } catch (err) {
+            toast('审批失败：' + err.message, 'bad');
+          }
+        };
+      });
+
+      const more = body.querySelector('#loadOlderThread');
+      if (more) more.onclick = loadOlder;
+    };
+
+    const loadOlder = async () => {
+      if (!hasOlder || !oldestSeq) return;
+      const btn = body.querySelector('#loadOlderThread');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await api('/admin/messages?thread=' + encodeURIComponent(root)
+          + '&before_seq=' + oldestSeq + '&page_size=50');
+        const seen = new Set(items.map((m) => m.seq));
+        const fresh = (res.items || []).filter((m) => !seen.has(m.seq));
+        if (!fresh.length) {
+          hasOlder = false;
+          render();
+          return;
         }
-      };
-    });
+        items = fresh.concat(items);
+        absorb(res);
+        oldestSeq = res.oldest_seq || items[0].seq;
+        render();
+        // The button lives at the top; keep the newly loaded page in view.
+        body.scrollTop = 0;
+      } catch (err) {
+        toast('加载更早消息失败：' + err.message, 'bad');
+        if (btn) btn.disabled = false;
+      }
+    };
+
+    const r = await api('/admin/messages?thread=' + encodeURIComponent(root) + '&page_size=50');
+    items = r.items || [];
+    absorb(r);
+    render();
 
   } catch (err) {
     body.innerHTML = `<div class="empty bad">${icon('err')}<p>加载失败：${esc(err.message)}</p></div>`;

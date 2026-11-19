@@ -80,10 +80,48 @@ const ROOM = {
 const PEERS = ['163boy', 'Mmei', 'erdan', 'fe', 'xiaoe'].map((id) => ({ id, online: true, agent_type: 'muse', prompt_version: 12 }));
 // Operator DM thread (op/<peer>): both directions, thread item shape
 // (sender/recipient) as returned by GET /admin/messages?thread=.
-const OP_DM_THREAD = { ok: true, items: [
+const OP_ALICE_ITEMS = [
   { seq: 241, id: 'op-1', sender: 'operator', recipient: 'alice', kind: 'task', payload: '去查一下证书', created_at: 1791555000, acked_by: [] },
   { seq: 242, id: 'dm-1', sender: 'alice', recipient: 'operator', kind: 'result', payload: '证书 2027-03 到期', created_at: 1791555100, acked_by: [] },
-] };
+];
+// The production incident shape: 120 rows is enough to exercise cursor paging
+// and the render window without making the unit test slow.
+const BIG_LISA_ITEMS = Array.from({ length: 120 }, (_, i) => ({
+  seq: 1001 + i,
+  id: 'lisa-' + (1001 + i),
+  sender: i % 2 ? 'operator' : 'lisa',
+  recipient: i % 2 ? 'lisa' : 'operator',
+  kind: 'status',
+  payload: 'status #' + (1001 + i),
+  created_at: 1791555000 + i,
+  acked_by: [],
+}));
+const THREADS = { 'op/alice': OP_ALICE_ITEMS, 'op/lisa': BIG_LISA_ITEMS };
+const threadPage = (raw) => {
+  const u = new URL(raw, 'https://relay.test');
+  const list = THREADS[u.searchParams.get('thread')] || [];
+  const size = Number(u.searchParams.get('page_size') || 50);
+  let items = list;
+  let hasMore = false;
+  if (u.searchParams.has('after_seq')) {
+    const newer = list.filter((m) => m.seq > Number(u.searchParams.get('after_seq')));
+    items = newer.slice(0, size);
+    hasMore = newer.length > items.length;
+  } else if (u.searchParams.has('before_seq')) {
+    const older = list.filter((m) => m.seq < Number(u.searchParams.get('before_seq')));
+    items = older.slice(Math.max(0, older.length - size));
+    hasMore = older.length > items.length;
+  } else {
+    const start = Math.max(0, list.length - size);
+    items = list.slice(start);
+    hasMore = start > 0;
+  }
+  return {
+    ok: true, items, total: list.length, has_more: hasMore, page_size: size,
+    oldest_seq: items.length ? items[0].seq : 0,
+    newest_seq: items.length ? items[items.length - 1].seq : 0,
+  };
+};
 const calls = [];
 // Inbox pages newest-first (backend delivery order), seq 102 before 101.
 const INBOX_ITEMS = [
@@ -94,12 +132,13 @@ const posts = [];
 globalThis.fetch = async (url, opts = {}) => {
   calls.push(url);
   if (opts.method === 'POST') posts.push({ url, body: JSON.parse(opts.body || '{}') });
-  const body = url === '/admin/inbox/read' ? { ok: true, unread: 0, unread_by_peer: {} }
-    : url.startsWith('/admin/rooms') ? { ok: true, rooms: [ROOM] }
-    : url.startsWith('/admin/messages?thread=op') ? OP_DM_THREAD
-    : url.startsWith('/admin/inbox') ? { ok: true, unread: 2, unread_by_peer: { alice: 2 }, items: INBOX_ITEMS }
-      : url.startsWith('/admin/peers') ? { ok: true, peers: PEERS }
-        : { ok: true };
+  let body;
+  if (url === '/admin/inbox/read') body = { ok: true, unread: 0, unread_by_peer: {} };
+  else if (url.startsWith('/admin/rooms')) body = { ok: true, rooms: [ROOM] };
+  else if (url.startsWith('/admin/messages?thread=')) body = threadPage(url);
+  else if (url.startsWith('/admin/inbox')) body = { ok: true, unread: 2, unread_by_peer: { alice: 2 }, items: INBOX_ITEMS };
+  else if (url.startsWith('/admin/peers')) body = { ok: true, peers: PEERS };
+  else body = { ok: true };
   return { ok: true, status: 200, statusText: 'OK', json: async () => body };
 };
 
@@ -348,5 +387,62 @@ assert(!page.peerUnread.alice && page.inboxUnread === 0, 'counters follow the re
 posts.length = 0;
 await page.loadActiveMessages(true);
 assert(!posts.some((p) => p.url === '/admin/inbox/read'), 'nothing unread: polling must not re-post read markers');
+
+// 13. Virtual stream + cursor paging. A 120-row DM must mount only ~50 rows,
+// open on the NEWEST page, walk older with before_seq, and poll forward with
+// after_seq instead of re-fetching the thread.
+page.activeTarget = { type: 'peer', id: 'lisa', name: '@ lisa', subtitle: '' };
+page.activeRoomData = null;
+calls.length = 0;
+await page.loadActiveMessages(false);
+assert(page.messages.length === 50, 'a thread must open on one page, got ' + page.messages.length);
+assert(page.visibleMessages.length <= 50, 'only the render window may be mounted, got ' + page.visibleMessages.length);
+assert(page.visibleMessages[0].seq === 1071 && page.visibleMessages[49].seq === 1120, 'the window must sit on the newest page, got ' + page.visibleMessages.map((m) => m.seq).slice(0, 3));
+assert(page.hasOlder === true && page.totalMessages === 120, 'page meta must report older rows and the full total');
+assert(page.oldestSeq === 1071 && page.newestSeq === 1120, 'page cursors: ' + page.oldestSeq + '..' + page.newestSeq);
+const initialLoad = calls.find((u) => u.includes('thread=op%2Flisa'));
+assert(initialLoad && initialLoad.includes('page_size=50') && !initialLoad.includes('after_seq') && !initialLoad.includes('before_seq'), 'opening a thread must ask for the newest page only, got ' + initialLoad);
+
+// "加载更早消息" walks backwards, 50 rows at a time, and stops at #1001.
+await page.loadOlderMessages();
+assert(page.messages.length === 100 && page.oldestSeq === 1021 && page.hasOlder === true, 'first older page: ' + page.messages.length + '/' + page.oldestSeq + '/' + page.hasOlder);
+assert(page.visibleMessages.length <= 50, 'loading history must not grow the DOM window, got ' + page.visibleMessages.length);
+assert(calls.some((u) => u.includes('thread=op%2Flisa') && u.includes('before_seq=1071')), 'load earlier must use before_seq, got ' + calls.filter((u) => u.includes('op%2Flisa')).join(','));
+
+// Window bookkeeping: spacer heights follow the offset of the rendered slice.
+// With 100 loaded rows, rendering [0,50) leaves height below, [25,75) leaves
+// height on both sides.
+page.windowStart = 0;
+assert(page.visibleMessages[0].seq === 1021 && page.topPad === 0, 'at the head the top spacer is zero');
+assert(page.bottomPad > 0, 'rows below the window must reserve height');
+page.windowStart = 25;
+assert(page.topPad > 0 && page.bottomPad > 0, 'mid-window spacers on both sides');
+page.windowStart = 50;
+
+await page.loadOlderMessages();
+assert(page.messages.length === 120 && page.oldestSeq === 1001 && page.hasOlder === false, 'oldest page must clear has_more');
+assert(page.canLoadOlder === false, 'no load-earlier control once the thread head is reached');
+assert(page.visibleMessages.length <= 50, 'DOM window stays bounded after loading all 120 rows');
+
+// Poll forward from the newest seq. Two new rows arrive; nothing else is
+// re-fetched and the reader resting at the bottom follows them.
+THREADS['op/lisa'].push(
+  { seq: 1121, id: 'lisa-1121', sender: 'lisa', recipient: 'operator', kind: 'status', payload: 'new 1', created_at: 1791556000, acked_by: [] },
+  { seq: 1122, id: 'lisa-1122', sender: 'lisa', recipient: 'operator', kind: 'status', payload: 'new 2', created_at: 1791556001, acked_by: [] },
+);
+stream.scrollTop = stream.scrollHeight;
+await page.pollThreadMessages();
+assert(page.messages.length === 122 && page.messages[121].seq === 1122, 'poll must append only rows after the cursor, got ' + page.messages.length);
+assert(page.newestSeq === 1122 && page.totalMessages === 122, 'poll must advance the cursor/total');
+assert(page.newBelow === false, 'a reader at the bottom follows new rows');
+assert(calls.some((u) => u.includes('thread=op%2Flisa') && u.includes('after_seq=1120') && u.includes('page_size=200')), 'poll must use after_seq=maxSeq, got ' + calls.filter((u) => u.includes('op%2Flisa')).join(','));
+assert(page.visibleMessages.length <= 50, 'poll must not add mounted rows beyond the window, got ' + page.visibleMessages.length);
+
+// A reader in history keeps their place and gets the jump chip instead.
+THREADS['op/lisa'].push({ seq: 1123, id: 'lisa-1123', sender: 'lisa', recipient: 'operator', kind: 'status', payload: 'new 3', created_at: 1791556002, acked_by: [] });
+stream.scrollTop = 100;
+await page.pollThreadMessages();
+assert(page.messages.length === 123 && page.newBelow === true, 'a reader in history must not be yanked to the bottom');
+assert(stream.scrollTop === 100, 'poll while reading history must keep the scroll position, got ' + stream.scrollTop);
 
 console.log('command state: all checks passed');
