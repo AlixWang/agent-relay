@@ -170,3 +170,40 @@ curl -sS -b "$ADMIN_COOKIE" -H 'content-type: application/json' \
 - 旧 v1 审计行 `muse.chat.opt_in/opt_out` 保留且语义是“成员同意”，不能与 v2 `access_*` 混读。
 - 审批卡片、审批轮询、关联、决策审计全部未实现；探针端点虽 admin-only 且需 `probe:true`，仍是实验入口，不应暴露给非操作员。
 - 未执行真实 muse.ai 探针，因此 `decide` 的最小请求体、审批 scope 关联、决策后 agent 是否继续都仍是待证实项。
+
+## ui-mobile 回归修复
+
+- 修复提交：`0d6f7a3`（`fix(console): restore Muse runtime switch and unblock mobile first paint`）
+- 基线：`feat/muse-direct-chat-v2 @ 2c425e7`；CI run 44469514698 `ui-mobile` 6 失败。
+
+### 复现
+
+- 本机 Playwright 官方 Chromium 下载超时；改用 `/opt/meta-chromium/chrome`（Muse Browser 157.0.8103.81）。该 Chrome 需要 Hatch WebGL 域策略参数（`--hatch-webgl-allowed-domains-file` + `--hatch-webgl-allowed-domains-sha256`），否则启动即报 `Hatch WebGL domain policy is required for browser startup`。
+- 该 Chrome 还会用 Local Network Access 拦截从 `about:blank` 到 `127.0.0.1` 的首次导航（`ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`）。本地临时配置里只用 `route.fulfill` 回填 document 导航为 `internal/web/ui/index.html`，其余静态资源与 API mock 仍走原 `static-server.mjs` 和 spec 的 `mockAdmin`；`tests/mobile/console-mobile.spec.mjs` 未改一行，断言未改。
+- 未修复前 6 个测试全失败，形态与 CI 一致：`expect(locator).toBeVisible() failed` / `element(s) not found`。临时脚本抓到 `pageerror: toggleChatRuntime is not defined`、`window.Alpine === false`、`document.body.innerText.length === 0`，确认应用未启动。
+- 修复 `toggleChatRuntime` 后 4 个测试转绿，但 command 测试仍失败在 `titleWidth: 0`；确认 `document.querySelector('.cmd-chat-title h2')` 取到了 DOM 中更靠前、隐藏的 `#page-muse-chat` 标题（“直接对话”），而不是 `#page-command` 的标题。
+
+### 根因
+
+1. **应用启动崩溃**：`internal/web/ui/js/muse.js:1338`（修复前行号）的 `initMuse()` 仍有 `chatRuntime.onchange = toggleChatRuntime;`，但 `toggleChatRuntime` 在 `ba24a5e` 替换旧 chat dialog 时被删除。运行时 `ReferenceError` 中断 `initMuse()` / Alpine 初始化，所有页面空白，于是 3 个页面 × 2 viewport 全部报 `element(s) not found`。
+2. **隐藏页面抢走全局选择器**：`internal/web/ui/index.html:270` 的 `#page-muse-chat` 位于 `#page-command`（原 `:371`）之前，且复用了 `.cmd-chat-header` / `.cmd-chat-title` / `.cmd-stream`。`tests/mobile/console-mobile.spec.mjs` 的布局指标用 `document.querySelector` 按类名取第一个匹配，拿到隐藏 Muse 页的标题，宽度为 0。
+
+### 修复
+
+- `internal/web/ui/js/muse.js:1260-1273`：恢复 `toggleChatRuntime()`，继续调用现有 `POST /admin/muse/chat/settings`；失败时回滚 checkbox 并 toast。`initMuse()` 的接线保持不变。
+- `internal/web/ui/index.html`：把 `#page-muse-chat` 整段移动到 `#page-command` 之后（当前 `:687`）。页面继续复用 `.cmd-*` 布局类，不改 CSS、不改测试；全局 `.cmd-chat-*` 选择器现在先命中可见的指挥台。
+- 未修改 `tests/mobile/console-mobile.spec.mjs`，未放宽任何断言。
+
+### 验证
+
+| 命令 | 结果 |
+|---|---|
+| 本地 `playwright test --config=playwright.local.config.mjs`（导入未改的生产 spec） | 6 passed（iphone-se / iphone-12 各 3 个） |
+| `make test-ui-js` | exit 0；7 个 `_*.test.mjs` 全通过 |
+| `go vet ./...` | exit 0，无诊断 |
+| `go build ./...` | exit 0（模块缓存只读复用；构建缓存使用仓库内 `.gocache`） |
+| `go test ./...` | exit 0；全部包 `ok` |
+| `go test -race ./internal/muse/...` | exit 0；`ok .../internal/muse 48.330s` |
+| `go test -race ./internal/gateway/...` | exit 0；`ok .../internal/gateway 63.921s` |
+
+结论：6 个 ui-mobile 失败全部转绿，无新增失败；未开 PR、未合并、未打 tag。
