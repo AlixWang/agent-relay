@@ -7,6 +7,7 @@ export const routeMeta = {
   muse:    { title: 'Muse 保活', desc: 'Muse 账号授权、会话续期与沙盒唤醒' },
   threads: { title: '消息 & 线程', desc: '会话流转、熔断保护与安全审批' },
   command: { title: '指挥台', desc: '多助手群聊协同、定向指令调度与收件箱' },
+  'muse-chat': { title: '直接对话', desc: '与已开通成员的 Muse agent 对话（消息对成员可见）' },
   prompts: { title: '邀请 & Prompt', desc: '助手入驻凭据签发与版本指令生成' },
   resources: { title: '资源中心', desc: '密钥、MCP、Skill 与 Prompt 的登记、授权与下发' },
   audit:   { title: '审计日志', desc: '管理事件、状态流转与安全审计追踪' },
@@ -61,11 +62,11 @@ export function setRoute(r) {
   if (app) app.classList.remove('nav-open');
 
   const main = $('main');
-  if (main) main.classList.toggle('full-bleed', cleanRoute === 'command');
+  if (main) main.classList.toggle('full-bleed', cleanRoute === 'command' || cleanRoute === 'muse-chat');
 
   // 指挥台 pins the shell to the viewport (.cmd-* scroll, not the window); every
   // other route keeps the document as the scroll container.
-  document.body.classList.toggle('cmd-active', cleanRoute === 'command');
+  document.body.classList.toggle('cmd-active', cleanRoute === 'command' || cleanRoute === 'muse-chat');
 
   const handler = routeHandlers.get(cleanRoute);
   if (handler) handler();

@@ -1503,4 +1503,33 @@ button.ack-badge:is(.ok, .warn) { color: var(--tone); background: color-mix(in s
 .chat-atts { margin: var(--s-2) 0 0; padding-left: 1.2em; font-size: var(--fs-sm); color: var(--muted); }
 .chat-visibility span { line-height: 1.55; }
 @media (max-width: 560px) { .chat-options { grid-template-columns: 1fr; } }
+
+/* =========================================================================
+   Muse direct chat (#muse-chat): an independent page that reuses the .cmd-*
+   split layout. The sidebar is the enabled-member list; the right pane is one
+   conversation. No task/ack/@ controls exist here by design.
+   ========================================================================= */
+.mchat-page { background: var(--bg); }
+.mchat-side-title { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.mchat-side-title b { font-size: var(--fs-sm); }
+.mchat-side-title small { color: var(--muted-2); font-size: var(--fs-xs); }
+.mchat-sub { margin: 2px 0 0; color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mchat-session-select { max-width: 190px; height: var(--h-md); font-size: var(--fs-xs); }
+.mchat-field { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--fs-xs); }
+.mchat-field select, .mchat-field input { height: var(--h-md); font-size: var(--fs-xs); }
+.mchat-field input { width: 140px; }
+.mchat-advanced { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2); }
+.mchat-inline-hint {
+  margin: 0; padding: 4px 2px; color: var(--muted);
+  font-size: var(--fs-xs); line-height: 1.5;
+}
+.mchat-inline-hint b { color: var(--fg); font-weight: 600; }
+.mchat-text { white-space: pre-wrap; word-break: break-word; }
+.mchat-status-line { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--fs-xs); }
+.mchat-status-line.warn { color: var(--warn); }
+.mchat-status-line.bad { color: var(--bad); }
+.mchat-boundary { text-align: center; color: var(--muted); font-size: var(--fs-sm); line-height: 1.7; padding: var(--s-5) var(--s-3); }
+.mchat-boundary .icon { width: 28px; height: 28px; opacity: .5; }
+.mchat-attachments { margin: 6px 0 0; padding-left: 1.1em; color: var(--muted); font-size: var(--fs-xs); }
+.mchat-countdown { font-variant-numeric: tabular-nums; }
 .chat-reply { display: flex; flex-direction: column; gap: var(--s-2); }

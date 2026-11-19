@@ -13,7 +13,8 @@ const mod = await import(pathToFileURL(path.join(here, 'js', 'muse.js')).href);
 const {
   museURL, museAuthTone, museAuthLabel, museExpiryText, museExpiryTone, museVMTone,
   museSessionOK, museWakeUnconfirmed, museWakeTone, museWakeLabel,
-  museVMText, museVMTitle,
+  museVMText, museVMTitle, museChatHash, parseMuseChatHash,
+  museChatCodeText, museChatErrorText, museChatBudget, museChatCountdown,
 } = mod;
 
 const assert = (cond, msg) => {
@@ -91,5 +92,26 @@ assert(vmTip.includes('确认于') && vmTip.includes('2030'), 'tooltip shows con
 assert(museVMTitle({ vm_state: '' }).includes('原始值: (空)'), 'tooltip marks empty raw value');
 assert(museVMTitle({ vm_state: 'UNKNOWN' }).includes('尚无确认时间'), 'tooltip handles missing timestamp');
 assert(museVMTitle({ vm_state: 'RUNNING' }).includes('仅展示，不参与唤醒判定'), 'vm state is display-only');
+
+assert(museChatHash('alice') === '#muse-chat?peer=alice', 'main chat hash');
+assert(museChatHash('alice', 's_1') === '#muse-chat?peer=alice&session=s_1', 'side chat hash');
+assert(museChatHash('a b', 's 1') === '#muse-chat?peer=a+b&session=s+1', 'hash encodes spaces');
+assert(parseMuseChatHash('#muse-chat?peer=alice').peer === 'alice', 'parse peer');
+assert(parseMuseChatHash('#muse-chat?peer=alice&session=s_1').session === 's_1', 'parse session');
+assert(parseMuseChatHash('#muse-chat').peer === '', 'parse empty');
+assert(parseMuseChatHash('#muse').session === '', 'parse other route');
+
+assert(museChatCodeText('muse_chat_in_progress').includes('不会排队'), 'in-progress copy');
+assert(museChatErrorText({ error: { code: 'muse_delivery_unknown' } }).includes('不会自动重发'), 'delivery unknown copy');
+assert(museChatErrorText(null) === '', 'no error copy');
+
+assert(museChatBudget(180) === 180, 'default budget');
+assert(museChatBudget(10) === 30, 'budget floor');
+assert(museChatBudget(999) === 300, 'budget ceiling');
+assert(museChatBudget(200, 120) === 120, 'server max wins');
+assert(museChatBudget('nope') === 180, 'bad budget falls back');
+assert(museChatCountdown(1000, 958) === '42s', 'countdown');
+assert(museChatCountdown(1000, 1200) === '0s', 'countdown floor');
+assert(museChatCountdown(0, 0) === '', 'no deadline');
 
 console.log('PASS: muse URL/state helpers');
