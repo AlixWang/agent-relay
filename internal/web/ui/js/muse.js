@@ -1257,6 +1257,21 @@ async function disableChatAccess() {
   }
 }
 
+async function toggleChatRuntime() {
+  const box = $('museChatRuntime');
+  if (!box) return;
+  const want = box.checked;
+  try {
+    const r = await api(MUSE_CHAT_SETTINGS, { method: 'POST', body: JSON.stringify({ enabled: want }) });
+    museState.chatStatus = r.status || museState.chatStatus;
+    toast(want ? '已开启直接对话运行时开关' : '已关闭直接对话；在途任务已停止等待', want ? 'ok' : 'warn', 5000);
+    await refreshMuse();
+  } catch (err) {
+    box.checked = !want;
+    toast('切换失败：' + err.message, 'bad');
+  }
+}
+
 function switchChatSession(session) {
   session = (session || '').trim();
   if (session && !CHAT_SESSION_RE.test(session)) {

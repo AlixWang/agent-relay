@@ -266,73 +266,6 @@
         <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg>保活只调用 muse.ai 的 /api/session、/api/hatch/vm/wake，以及唤醒验证所需的 /api/auth/check、/api/hatch/token 和 Noise 只读 RPC；不读取聊天内容。若某成员单独开通“直接对话”，后台可在其 Muse 主聊天/指定 side chat 发送操作者输入的消息，消息对该成员可见；该通道不是审批通道。未开通的成员不受影响。唤醒请求被接受但 /api/session 仍未确认 RUNNING 时，检查沙盒里的 Hatch hook 是否仍在跑 relay-watch.sh。</p>
       </section>
 
-      <!-- ---------- Muse 直接对话 ---------- -->
-      <section id="page-muse-chat" class="page cmd-page mchat-page" hidden>
-        <div class="cmd-layout" id="mchatLayout">
-          <aside class="cmd-sessions">
-            <div class="cmd-sessions-header">
-              <div class="mchat-side-title"><b>直接对话</b><small>已开通成员</small></div>
-              <button class="btn-icon" id="mchatBackMuse" data-tip="返回 Muse 保活" aria-label="返回 Muse 保活"><svg class="icon"><use href="#i-chev-l"/></svg></button>
-            </div>
-            <div class="cmd-sessions-scroll" id="mchatSessions"></div>
-          </aside>
-          <div class="cmd-chat">
-            <div class="cmd-chat-header">
-              <div class="cmd-chat-title">
-                <button class="btn-icon only-mobile" id="mchatListBtn" data-tip="成员列表" aria-label="成员列表"><svg class="icon"><use href="#i-menu"/></svg></button>
-                <div>
-                  <h2 id="mchatTitle">直接对话</h2>
-                  <p class="mchat-sub" id="mchatSub">选择成员开始对话</p>
-                </div>
-                <span class="badge muted" id="mchatState">—</span>
-              </div>
-              <div class="cmd-chat-actions">
-                <span class="badge muted" id="mchatRuntime">—</span>
-                <a class="btn btn-ghost btn-sm" id="mchatRuntimeLink" href="#muse">运行时开关</a>
-                <select id="mchatSession" class="mchat-session-select" aria-label="对话线程"></select>
-                <button class="btn btn-outline btn-sm" id="mchatStop" disabled><svg class="icon"><use href="#i-pause"/></svg>停止</button>
-                <details class="dropdown" id="mchatMore">
-                  <summary class="btn-icon" aria-label="更多操作"><svg class="icon"><use href="#i-sliders"/></svg></summary>
-                  <div class="menu">
-                    <button type="button" class="danger" id="mchatDisable">停用直接对话</button>
-                  </div>
-                </details>
-              </div>
-            </div>
-            <div class="cmd-stream" id="mchatStream"></div>
-            <div class="cmd-dock">
-              <div class="alert alert-warn chat-visibility" id="mchatVisibility"><svg class="icon"><use href="#i-eye"/></svg><span>消息会进入成员 Muse 主聊天或指定 side chat，成员本人可见；此通道不是审批通道。</span></div>
-              <p class="mchat-inline-hint" id="mchatFirstHint" hidden></p>
-              <p class="alert alert-bad" id="mchatErr" hidden></p>
-              <form class="cmd-composer-box" id="mchatForm">
-                <div class="cmd-composer-toolbar">
-                  <div class="mchat-advanced">
-                    <label class="mchat-field">等待预算
-                      <select id="mchatBudget">
-                        <option value="30">30 秒</option>
-                        <option value="60">60 秒</option>
-                        <option value="90">90 秒</option>
-                        <option value="180" selected>180 秒（默认）</option>
-                        <option value="300">300 秒（最大）</option>
-                      </select>
-                    </label>
-                    <label class="mchat-field">side chat（已存在）
-                      <input id="mchatSessionInput" maxlength="128" placeholder="留空 = 主聊天" autocomplete="off" spellcheck="false">
-                    </label>
-                    <button type="button" class="btn btn-ghost btn-sm" id="mchatSessionApply">切换线程</button>
-                  </div>
-                  <span id="mchatCount" class="muted xs">0 / 4000</span>
-                </div>
-                <div class="cmd-input-row">
-                  <textarea id="mchatText" rows="2" maxlength="4000" placeholder="输入纯文本；Enter 换行，发送用按钮。"></textarea>
-                  <button type="submit" class="btn btn-primary cmd-send-btn" id="mchatSend"><svg class="icon"><use href="#i-send"/></svg>发送</button>
-                </div>
-              </form>
-            </div>
-          </div>
-        </div>
-      </section>
-
       <!-- ---------- 消息线程 ---------- -->
       <section id="page-threads" class="page" hidden>
         <div class="panel">
@@ -748,6 +681,73 @@
         </div>
       </dialog>
 
+      </section>
+
+      <!-- ---------- Muse 直接对话 ---------- -->
+      <section id="page-muse-chat" class="page cmd-page mchat-page" hidden>
+        <div class="cmd-layout" id="mchatLayout">
+          <aside class="cmd-sessions">
+            <div class="cmd-sessions-header">
+              <div class="mchat-side-title"><b>直接对话</b><small>已开通成员</small></div>
+              <button class="btn-icon" id="mchatBackMuse" data-tip="返回 Muse 保活" aria-label="返回 Muse 保活"><svg class="icon"><use href="#i-chev-l"/></svg></button>
+            </div>
+            <div class="cmd-sessions-scroll" id="mchatSessions"></div>
+          </aside>
+          <div class="cmd-chat">
+            <div class="cmd-chat-header">
+              <div class="cmd-chat-title">
+                <button class="btn-icon only-mobile" id="mchatListBtn" data-tip="成员列表" aria-label="成员列表"><svg class="icon"><use href="#i-menu"/></svg></button>
+                <div>
+                  <h2 id="mchatTitle">直接对话</h2>
+                  <p class="mchat-sub" id="mchatSub">选择成员开始对话</p>
+                </div>
+                <span class="badge muted" id="mchatState">—</span>
+              </div>
+              <div class="cmd-chat-actions">
+                <span class="badge muted" id="mchatRuntime">—</span>
+                <a class="btn btn-ghost btn-sm" id="mchatRuntimeLink" href="#muse">运行时开关</a>
+                <select id="mchatSession" class="mchat-session-select" aria-label="对话线程"></select>
+                <button class="btn btn-outline btn-sm" id="mchatStop" disabled><svg class="icon"><use href="#i-pause"/></svg>停止</button>
+                <details class="dropdown" id="mchatMore">
+                  <summary class="btn-icon" aria-label="更多操作"><svg class="icon"><use href="#i-sliders"/></svg></summary>
+                  <div class="menu">
+                    <button type="button" class="danger" id="mchatDisable">停用直接对话</button>
+                  </div>
+                </details>
+              </div>
+            </div>
+            <div class="cmd-stream" id="mchatStream"></div>
+            <div class="cmd-dock">
+              <div class="alert alert-warn chat-visibility" id="mchatVisibility"><svg class="icon"><use href="#i-eye"/></svg><span>消息会进入成员 Muse 主聊天或指定 side chat，成员本人可见；此通道不是审批通道。</span></div>
+              <p class="mchat-inline-hint" id="mchatFirstHint" hidden></p>
+              <p class="alert alert-bad" id="mchatErr" hidden></p>
+              <form class="cmd-composer-box" id="mchatForm">
+                <div class="cmd-composer-toolbar">
+                  <div class="mchat-advanced">
+                    <label class="mchat-field">等待预算
+                      <select id="mchatBudget">
+                        <option value="30">30 秒</option>
+                        <option value="60">60 秒</option>
+                        <option value="90">90 秒</option>
+                        <option value="180" selected>180 秒（默认）</option>
+                        <option value="300">300 秒（最大）</option>
+                      </select>
+                    </label>
+                    <label class="mchat-field">side chat（已存在）
+                      <input id="mchatSessionInput" maxlength="128" placeholder="留空 = 主聊天" autocomplete="off" spellcheck="false">
+                    </label>
+                    <button type="button" class="btn btn-ghost btn-sm" id="mchatSessionApply">切换线程</button>
+                  </div>
+                  <span id="mchatCount" class="muted xs">0 / 4000</span>
+                </div>
+                <div class="cmd-input-row">
+                  <textarea id="mchatText" rows="2" maxlength="4000" placeholder="输入纯文本；Enter 换行，发送用按钮。"></textarea>
+                  <button type="submit" class="btn btn-primary cmd-send-btn" id="mchatSend"><svg class="icon"><use href="#i-send"/></svg>发送</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- ---------- 邀请 & Prompt ---------- -->
