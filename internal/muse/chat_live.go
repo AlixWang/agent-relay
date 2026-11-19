@@ -18,18 +18,21 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AlixWang/agent-relay/internal/store"
 )
 
 const (
-	chatEchoBudget     = 10 * time.Second
-	chatEchoMaxBytes   = 64 * 1024
-	chatEchoMaxLines   = 100
-	chatHistoryTimeout = 4 * time.Second
-	chatDialTimeout    = 6 * time.Second
-	chatHandshakeTMO   = 6 * time.Second
+	chatEchoBudget      = 10 * time.Second
+	chatEchoMaxBytes    = 64 * 1024
+	chatEchoMaxLines    = 100
+	chatHistoryTimeout  = 4 * time.Second
+	chatDialTimeout     = 6 * time.Second
+	chatHandshakeTMO    = 6 * time.Second
+	chatSessionsPath    = "/api/session/list"
+	chatSessionsTimeout = 4 * time.Second
 )
 
 // Variables, not constants, so the orchestration tests can shorten the
@@ -46,6 +49,13 @@ var (
 type liveChatSession struct {
 	cc        *chatConn
 	accountID string
+
+	// The daemon treats an omitted session_id differently for /chat/stream
+	// (write the member main chat) and /chat/history (read no session). Resolve
+	// the main chat to its explicit id once per connection and use it for both
+	// directions; see resolveSession.
+	mainMu        sync.Mutex
+	mainSessionID string
 }
 
 func (l *liveChatSession) Close() {
@@ -310,11 +320,105 @@ func ceilSeconds(d time.Duration) int {
 	return int((d + time.Second - 1) / time.Second)
 }
 
+// chatSessionListEntry is the subset of GET /api/session/list the chat path
+// needs. is_primary/is_thread are pointers because an older server shape may
+// omit them; a missing field must not be mistaken for false.
+type chatSessionListEntry struct {
+	SessionID string `json:"session_id"`
+	IsPrimary *bool  `json:"is_primary"`
+	IsThread  *bool  `json:"is_thread"`
+}
+
+type chatSessionList struct {
+	Sessions []chatSessionListEntry `json:"sessions"`
+}
+
+// mainChatSessionID picks the member main chat from a sessions list. The main
+// chat is normally flagged is_primary=true (and is_thread=false); if neither
+// flag is present in this server shape, the documented order puts it first.
+// Ambiguous or missing metadata yields no id rather than guessing a side chat.
+func mainChatSessionID(entries []chatSessionListEntry) string {
+	var first string
+	var unthreaded []string
+	sawPrimary, sawThread := false, false
+	for _, e := range entries {
+		if e.SessionID == "" {
+			continue
+		}
+		if first == "" {
+			first = e.SessionID
+		}
+		if e.IsPrimary != nil {
+			sawPrimary = true
+			if *e.IsPrimary {
+				return e.SessionID
+			}
+		}
+		if e.IsThread != nil {
+			sawThread = true
+			if !*e.IsThread {
+				unthreaded = append(unthreaded, e.SessionID)
+			}
+		}
+	}
+	if len(unthreaded) == 1 {
+		return unthreaded[0]
+	}
+	if !sawPrimary && !sawThread {
+		// The documented sessions.list order is main chat first.
+		return first
+	}
+	return ""
+}
+
+// resolveSession maps the job's empty session id (member main chat) to the
+// explicit id both /chat/stream and /chat/history understand. It is cached per
+// connection; a side-chat id is returned unchanged without a lookup. A
+// resolution failure is returned before any write, so the job fails as a
+// send failure instead of silently sending and then reporting unknown.
+func (l *liveChatSession) resolveSession(ctx context.Context, sessionID string) (string, error) {
+	if sessionID != "" {
+		return sessionID, nil
+	}
+	if l == nil || l.cc == nil {
+		return "", newChatFailure("muse_upstream_error", "session_list", true)
+	}
+	l.mainMu.Lock()
+	defer l.mainMu.Unlock()
+	if l.mainSessionID != "" {
+		return l.mainSessionID, nil
+	}
+
+	rctx, cancel := context.WithTimeout(ctx, chatSessionsTimeout)
+	resp, err := l.cc.call(rctx, http.MethodGet, chatSessionsPath, nil, nil)
+	cancel()
+	if err != nil {
+		return "", chatFailureFromNoise("session_list", err)
+	}
+	if resp.Status < 200 || resp.Status >= 300 {
+		return "", chatStatusFailure("session_list", resp.Status, false)
+	}
+	var list chatSessionList
+	if err := json.Unmarshal(resp.Body, &list); err != nil {
+		return "", newChatFailure("muse_protocol_drift", "session_list", false)
+	}
+	id := mainChatSessionID(list.Sessions)
+	if id == "" {
+		return "", newChatFailure("muse_main_chat_unresolved", "session_list", false)
+	}
+	l.mainSessionID = id
+	return id, nil
+}
+
 func (l *liveChatSession) History(ctx context.Context, sessionID string, limit int, beforeSeq int64) (*chatHistoryResponse, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	path := chatHistoryPath(sessionID, limit, beforeSeq)
+	sid, serr := l.resolveSession(ctx, sessionID)
+	if serr != nil {
+		return nil, serr
+	}
+	path := chatHistoryPath(sid, limit, beforeSeq)
 	rctx, cancel := context.WithTimeout(ctx, chatHistoryTimeout)
 	defer cancel()
 	resp, err := l.cc.call(rctx, http.MethodGet, path, nil, nil)
@@ -322,7 +426,7 @@ func (l *liveChatSession) History(ctx context.Context, sessionID string, limit i
 		return nil, chatFailureFromNoise("history", err)
 	}
 	if resp.Status < 200 || resp.Status >= 300 {
-		return nil, chatStatusFailure("history", resp.Status, sessionID != "")
+		return nil, chatStatusFailure("history", resp.Status, true)
 	}
 	out, perr := parseChatHistory(resp.Body)
 	if perr != nil {
@@ -367,13 +471,15 @@ func chatStatusFailure(stage string, status int, sessionScoped bool) *chatFailur
 
 func (l *liveChatSession) Send(ctx context.Context, sessionID, text, nodeID string) (chatSendResult, error) {
 	var res chatSendResult
+	sid, serr := l.resolveSession(ctx, sessionID)
+	if serr != nil {
+		return res, serr
+	}
 	payload := map[string]any{
 		"items":        []map[string]string{{"type": "text", "text": text}},
 		"node_id":      nodeID,
 		"capabilities": map[string]any{},
-	}
-	if sessionID != "" {
-		payload["session_id"] = sessionID
+		"session_id":   sid,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -418,7 +524,7 @@ func (l *liveChatSession) Send(ctx context.Context, sessionID, text, nodeID stri
 				if status >= 400 {
 					res.Wrote = true
 					res.Status = status
-					return res, chatStatusFailure("send", status, sessionID != "")
+					return res, chatStatusFailure("send", status, true)
 				}
 				if len(f.Response.Body) > 0 {
 					buf.Write(f.Response.Body)
@@ -511,14 +617,15 @@ func countFullLines(buf *bytes.Buffer, res *chatSendResult, trailing bool) int {
 
 func (l *liveChatSession) Cancel(ctx context.Context, sessionID string) (chatCancelResult, error) {
 	var res chatCancelResult
-	body := []byte("{}")
-	if sessionID != "" {
-		raw, err := json.Marshal(map[string]string{"session_id": sessionID})
-		if err != nil {
-			return res, newChatFailure("muse_protocol_drift", "cancel", false)
-		}
-		body = raw
+	sid, serr := l.resolveSession(ctx, sessionID)
+	if serr != nil {
+		return res, serr
 	}
+	raw, err := json.Marshal(map[string]string{"session_id": sid})
+	if err != nil {
+		return res, newChatFailure("muse_protocol_drift", "cancel", false)
+	}
+	body := raw
 	rctx, cancel := context.WithTimeout(ctx, noiseRPCTimeout)
 	defer cancel()
 	resp, err := l.cc.call(rctx, http.MethodPost, "/chat/cancel", body, nil)
@@ -537,7 +644,7 @@ func (l *liveChatSession) Cancel(ctx context.Context, sessionID string) (chatCan
 	case http.StatusUnauthorized:
 		return res, newChatFailure("muse_needs_reauth", "cancel", false)
 	default:
-		return res, chatStatusFailure("cancel", resp.Status, sessionID != "")
+		return res, chatStatusFailure("cancel", resp.Status, true)
 	}
 }
 

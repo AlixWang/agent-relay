@@ -158,7 +158,7 @@ func newChatTestEnv(t *testing.T) *chatTestEnv {
 	return &chatTestEnv{testEnv: env, account: acct}
 }
 
-func (e *chatTestEnv) start(t *testing.T, gw *fakeChatGateway, req ChatStartRequest) *ChatJobView {
+func (e *chatTestEnv) start(t *testing.T, gw chatGateway, req ChatStartRequest) *ChatJobView {
 	t.Helper()
 	if e.svc.chatOpen == nil {
 		e.svc.chatOpen = gw
