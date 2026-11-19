@@ -220,9 +220,16 @@ func TestConsoleMusePanelWiring(t *testing.T) {
 	for _, need := range []string{
 		`id="page-muse"`, `id="museTable"`, `id="museDlg"`, `id="navMuse"`,
 		`id="museAuthorize"`, `id="museKeepaliveAll"`, `id="museForm"`,
+		`id="page-muse-chat"`, `id="mchatForm"`, `id="mchatStream"`,
 	} {
 		if !strings.Contains(page, need) {
 			t.Fatalf("muse panel markup lost %s", need)
+		}
+	}
+	// v2 removed the consent dialog and the single-turn drawer entirely.
+	for _, gone := range []string{`id="museChatConsentDlg"`, `id="museChatDlg"`} {
+		if strings.Contains(page, gone) {
+			t.Fatalf("muse panel still ships removed dialog %s", gone)
 		}
 	}
 	code, js := getRaw(t, f, "/js/muse.js", cookie)
@@ -245,6 +252,9 @@ func TestConsoleMusePanelWiring(t *testing.T) {
 	_, app := getRaw(t, f, "/app.js", cookie)
 	if !strings.Contains(app, "onRoute('muse'") {
 		t.Fatal("app.js does not wire the muse route")
+	}
+	if !strings.Contains(app, "onRoute('muse-chat'") {
+		t.Fatal("app.js does not wire the muse-chat route")
 	}
 }
 

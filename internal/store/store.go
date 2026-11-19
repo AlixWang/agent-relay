@@ -348,8 +348,9 @@ type Store interface {
 	GetMuseAccountByPeer(peerID string) (*MuseAccount, error)
 	ListMuseAccounts() ([]*MuseAccount, error)
 	SaveMuseAccount(a *MuseAccount) error
-	// SetMuseChatConsent writes chat opt-in state and its audit row atomically.
-	SetMuseChatConsent(id string, enabled bool, at int64, by, evidence string, version int,
+	// SetMuseChatAccess writes the direct-chat administrator switch and its
+	// audit row atomically. enabled_at/by reuse the legacy consent columns.
+	SetMuseChatAccess(id string, enabled bool, at int64, by,
 		actor, action, detail string, auditAt int64) error
 	// SetMuseChatStatus updates only last_chat_at/last_chat_status.
 	SetMuseChatStatus(id string, at int64, status string) error

@@ -57,7 +57,10 @@ func TestMuseChatAdminRoutesRequireAdmin(t *testing.T) {
 		{"POST", "/admin/muse/chat/settings"},
 		{"GET", "/admin/muse/chat/mc_x"},
 		{"POST", "/admin/muse/chat/mc_x/cancel"},
-		{"POST", "/admin/muse/accounts/ma_x/chat-consent"},
+		{"POST", "/admin/muse/accounts/ma_x/chat-access"},
+		{"GET", "/admin/muse/chat/thread?peer_id=alice"},
+		{"POST", "/admin/muse/chat/probe/approvals"},
+		{"POST", "/admin/muse/chat/probe/decide"},
 	} {
 		if code, _ := f.do(t, tc.method, tc.path, nil, ""); code != 401 {
 			t.Fatalf("%s %s without admin: %d", tc.method, tc.path, code)
@@ -130,7 +133,7 @@ func TestMuseChatAdmissionDisabledAndValidation(t *testing.T) {
 	}
 }
 
-func TestMuseChatConsentAndRuntimeSettings(t *testing.T) {
+func TestMuseChatAccessAndRuntimeSettings(t *testing.T) {
 	f := newFixture(t)
 	_, srv := newFakeMuseAPI(t)
 	f.enableMuseChat(t, srv.URL)
@@ -139,28 +142,25 @@ func TestMuseChatConsentAndRuntimeSettings(t *testing.T) {
 	acct := f.authorizeMuse(t, admin, "alice", "alice@example.com")
 	id := acct["id"].(string)
 
-	consentPath := "/admin/muse/accounts/" + id + "/chat-consent"
-	code, out := f.doAuth(t, "POST", consentPath, map[string]any{
-		"enabled": true, "consent_version": 1, "consent_evidence": "short",
-	}, admin)
-	if code != 400 || out["code"] != "consent_evidence_required" {
-		t.Fatalf("short evidence: %d %+v", code, out)
-	}
-	code, out = f.doAuth(t, "POST", consentPath, map[string]any{
-		"enabled": true, "consent_version": 2, "consent_evidence": "member said yes",
-	}, admin)
-	if code != 400 || out["code"] != "consent_version_mismatch" {
-		t.Fatalf("version: %d %+v", code, out)
-	}
-	code, out = f.doAuth(t, "POST", consentPath, map[string]any{
-		"enabled": true, "consent_version": 1, "consent_evidence": "member said yes",
-	}, admin)
+	accessPath := "/admin/muse/accounts/" + id + "/chat-access"
+	code, out := f.doAuth(t, "POST", accessPath, map[string]any{"enabled": true}, admin)
 	if code != 200 || out["account"].(map[string]any)["chat_enabled"] != true {
-		t.Fatalf("consent enable: %d %+v", code, out)
+		t.Fatalf("access enable: %d %+v", code, out)
 	}
-	code, out = f.doAuth(t, "POST", consentPath, map[string]any{"enabled": false, "reason": "asked"}, admin)
+	code, out = f.doAuth(t, "POST", accessPath, map[string]any{
+		"enabled": true, "consent_evidence": "member said yes",
+	}, admin)
+	if code != 400 || out["code"] != "unknown_field" {
+		t.Fatalf("legacy consent field: %d %+v", code, out)
+	}
+	code, out = f.doAuth(t, "POST", "/admin/muse/accounts/"+id+"/chat-consent",
+		map[string]any{"enabled": true}, admin)
+	if code != 404 {
+		t.Fatalf("old chat-consent route still exists: %d %+v", code, out)
+	}
+	code, out = f.doAuth(t, "POST", accessPath, map[string]any{"enabled": false, "reason": "asked"}, admin)
 	if code != 200 || out["account"].(map[string]any)["chat_enabled"] != false {
-		t.Fatalf("consent disable: %d %+v", code, out)
+		t.Fatalf("access disable: %d %+v", code, out)
 	}
 
 	code, out = f.doAuth(t, "GET", "/admin/muse/chat/status", nil, admin)
@@ -186,6 +186,56 @@ func TestMuseChatConsentAndRuntimeSettings(t *testing.T) {
 	}
 }
 
+func TestMuseChatProbeDefaultsOffAndRejectsAllowAlways(t *testing.T) {
+	f := newFixture(t)
+	_, srv := newFakeMuseAPI(t)
+	f.enableMuseChat(t, srv.URL)
+	admin := f.adminLogin(t)
+
+	code, out := f.doAuth(t, "POST", "/admin/muse/chat/probe/approvals",
+		map[string]any{"chat_id": "mc_x"}, admin)
+	if code != 403 || out["code"] != "muse_probe_disabled" {
+		t.Fatalf("probe default off: %d %+v", code, out)
+	}
+	code, out = f.doAuth(t, "POST", "/admin/muse/chat/probe/decide", map[string]any{
+		"chat_id": "mc_x", "probe": true, "approval_id": "ap_1",
+		"decision": "allow_always", "variant": "decision_only",
+	}, admin)
+	if code != 400 || out["code"] != "probe_allow_always_forbidden" {
+		t.Fatalf("allow_always: %d %+v", code, out)
+	}
+	code, out = f.doAuth(t, "POST", "/admin/muse/chat/probe/approvals",
+		map[string]any{"chat_id": "mc_x", "probe": true}, admin)
+	if code != 404 || out["code"] != "unknown_chat" {
+		t.Fatalf("unknown chat: %d %+v", code, out)
+	}
+}
+
+func TestMuseChatThreadEmptyShape(t *testing.T) {
+	f := newFixture(t)
+	_, srv := newFakeMuseAPI(t)
+	f.enableMuseChat(t, srv.URL)
+	f.registerPeer(t, "alice", "muse")
+	admin := f.adminLogin(t)
+	f.authorizeMuse(t, admin, "alice", "alice@example.com")
+
+	code, out := f.doAuth(t, "GET", "/admin/muse/chat/thread?peer_id=alice", nil, admin)
+	if code != 200 || out["peer_id"] != "alice" {
+		t.Fatalf("thread: %d %+v", code, out)
+	}
+	if out["retention_secs"] != float64(3600) {
+		t.Fatalf("retention: %+v", out["retention_secs"])
+	}
+	jobs, _ := out["jobs"].([]any)
+	if len(jobs) != 0 {
+		t.Fatalf("empty thread jobs: %+v", jobs)
+	}
+	code, out = f.doAuth(t, "GET", "/admin/muse/chat/thread?peer_id=nobody", nil, admin)
+	if code != 404 || out["code"] != "unknown_member" {
+		t.Fatalf("unknown member: %d %+v", code, out)
+	}
+}
+
 func TestMuseChatStartReturns202AndGetSnapshot(t *testing.T) {
 	f := newFixture(t)
 	_, srv := newFakeMuseAPI(t)
@@ -194,11 +244,11 @@ func TestMuseChatStartReturns202AndGetSnapshot(t *testing.T) {
 	admin := f.adminLogin(t)
 	acct := f.authorizeMuse(t, admin, "alice", "alice@example.com")
 	id := acct["id"].(string)
-	code, out := f.doAuth(t, "POST", "/admin/muse/accounts/"+id+"/chat-consent", map[string]any{
-		"enabled": true, "consent_version": 1, "consent_evidence": "member said yes",
+	code, out := f.doAuth(t, "POST", "/admin/muse/accounts/"+id+"/chat-access", map[string]any{
+		"enabled": true,
 	}, admin)
 	if code != 200 {
-		t.Fatalf("consent: %d %+v", code, out)
+		t.Fatalf("access: %d %+v", code, out)
 	}
 
 	code, out = f.doAuth(t, "POST", "/admin/muse/chat", map[string]any{

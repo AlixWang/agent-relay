@@ -125,16 +125,15 @@ type Account struct {
 	AutoWake      bool   `json:"auto_wake"`
 	Enabled       bool   `json:"enabled"`
 
-	// Direct-chat consent is separate from keepalive authorization (D3/D4).
-	// chat_enabled starts false and is reset by reauthorization or peer
-	// rebinding; the consent fields are evidence, never credentials.
-	ChatEnabled         bool   `json:"chat_enabled"`
-	ChatConsentAt       int64  `json:"chat_consent_at"`
-	ChatConsentBy       string `json:"chat_consent_by,omitempty"`
-	ChatConsentVersion  int    `json:"chat_consent_version"`
-	ChatConsentEvidence string `json:"chat_consent_evidence,omitempty"`
-	LastChatAt          int64  `json:"last_chat_at"`
-	LastChatStatus      string `json:"last_chat_status,omitempty"`
+	// Direct-chat access is an administrator switch, separate from keepalive
+	// authorization. chat_enabled starts false and is reset by reauthorization
+	// or peer rebinding. enabled_at/by reuse the legacy consent columns;
+	// consent_version/evidence are deprecated and never exposed.
+	ChatEnabled    bool   `json:"chat_enabled"`
+	ChatEnabledAt  int64  `json:"chat_enabled_at"`
+	ChatEnabledBy  string `json:"chat_enabled_by,omitempty"`
+	LastChatAt     int64  `json:"last_chat_at"`
+	LastChatStatus string `json:"last_chat_status,omitempty"`
 
 	AuthorizedAt int64 `json:"authorized_at"`
 	UpdatedAt    int64 `json:"updated_at"`
@@ -459,14 +458,17 @@ func (s *Service) Reauthorize(ctx context.Context, id, cookieInput string) (*Acc
 		a.AuthorizedAt = now
 	}
 	// A new cookie jar may belong to a different muse.ai identity. The old
-	// member consent does not transfer (D4); the operator must re-confirm.
+	// administrator access grant does not transfer; the operator must grant
+	// it again (one click in the console).
+	wasChatEnabled := a.ChatEnabled
 	a.ChatEnabled = false
-	a.ChatConsentAt = 0
-	a.ChatConsentBy = ""
-	a.ChatConsentVersion = 0
-	a.ChatConsentEvidence = ""
+	a.ChatEnabledAt = 0
+	a.ChatEnabledBy = ""
 	if err := s.st.SaveMuseAccount(a); err != nil {
 		return nil, err
+	}
+	if wasChatEnabled {
+		s.auditChatAccessReset(a, "reauthorized", now)
 	}
 	s.recordRetry(a.ID, res)
 	go s.cancelChatsForAccount(a.ID, "reauthorized")
@@ -519,17 +521,19 @@ func (s *Service) Update(id string, label, peerID *string, autoWake, enabled *bo
 	if enabled != nil {
 		a.Enabled = *enabled
 	}
+	wasChatEnabled := a.ChatEnabled
 	if peerChanged {
-		// Consent is bound to a person, not to the account row.
+		// Access is bound to a person, not to the account row.
 		a.ChatEnabled = false
-		a.ChatConsentAt = 0
-		a.ChatConsentBy = ""
-		a.ChatConsentVersion = 0
-		a.ChatConsentEvidence = ""
+		a.ChatEnabledAt = 0
+		a.ChatEnabledBy = ""
 	}
 	a.UpdatedAt = s.now().Unix()
 	if err := s.st.SaveMuseAccount(a); err != nil {
 		return nil, err
+	}
+	if peerChanged && wasChatEnabled {
+		s.auditChatAccessReset(a, "peer_changed", a.UpdatedAt)
 	}
 	// An account disable must stop an in-flight dialogue as well as future
 	// ones. Cancel runs in its own goroutine: this update still holds opMu,
@@ -1128,10 +1132,9 @@ func (s *Service) toAccount(a *store.MuseAccount) *Account {
 		LastWakeAt: a.LastWakeAt, LastWakeOK: a.LastWakeOK,
 		LastWakeError: a.LastWakeError, LastWakeState: a.LastWakeState,
 		AutoWake: a.AutoWake, Enabled: a.Enabled,
-		ChatEnabled: a.ChatEnabled, ChatConsentAt: a.ChatConsentAt,
-		ChatConsentBy: a.ChatConsentBy, ChatConsentVersion: a.ChatConsentVersion,
-		ChatConsentEvidence: a.ChatConsentEvidence,
-		LastChatAt:          a.LastChatAt, LastChatStatus: a.LastChatStatus,
+		ChatEnabled: a.ChatEnabled, ChatEnabledAt: a.ChatEnabledAt,
+		ChatEnabledBy: a.ChatEnabledBy,
+		LastChatAt:    a.LastChatAt, LastChatStatus: a.LastChatStatus,
 		AuthorizedAt: a.AuthorizedAt, UpdatedAt: a.UpdatedAt,
 	}
 	v.CookiesExp = parseCookiesExp(a.CookiesExp)

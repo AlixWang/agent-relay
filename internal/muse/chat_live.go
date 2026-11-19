@@ -55,6 +55,17 @@ func (l *liveChatSession) Close() {
 	l.cc.close()
 }
 
+// serviceCall is the probe-only door to another gateway service on this same
+// connection. It is not used by chat.send/history/cancel.
+func (l *liveChatSession) serviceCall(ctx context.Context, service int, verb, path string,
+	body []byte) (*appResponse, error) {
+
+	if l == nil || l.cc == nil {
+		return nil, newNoiseError("probe", "connection_closed", true, nil)
+	}
+	return l.cc.callService(ctx, service, verb, path, body, nil)
+}
+
 func chatNodeID(accountID string) string {
 	mac := hmac.New(sha256.New, []byte(accountID))
 	mac.Write([]byte("agent-relay-muse-node"))
