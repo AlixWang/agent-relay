@@ -18,6 +18,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,9 +125,10 @@ func (l *liveChatSession) logSessionListFailure(cf *chatFailure, shape string) {
 // includes a session_id value: entries holds one two-character presence flag
 // per row (P/p for is_primary, T/t for is_thread, - for absent).
 func sessionListShape(list chatSessionList, resolvedID string) string {
+	entries := list.entries()
 	primaryField, threadField := 0, 0
-	flags := make([]string, 0, len(list.Sessions))
-	for _, e := range list.Sessions {
+	flags := make([]string, 0, len(entries))
+	for _, e := range entries {
 		p, t := "-", "-"
 		if e.IsPrimary != nil {
 			primaryField++
@@ -155,7 +157,7 @@ func sessionListShape(list chatSessionList, resolvedID string) string {
 		flagText = strings.Join(flags, ",")
 	}
 	return fmt.Sprintf("sessions=%d primary_field=%d thread_field=%d entries=%s resolved=%s",
-		len(list.Sessions), primaryField, threadField, flagText, resolved)
+		len(entries), primaryField, threadField, flagText, resolved)
 }
 
 func (l *liveChatSession) Close() {
@@ -431,6 +433,37 @@ type chatSessionListEntry struct {
 
 type chatSessionList struct {
 	Sessions []chatSessionListEntry `json:"sessions"`
+	// Result carries the gateway's wrapped response shape. muse-cli's
+	// gateway.call_json accepts both {"sessions":[...]} and
+	// {"result":{"sessions":[...]}} by returning d["result"] when present, so
+	// the chat path must accept both as well. Only this one envelope layer is
+	// documented; deeper or alternative envelopes are not guessed here.
+	Result *chatSessionList `json:"result"`
+}
+
+// entries returns the effective sessions list, unwrapping the documented
+// result envelope exactly once.
+func (l chatSessionList) entries() []chatSessionListEntry {
+	if l.Result != nil {
+		return l.Result.Sessions
+	}
+	return l.Sessions
+}
+
+// sessionListTopKeys returns a sorted, value-free summary of the top-level JSON
+// object keys. It is only used when the parsed list is empty, to show which
+// envelope the upstream actually returned without logging any value.
+func sessionListTopKeys(body []byte) string {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return "[]"
+	}
+	keys := make([]string, 0, len(top))
+	for k := range top {
+		keys = append(keys, chatAuditValue(k))
+	}
+	sort.Strings(keys)
+	return "[" + strings.Join(keys, ",") + "]"
 }
 
 // mainChatSessionID picks the member main chat from a sessions list. The main
@@ -510,10 +543,14 @@ func (l *liveChatSession) resolveSession(ctx context.Context, sessionID string) 
 		l.logSessionListFailure(cf, fmt.Sprintf("invalid_json body_bytes=%d", len(resp.Body)))
 		return "", cf
 	}
-	id := mainChatSessionID(list.Sessions)
+	id := mainChatSessionID(list.entries())
 	if id == "" {
 		cf := newChatFailure("muse_main_chat_unresolved", "session_list", false)
-		l.logSessionListFailure(cf, sessionListShape(list, ""))
+		shape := sessionListShape(list, "")
+		if len(list.entries()) == 0 {
+			shape += " top_keys=" + sessionListTopKeys(resp.Body)
+		}
+		l.logSessionListFailure(cf, shape)
 		return "", cf
 	}
 	l.mainSessionID = id
