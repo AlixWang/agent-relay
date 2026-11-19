@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/AlixWang/agent-relay/internal/store"
 )
 
 // ChatStatus* are the job states in the POST/GET snapshots (design §5.3).
@@ -36,9 +38,6 @@ const (
 )
 
 const (
-	// ChatConsentVersion is the only consent text version v1 accepts (D4).
-	ChatConsentVersion = 1
-
 	chatJobRetention = time.Hour
 	chatJobMapMax    = 256
 	chatIdemTTL      = 10 * time.Minute
@@ -254,8 +253,8 @@ func (s *Service) StartChat(ctx context.Context, req ChatStartRequest) (*ChatJob
 	if account == nil {
 		return nil, admissionErr(404, "unknown_muse_account", 0)
 	}
-	if !account.ChatEnabled || account.ChatConsentVersion != ChatConsentVersion {
-		return nil, admissionErr(409, "muse_chat_opt_in_required", 0)
+	if !account.ChatEnabled {
+		return nil, admissionErr(409, "muse_chat_access_required", 0)
 	}
 	if !account.Enabled {
 		return nil, admissionErr(409, "muse_account_disabled", 0)
@@ -506,10 +505,11 @@ func (s *Service) SetChatRuntime(enabled bool, actor string) (ChatStatusView, er
 	return s.ChatStatus(), nil
 }
 
-// SetChatConsent writes the per-member opt-in and its audit row atomically
-// (D4). A new cookie or a changed peer must re-consent; this method only
-// records the operator's transaction, it cannot bypass that reset.
-func (s *Service) SetChatConsent(accountID string, enabled bool, version int, evidence, reason, actor string) (*Account, error) {
+// SetChatAccess writes the per-member administrator switch and its audit row
+// atomically. Access follows the verified identity binding: a new cookie or a
+// changed peer resets it elsewhere. This method only records the operator's
+// action; it cannot bypass that reset.
+func (s *Service) SetChatAccess(accountID string, enabled bool, reason, actor string) (*Account, error) {
 	if s == nil {
 		return nil, admissionErr(503, "muse_chat_disabled", 0)
 	}
@@ -525,16 +525,13 @@ func (s *Service) SetChatConsent(accountID string, enabled bool, version int, ev
 		return nil, ErrNotFound
 	}
 	now := s.now().Unix()
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "console"
+	}
 	if enabled {
 		if !s.opts.DirectChatEnabled {
 			return nil, admissionErr(409, "deploy_flag_off", 0)
-		}
-		if version != ChatConsentVersion {
-			return nil, admissionErr(400, "consent_version_mismatch", 0)
-		}
-		evidence = strings.TrimSpace(evidence)
-		if n := len([]rune(evidence)); n < 8 || n > 200 {
-			return nil, admissionErr(400, "consent_evidence_required", 0)
 		}
 		if !a.Enabled {
 			return nil, admissionErr(409, "muse_account_disabled", 0)
@@ -545,24 +542,39 @@ func (s *Service) SetChatConsent(accountID string, enabled bool, version int, ev
 		if a.AuthState != "ok" {
 			return nil, admissionErr(409, "muse_account_unverified", 0)
 		}
-		detail := fmt.Sprintf("account=%s peer=%s consent=1 evidence=%s by=%s",
-			chatAuditValue(a.ID), chatAuditValue(a.PeerID), chatAuditValue(evidence), chatAuditValue(actor))
-		if err := s.st.SetMuseChatConsent(a.ID, true, now, actor, evidence, version,
-			actor, "muse.chat.opt_in", truncate(detail, chatAuditDetail), now); err != nil {
+		detail := fmt.Sprintf("account=%s peer=%s by=%s reason=%s source=console",
+			chatAuditValue(a.ID), chatAuditValue(a.PeerID), chatAuditValue(actor), chatAuditValue(reason))
+		if err := s.st.SetMuseChatAccess(a.ID, true, now, actor,
+			actor, "muse.chat.access_grant", truncate(detail, chatAuditDetail), now); err != nil {
 			return nil, err
 		}
 	} else {
-		detail := fmt.Sprintf("account=%s peer=%s reason=%s",
-			chatAuditValue(a.ID), chatAuditValue(a.PeerID), chatAuditValue(reason))
-		if err := s.st.SetMuseChatConsent(a.ID, false, now, "", "", 0,
-			actor, "muse.chat.opt_out", truncate(detail, chatAuditDetail), now); err != nil {
+		detail := fmt.Sprintf("account=%s peer=%s by=%s reason=%s source=console",
+			chatAuditValue(a.ID), chatAuditValue(a.PeerID), chatAuditValue(actor), chatAuditValue(reason))
+		if err := s.st.SetMuseChatAccess(a.ID, false, now, "",
+			actor, "muse.chat.access_revoke", truncate(detail, chatAuditDetail), now); err != nil {
 			return nil, err
 		}
 	}
 	if !enabled {
-		go s.cancelChatsForAccount(a.ID, "opt_out")
+		go s.cancelChatsForAccount(a.ID, "access_revoke")
 	}
 	return s.Get(a.ID)
+}
+
+// auditChatAccessReset records a system-driven reset (new cookie or peer
+// rebinding). It is separate from the account-row save and only logs on
+// failure: the security invariant is the zeroed column, not the audit row.
+func (s *Service) auditChatAccessReset(a *store.MuseAccount, reason string, now int64) {
+	if a == nil {
+		return
+	}
+	detail := fmt.Sprintf("account=%s peer=%s reason=%s",
+		chatAuditValue(a.ID), chatAuditValue(a.PeerID), chatAuditValue(reason))
+	if err := s.st.AppendAudit("system", "muse.chat.access_reset",
+		truncate(detail, chatAuditDetail), now); err != nil {
+		log.Printf("muse chat: audit access_reset failed for %s: %v", a.ID, err)
+	}
 }
 
 // CancelChat stops waiting and best-effort cancels the generation. It never
@@ -996,7 +1008,7 @@ func (s *Service) pollChatHistory(ctx context.Context, sess chatSession, job *Ch
 }
 
 func (s *Service) auditSending(job *ChatJob) error {
-	detail := fmt.Sprintf("chat=%s peer=%s account=%s session=%s baseline=%d text_len=%d text_sha256=%s request_id=%s consent=1",
+	detail := fmt.Sprintf("chat=%s peer=%s account=%s session=%s baseline=%d text_len=%d text_sha256=%s request_id=%s access=1",
 		chatAuditValue(job.ID), chatAuditValue(job.PeerID), chatAuditValue(job.AccountID),
 		chatAuditValue(job.Session), job.BaselineValue(), job.TextLen,
 		job.TextHash, chatAuditValue(job.RequestID))

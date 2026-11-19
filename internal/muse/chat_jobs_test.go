@@ -24,6 +24,14 @@ type fakeChatSession struct {
 	cancelCalls  int
 	sentText     string
 	closed       bool
+	serviceCalls []probeCall
+}
+
+type probeCall struct {
+	service int
+	verb    string
+	path    string
+	body    string
 }
 
 func (f *fakeChatSession) History(_ context.Context, _ string, limit int, before int64) (*chatHistoryResponse, error) {
@@ -56,6 +64,13 @@ func (f *fakeChatSession) Cancel(_ context.Context, sessionID string) (chatCance
 		return f.cancelFn(sessionID)
 	}
 	return chatCancelResult{Sent: true, Status: 200}, nil
+}
+
+func (f *fakeChatSession) serviceCall(_ context.Context, service int, verb, path string, body []byte) (*appResponse, error) {
+	f.mu.Lock()
+	f.serviceCalls = append(f.serviceCalls, probeCall{service: service, verb: verb, path: path, body: string(body)})
+	f.mu.Unlock()
+	return &appResponse{Status: 200, Body: []byte(`{"approvals":[]}`), EndBody: true}, nil
 }
 
 func (f *fakeChatSession) Close() {
@@ -137,8 +152,8 @@ func newChatTestEnv(t *testing.T) *chatTestEnv {
 	env.svc.opts.ChatDefaultBudget = 30 * time.Second
 	env.svc.opts.ChatMaxBudget = 300 * time.Second
 	acct := env.authorize(t, "alice")
-	if _, err := env.svc.SetChatConsent(acct.ID, true, 1, "member said yes", "", "admin"); err != nil {
-		t.Fatalf("consent: %v", err)
+	if _, err := env.svc.SetChatAccess(acct.ID, true, "test", "admin"); err != nil {
+		t.Fatalf("access: %v", err)
 	}
 	return &chatTestEnv{testEnv: env, account: acct}
 }
@@ -473,8 +488,8 @@ func TestChatRateLimitAndGlobalCapacity(t *testing.T) {
 	waitChatStatus(t, env.svc, view.ChatID, ChatStatusWaiting)
 
 	bob := env.authorize(t, "bob")
-	if _, err := env.svc.SetChatConsent(bob.ID, true, 1, "bob said yes", "", "admin"); err != nil {
-		t.Fatalf("bob consent: %v", err)
+	if _, err := env.svc.SetChatAccess(bob.ID, true, "test", "admin"); err != nil {
+		t.Fatalf("bob access: %v", err)
 	}
 	_, err := env.svc.StartChat(context.Background(), ChatStartRequest{PeerID: "bob", Text: "hi bob"})
 	ce, code := chatAdmissionCode(t, err)
@@ -568,54 +583,89 @@ func TestChatLeaseBlocksKeepalive(t *testing.T) {
 	}
 }
 
-func TestChatConsentResetOnPeerChangeAndReauthorize(t *testing.T) {
+func TestChatAccessResetOnPeerChangeAndReauthorize(t *testing.T) {
 	env := newChatTestEnv(t)
 	if a, _ := env.svc.Get(env.account.ID); !a.ChatEnabled {
-		t.Fatal("consent was not enabled")
+		t.Fatal("access was not enabled")
 	}
 	bobID := "bob"
 	if _, err := env.svc.Update(env.account.ID, nil, &bobID, nil, nil); err != nil {
 		t.Fatalf("update peer: %v", err)
 	}
-	if a, _ := env.svc.Get(env.account.ID); a.ChatEnabled {
-		t.Fatal("peer change did not reset chat consent")
+	if a, _ := env.svc.Get(env.account.ID); a.ChatEnabled || a.ChatEnabledAt != 0 || a.ChatEnabledBy != "" {
+		t.Fatalf("peer change did not reset chat access: %+v", a)
 	}
 	// Put the binding back and enable again, then reauthorize a new cookie.
 	aliceID := "alice"
 	if _, err := env.svc.Update(env.account.ID, nil, &aliceID, nil, nil); err != nil {
 		t.Fatalf("restore peer: %v", err)
 	}
-	if _, err := env.svc.SetChatConsent(env.account.ID, true, 1, "member said yes again", "", "admin"); err != nil {
-		t.Fatalf("consent again: %v", err)
+	if _, err := env.svc.SetChatAccess(env.account.ID, true, "test", "admin"); err != nil {
+		t.Fatalf("access again: %v", err)
 	}
 	if _, err := env.svc.Reauthorize(context.Background(), env.account.ID,
 		"hatch_sess=new-sess; hatch_vml=new-vml; hatch_gw=gw"); err != nil {
 		t.Fatalf("reauthorize: %v", err)
 	}
-	if a, _ := env.svc.Get(env.account.ID); a.ChatEnabled || a.ChatConsentVersion != 0 {
-		t.Fatalf("reauthorize did not reset consent: %+v", a)
+	if a, _ := env.svc.Get(env.account.ID); a.ChatEnabled || a.ChatEnabledAt != 0 || a.ChatEnabledBy != "" {
+		t.Fatalf("reauthorize did not reset chat access: %+v", a)
+	}
+	rows, err := env.st.ListAudit("", "muse.chat.access_reset", 0, 20)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("access_reset audit rows=%d err=%v", len(rows), err)
+	}
+	for _, row := range rows {
+		if row.Actor != "system" {
+			t.Fatalf("reset actor=%q, want system", row.Actor)
+		}
 	}
 }
 
-func TestChatConsentValidation(t *testing.T) {
+func TestChatAccessValidationAndAudit(t *testing.T) {
 	env := newChatTestEnv(t)
-	_, err := env.svc.SetChatConsent(env.account.ID, true, 1, "short", "", "admin")
+	env.svc.opts.DirectChatEnabled = false
+	_, err := env.svc.SetChatAccess(env.account.ID, true, "test", "admin")
 	ce, code := chatAdmissionCode(t, err)
-	if ce.Status != 400 || code != "consent_evidence_required" {
-		t.Fatalf("evidence: %+v", ce)
+	if ce.Status != 409 || code != "deploy_flag_off" {
+		t.Fatalf("deploy off: %+v", ce)
 	}
-	_, err = env.svc.SetChatConsent(env.account.ID, true, 2, "long enough evidence", "", "admin")
-	_, code = chatAdmissionCode(t, err)
-	if code != "consent_version_mismatch" {
-		t.Fatalf("version: %s", code)
-	}
+	env.svc.opts.DirectChatEnabled = true
 	if _, err := env.svc.Update(env.account.ID, nil, nil, nil, boolPtr(false)); err != nil {
 		t.Fatalf("disable account: %v", err)
 	}
-	_, err = env.svc.SetChatConsent(env.account.ID, true, 1, "long enough evidence", "", "admin")
+	_, err = env.svc.SetChatAccess(env.account.ID, true, "test", "admin")
 	_, code = chatAdmissionCode(t, err)
 	if code != "muse_account_disabled" {
 		t.Fatalf("disabled account: %s", code)
+	}
+	if _, err := env.svc.Update(env.account.ID, nil, nil, nil, boolPtr(true)); err != nil {
+		t.Fatalf("enable account: %v", err)
+	}
+	if _, err := env.svc.SetChatAccess(env.account.ID, true, "operator note", "admin"); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	rows, _ := env.st.ListAudit("", "muse.chat.access_grant", 0, 10)
+	if len(rows) != 2 { // setup grant + this grant
+		t.Fatalf("access_grant audit rows=%d", len(rows))
+	}
+	found := false
+	for _, row := range rows {
+		if strings.Contains(row.Detail, "evidence") || strings.Contains(row.Detail, "consent") {
+			t.Fatalf("grant audit leaked consent fields: %q", row.Detail)
+		}
+		if strings.Contains(row.Detail, "by=admin") && strings.Contains(row.Detail, "reason=operator_note") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("grant audit detail not found: %+v", rows)
+	}
+	if _, err := env.svc.SetChatAccess(env.account.ID, false, "asked", "admin"); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	rows, _ = env.st.ListAudit("", "muse.chat.access_revoke", 0, 10)
+	if len(rows) != 1 || rows[0].Actor != "admin" || !strings.Contains(rows[0].Detail, "reason=asked") {
+		t.Fatalf("access_revoke audit: %+v", rows)
 	}
 }
 

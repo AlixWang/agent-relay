@@ -300,7 +300,12 @@ CREATE TABLE IF NOT EXISTS muse_accounts (
     last_wake_state   TEXT DEFAULT '',
     auto_wake         INTEGER DEFAULT 1,
     enabled           INTEGER DEFAULT 1,
-    -- Direct Muse chat requires separate per-member consent (D3/D4/D22).
+    -- Direct Muse chat access is an administrator switch (R1/R2): keepalive
+    -- authorization never implies permission for the server to speak as the
+    -- member. Every account starts disabled; reauthorization/peer rebinding
+    -- resets it in the service layer. chat_consent_at/by are reused as
+    -- enabled_at/by (zero DDL); chat_consent_version/evidence are deprecated
+    -- and must not be read or written.
     chat_enabled          INTEGER DEFAULT 0,
     chat_consent_at       INTEGER DEFAULT 0,
     chat_consent_by       TEXT DEFAULT '',

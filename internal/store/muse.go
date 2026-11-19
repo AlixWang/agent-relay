@@ -35,17 +35,17 @@ type MuseAccount struct {
 	LastWakeState string
 	AutoWake      bool
 	Enabled       bool
-	// Direct-chat consent is a separate authorization from keepalive. It is
-	// reset to zero whenever the account's cookie or peer binding changes.
-	ChatEnabled         bool
-	ChatConsentAt       int64
-	ChatConsentBy       string
-	ChatConsentVersion  int
-	ChatConsentEvidence string
-	LastChatAt          int64
-	LastChatStatus      string
-	AuthorizedAt        int64
-	UpdatedAt           int64
+	// Direct-chat access is an administrator switch, separate from keepalive
+	// authorization. It is reset to zero whenever the account's cookie or peer
+	// binding changes. The chat_consent_* columns are reused as enabled_at/by;
+	// chat_consent_version/evidence are deprecated and must not be read/written.
+	ChatEnabled    bool
+	ChatEnabledAt  int64
+	ChatEnabledBy  string
+	LastChatAt     int64
+	LastChatStatus string
+	AuthorizedAt   int64
+	UpdatedAt      int64
 }
 
 type rowScanner interface {
@@ -60,7 +60,6 @@ const museAccountColumns = `id,peer_id,COALESCE(label,''),COALESCE(cookies_enc,'
 	COALESCE(last_wake_error,''),COALESCE(last_wake_state,''),
 	COALESCE(auto_wake,1),COALESCE(enabled,1),
 	COALESCE(chat_enabled,0),COALESCE(chat_consent_at,0),COALESCE(chat_consent_by,''),
-	COALESCE(chat_consent_version,0),COALESCE(chat_consent_evidence,''),
 	COALESCE(last_chat_at,0),COALESCE(last_chat_status,''),
 	authorized_at,updated_at`
 
@@ -72,8 +71,7 @@ func scanMuseAccount(sc rowScanner) (*MuseAccount, error) {
 		&a.LastKeepaliveAt, &a.LastAttemptAt, &attemptOK,
 		&a.LastWakeAt, &wakeOK, &a.LastWakeError, &a.LastWakeState,
 		&autoWake, &enabled,
-		&chatEnabled, &a.ChatConsentAt, &a.ChatConsentBy,
-		&a.ChatConsentVersion, &a.ChatConsentEvidence,
+		&chatEnabled, &a.ChatEnabledAt, &a.ChatEnabledBy,
 		&a.LastChatAt, &a.LastChatStatus,
 		&a.AuthorizedAt, &a.UpdatedAt)
 	if err != nil {
@@ -93,14 +91,14 @@ func (s *sqliteStore) CreateMuseAccount(a *MuseAccount) error {
 		auth_state,last_error,last_keepalive_at,last_attempt_at,last_attempt_ok,
 		last_wake_at,last_wake_ok,last_wake_error,last_wake_state,
 		auto_wake,enabled,
-		chat_enabled,chat_consent_at,chat_consent_by,chat_consent_version,chat_consent_evidence,
+		chat_enabled,chat_consent_at,chat_consent_by,
 		last_chat_at,last_chat_status,authorized_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.PeerID, a.Label, a.CookiesEnc, a.CookiesExp, a.SessionStatus, a.VMID, a.VMState, a.VMStateAt,
 		a.AuthState, a.LastError, a.LastKeepaliveAt, a.LastAttemptAt, boolToInt(a.LastAttemptOK),
 		a.LastWakeAt, boolToInt(a.LastWakeOK), a.LastWakeError, a.LastWakeState,
 		boolToInt(a.AutoWake), boolToInt(a.Enabled),
-		boolToInt(a.ChatEnabled), a.ChatConsentAt, a.ChatConsentBy, a.ChatConsentVersion, a.ChatConsentEvidence,
+		boolToInt(a.ChatEnabled), a.ChatEnabledAt, a.ChatEnabledBy,
 		a.LastChatAt, a.LastChatStatus, a.AuthorizedAt, a.UpdatedAt)
 	return err
 }
@@ -153,14 +151,14 @@ func (s *sqliteStore) SaveMuseAccount(a *MuseAccount) error {
 		auth_state=?,last_error=?,last_keepalive_at=?,last_attempt_at=?,last_attempt_ok=?,
 		last_wake_at=?,last_wake_ok=?,last_wake_error=?,last_wake_state=?,
 		auto_wake=?,enabled=?,
-		chat_enabled=?,chat_consent_at=?,chat_consent_by=?,chat_consent_version=?,chat_consent_evidence=?,
+		chat_enabled=?,chat_consent_at=?,chat_consent_by=?,
 		last_chat_at=?,last_chat_status=?,authorized_at=?,updated_at=?
 		WHERE id=?`,
 		a.PeerID, a.Label, a.CookiesEnc, a.CookiesExp, a.SessionStatus, a.VMID, a.VMState, a.VMStateAt,
 		a.AuthState, a.LastError, a.LastKeepaliveAt, a.LastAttemptAt, boolToInt(a.LastAttemptOK),
 		a.LastWakeAt, boolToInt(a.LastWakeOK), a.LastWakeError, a.LastWakeState,
 		boolToInt(a.AutoWake), boolToInt(a.Enabled),
-		boolToInt(a.ChatEnabled), a.ChatConsentAt, a.ChatConsentBy, a.ChatConsentVersion, a.ChatConsentEvidence,
+		boolToInt(a.ChatEnabled), a.ChatEnabledAt, a.ChatEnabledBy,
 		a.LastChatAt, a.LastChatStatus, a.AuthorizedAt, a.UpdatedAt, a.ID)
 	if err != nil {
 		return err
@@ -176,12 +174,13 @@ func (s *sqliteStore) DeleteMuseAccount(id string) error {
 	return err
 }
 
-// SetMuseChatConsent writes the per-member direct-chat opt-in and its audit row
-// in one transaction (D4/D5). The account row and the audit trail can therefore
-// never disagree about whether consent exists. Disabling preserves the prior
-// consent_* fields for history; enabling replaces them with the new evidence.
-func (s *sqliteStore) SetMuseChatConsent(id string, enabled bool, at int64, by, evidence string,
-	version int, actor, action, detail string, auditAt int64) error {
+// SetMuseChatAccess writes the per-member direct-chat switch and its audit row
+// in one transaction. The account row and the audit trail can therefore never
+// disagree about whether access exists. Disabling preserves enabled_at/by for
+// history; enabling replaces them. The deprecated consent_version/evidence
+// columns are never touched.
+func (s *sqliteStore) SetMuseChatAccess(id string, enabled bool, at int64, by,
+	actor, action, detail string, auditAt int64) error {
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -193,9 +192,8 @@ func (s *sqliteStore) SetMuseChatConsent(id string, enabled bool, at int64, by, 
 		q   string
 	)
 	if enabled {
-		q = `UPDATE muse_accounts SET chat_enabled=1,chat_consent_at=?,chat_consent_by=?,
-			chat_consent_version=?,chat_consent_evidence=? WHERE id=?`
-		res, err = tx.Exec(q, at, by, version, evidence, id)
+		q = `UPDATE muse_accounts SET chat_enabled=1,chat_consent_at=?,chat_consent_by=? WHERE id=?`
+		res, err = tx.Exec(q, at, by, id)
 	} else {
 		q = `UPDATE muse_accounts SET chat_enabled=0 WHERE id=?`
 		res, err = tx.Exec(q, id)

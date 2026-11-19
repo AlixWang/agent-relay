@@ -223,7 +223,10 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("POST /admin/muse/chat/settings", s.requireAdmin(s.handleAdminMuseChatSettings))
 	mux.HandleFunc("GET /admin/muse/chat/{id}", s.requireAdmin(s.handleAdminMuseChatGet))
 	mux.HandleFunc("POST /admin/muse/chat/{id}/cancel", s.requireAdmin(s.handleAdminMuseChatCancel))
-	mux.HandleFunc("POST /admin/muse/accounts/{id}/chat-consent", s.requireAdmin(s.handleAdminMuseChatConsent))
+	mux.HandleFunc("POST /admin/muse/accounts/{id}/chat-access", s.requireAdmin(s.handleAdminMuseChatAccess))
+	mux.HandleFunc("GET /admin/muse/chat/thread", s.requireAdmin(s.handleAdminMuseChatThread))
+	mux.HandleFunc("POST /admin/muse/chat/probe/approvals", s.requireAdmin(s.handleAdminMuseChatProbeApprovals))
+	mux.HandleFunc("POST /admin/muse/chat/probe/decide", s.requireAdmin(s.handleAdminMuseChatProbeDecide))
 
 	// Console command center (§9.5): operator sends, rooms, inbox. The
 	// operator speaks on the normal message path as the reserved "operator"

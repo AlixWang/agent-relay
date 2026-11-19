@@ -455,3 +455,26 @@ func mustHex(t *testing.T, s string) []byte {
 	}
 	return b
 }
+
+func TestServiceRequestEnvelopeCarriesExplicitService(t *testing.T) {
+	f := testUnreadRequestFrame(7)
+	raw := encodeServiceRequest(chatProbeService, f)
+	fields, err := parsePB(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 2 || fields[0].num != 1 || fields[0].wire != 0 || fields[0].v != 1 ||
+		fields[1].num != 2 || fields[1].wire != 2 {
+		t.Fatalf("service 1 envelope fields: %+v", fields)
+	}
+	// Service 0 is the protobuf default and stays omitted, preserving the
+	// existing daemon golden bytes.
+	raw = encodeServiceRequest(0, f)
+	fields, err = parsePB(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 1 || fields[0].num != 2 {
+		t.Fatalf("service 0 envelope should omit the service field: %+v", fields)
+	}
+}

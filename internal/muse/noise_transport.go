@@ -318,12 +318,21 @@ func buildAppRequest(verb, path string, body []byte, headers []noiseHeader) *app
 	return req
 }
 
-// sendServiceFrame encrypts and writes one ServiceFrame. Encrypt and WS write
-// are one critical section because the Noise send cipher state is stateful; the
-// chat connection's read loop may serve several streams, but writes stay
-// serialized here.
+// sendServiceFrame keeps the historical daemon (service 0) call sites
+// unchanged. New code that needs another service must use
+// sendServiceFrameWithService and pass the service explicitly.
 func (c *noiseConn) sendServiceFrame(ctx context.Context, sf *serviceFrame) error {
-	envelope := encodeServiceRequest(0, sf) // service 0 = daemon
+	return c.sendServiceFrameWithService(ctx, 0, sf)
+}
+
+// sendServiceFrameWithService encrypts and writes one ServiceFrame on the given
+// service (0 = daemon, 1 = sentinel). Encrypt and WS write are one critical
+// section because the Noise send cipher state is stateful; the chat
+// connection's read loop may serve several streams, but writes stay
+// serialized here. The read path is service-agnostic: ServiceResponse has no
+// service field and chatConn dispatches by stream id.
+func (c *noiseConn) sendServiceFrameWithService(ctx context.Context, service int, sf *serviceFrame) error {
+	envelope := encodeServiceRequest(service, sf)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	wire, err := c.encryptFrame(envelope)

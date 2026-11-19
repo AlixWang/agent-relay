@@ -185,16 +185,24 @@ func (c *chatConn) failAll(err error) {
 	}
 }
 
-// writeRequest registers the sink before sending so a fast response cannot
-// race the map insertion, then writes exactly one request frame.
+// writeRequest keeps the daemon-only chat path unchanged (service 0).
 func (c *chatConn) writeRequest(ctx context.Context, sink *chatSink, verb, path string,
 	body []byte, headers []noiseHeader) error {
+
+	return c.writeRequestService(ctx, 0, sink, verb, path, body, headers)
+}
+
+// writeRequestService registers the sink before sending so a fast response
+// cannot race the map insertion, then writes exactly one request frame on the
+// requested service.
+func (c *chatConn) writeRequestService(ctx context.Context, service int, sink *chatSink,
+	verb, path string, body []byte, headers []noiseHeader) error {
 
 	if err := c.register(sink); err != nil {
 		return err
 	}
 	sf := &serviceFrame{StreamID: sink.streamID, Request: buildAppRequest(verb, path, body, headers)}
-	if err := c.parent.sendServiceFrame(ctx, sf); err != nil {
+	if err := c.parent.sendServiceFrameWithService(ctx, service, sf); err != nil {
 		c.unregister(sink.streamID, sink)
 		sink.close()
 		return err
@@ -202,9 +210,18 @@ func (c *chatConn) writeRequest(ctx context.Context, sink *chatSink, verb, path 
 	return nil
 }
 
-// call is a unary application request on a chat connection. It is safe while a
-// chat.stream is open because all frames are dispatched by readLoop.
+// call is a unary daemon (service 0) application request on a chat connection.
+// It is safe while a chat.stream is open because all frames are dispatched by
+// readLoop.
 func (c *chatConn) call(ctx context.Context, verb, path string, body []byte,
+	headers []noiseHeader) (*appResponse, error) {
+
+	return c.callService(ctx, 0, verb, path, body, headers)
+}
+
+// callService is the same unary request on an explicit service. It is reserved
+// for the hidden approval probe: production chat traffic stays on service 0.
+func (c *chatConn) callService(ctx context.Context, service int, verb, path string, body []byte,
 	headers []noiseHeader) (*appResponse, error) {
 
 	sink := newChatSink(c.nextStreamID())
@@ -212,7 +229,7 @@ func (c *chatConn) call(ctx context.Context, verb, path string, body []byte,
 		c.unregister(sink.streamID, sink)
 		sink.close()
 	}()
-	if err := c.writeRequest(ctx, sink, verb, path, body, headers); err != nil {
+	if err := c.writeRequestService(ctx, service, sink, verb, path, body, headers); err != nil {
 		return nil, err
 	}
 	var resp *appResponse
