@@ -21,6 +21,9 @@ import (
 // GET /api/session/list.
 type mainChatUpstream struct {
 	mainID string
+	// listBody overrides the default bare sessions.list response. Tests use it
+	// to exercise the documented {"result":{...}} gateway envelope.
+	listBody []byte
 
 	mu                sync.Mutex
 	sessionListCalls  int
@@ -60,6 +63,9 @@ func (m *mainChatUpstream) handle(req musetest.Request, _ *musetest.Emitter) mus
 		m.mu.Lock()
 		m.sessionListCalls++
 		m.mu.Unlock()
+		if m.listBody != nil {
+			return musetest.Response{Status: 200, Body: m.listBody, EndBody: true}
+		}
 		body, _ := json.Marshal(map[string]any{"sessions": []map[string]any{
 			{"session_id": m.mainID, "title": "Main", "is_primary": true, "is_thread": false},
 			{"session_id": "side-1", "title": "Side", "is_primary": false, "is_thread": true},
@@ -311,5 +317,181 @@ func TestChatEmptySessionReachesWaitingAndAuditsConfirmed(t *testing.T) {
 	waitChatDone(t, env.svc, view.ChatID)
 	if _, mainExplicit, implicit, _, _ := m.counts(); mainExplicit != 1 || implicit != 0 {
 		t.Fatalf("orchestrator address: explicit-main=%d implicit=%d", mainExplicit, implicit)
+	}
+}
+
+// TestChatSessionListEnvelopeResolvesMainChatToWaiting pins both documented
+// sessions.list envelopes end to end: a bare {"sessions":[...]} response and a
+// gateway-wrapped {"result":{"sessions":[...]}} response must resolve the main
+// chat, send to it explicitly, reach waiting and audit delivery=confirmed.
+func TestChatSessionListEnvelopeResolvesMainChatToWaiting(t *testing.T) {
+	const (
+		mainSecret = "main-session-secret"
+		sideSecret = "side-session-secret"
+		bodySecret = "upstream-body-secret"
+	)
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "bare",
+			body: `{"sessions":[` +
+				`{"session_id":"` + mainSecret + `","title":"` + bodySecret + `","is_primary":true,"is_thread":false},` +
+				`{"session_id":"` + sideSecret + `","title":"` + bodySecret + `","is_primary":false,"is_thread":true}]}`,
+		},
+		{
+			name: "result_wrapped",
+			body: `{"result":{"sessions":[` +
+				`{"session_id":"` + mainSecret + `","title":"` + bodySecret + `","is_primary":true,"is_thread":false},` +
+				`{"session_id":"` + sideSecret + `","title":"` + bodySecret + `","is_primary":false,"is_thread":true}]},` +
+				`"meta":{"note":"` + bodySecret + `"}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureChatLog(t)
+			m := newMainChatUpstream()
+			m.mainID = mainSecret
+			m.listBody = []byte(tc.body)
+			ws := musetest.New(t)
+			ws.SetStreamHandler(m.handle)
+			env := newChatTestEnv(t)
+			view := env.start(t, &liveChatGateway{sess: newLiveChatSessionForTest(t, ws.URL)},
+				ChatStartRequest{Text: "pwd"})
+
+			got := waitChatStatus(t, env.svc, view.ChatID, ChatStatusWaiting)
+			if got.BaselineSeq != 0 || got.UserSeq == 0 || got.ConfirmedAt == 0 {
+				t.Fatalf("snapshot: %+v", got)
+			}
+			if got.Error != nil {
+				t.Fatalf("unexpected error: %+v", got.Error)
+			}
+			sent, err := env.st.ListAudit("", "muse.chat.sent", 0, 20)
+			if err != nil || len(sent) != 1 {
+				t.Fatalf("sent audit rows=%d err=%v", len(sent), err)
+			}
+			if !strings.Contains(sent[0].Detail, "delivery=confirmed") {
+				t.Fatalf("sent audit detail: %q", sent[0].Detail)
+			}
+
+			if _, err := env.svc.CancelChat(context.Background(), view.ChatID, "admin"); err != nil {
+				t.Fatalf("cancel: %v", err)
+			}
+			waitChatDone(t, env.svc, view.ChatID)
+			if _, mainExplicit, implicit, _, lastSID := m.counts(); mainExplicit != 1 || implicit != 0 || lastSID != mainSecret {
+				t.Fatalf("orchestrator address: explicit-main=%d implicit=%d last=%q",
+					mainExplicit, implicit, lastSID)
+			}
+
+			all, err := env.st.ListAudit("", "", 0, 100)
+			if err != nil {
+				t.Fatalf("list audit: %v", err)
+			}
+			out := logs.String()
+			for _, secret := range []string{mainSecret, sideSecret, bodySecret} {
+				if strings.Contains(out, secret) {
+					t.Fatalf("log leaked %q:\n%s", secret, out)
+				}
+				for _, row := range all {
+					if strings.Contains(row.Detail, secret) {
+						t.Fatalf("audit %s leaked %q: %q", row.Action, secret, row.Detail)
+					}
+				}
+			}
+			if strings.Contains(out, "session list failed") {
+				t.Fatalf("session list unexpectedly failed:\n%s", out)
+			}
+			if strings.Contains(out, "top_keys=") {
+				t.Fatalf("top_keys logged for a non-empty list:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestChatSessionListEnvelopeUnresolvedShapes pins the diagnostic summary for
+// wrapped-but-side-only and empty-object responses. The shape carries counts
+// and presence flags only; top_keys carries key names only, never values.
+func TestChatSessionListEnvelopeUnresolvedShapes(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		wantShape []string
+		secrets   []string
+	}{
+		{
+			name: "result_wrapped_side_only",
+			body: `{"result":{"sessions":[` +
+				`{"session_id":"side-secret-id","title":"upstream-body-secret","is_primary":false,"is_thread":true}]},` +
+				`"meta":{"note":"upstream-body-secret"}}`,
+			wantShape: []string{
+				"sessions=1", "primary_field=1", "thread_field=1", "entries=pT", "resolved=no",
+			},
+			secrets: []string{"side-secret-id", "upstream-body-secret"},
+		},
+		{
+			name:      "empty_object",
+			body:      `{}`,
+			wantShape: []string{"sessions=0", "primary_field=0", "thread_field=0", "entries=none", "resolved=no", "top_keys=[]"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureChatLog(t)
+			ws := musetest.New(t)
+			streams := 0
+			ws.SetStreamHandler(func(req musetest.Request, _ *musetest.Emitter) musetest.Response {
+				switch {
+				case req.Verb == http.MethodGet && req.Path == chatSessionsPath:
+					return musetest.Response{Status: 200, Body: []byte(tc.body), EndBody: true}
+				case req.Verb == http.MethodPost && req.Path == "/chat/stream":
+					streams++
+					return musetest.Response{Status: 200, Body: []byte("{}\n"), EndBody: true}
+				default:
+					return musetest.Response{Status: 404, EndBody: true}
+				}
+			})
+			env := newChatTestEnv(t)
+			view := env.start(t, &liveChatGateway{sess: newLiveChatSessionForTest(t, ws.URL)},
+				ChatStartRequest{Text: "pwd"})
+			got := waitChatStatus(t, env.svc, view.ChatID, ChatStatusFailed)
+			waitChatDone(t, env.svc, view.ChatID)
+
+			if got.Error == nil || got.Error.Code != "muse_history_unavailable" {
+				t.Fatalf("public error changed: %+v", got.Error)
+			}
+			if streams != 0 {
+				t.Fatalf("wrote a stream without a main-chat id: %d", streams)
+			}
+			rows, err := env.st.ListAudit("", "muse.chat.failed", 0, 20)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("failed audit rows=%d err=%v", len(rows), err)
+			}
+			detail := rows[0].Detail
+			for _, want := range []string{"reason=muse_main_chat_unresolved", "error_class=muse_history_unavailable"} {
+				if !strings.Contains(detail, want) {
+					t.Fatalf("audit detail %q missing %q", detail, want)
+				}
+			}
+			if strings.Contains(detail, "status=") {
+				t.Fatalf("2xx session-list failure carried status=: %q", detail)
+			}
+
+			out := logs.String()
+			for _, want := range append([]string{
+				"muse chat: session list failed", "stage=session_list", "reason=muse_main_chat_unresolved",
+			}, tc.wantShape...) {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log missing %q:\n%s", want, out)
+				}
+			}
+			for _, secret := range tc.secrets {
+				if strings.Contains(detail, secret) || strings.Contains(out, secret) {
+					t.Fatalf("secret/body leaked: audit=%q logs=%q", detail, out)
+				}
+			}
+		})
 	}
 }
