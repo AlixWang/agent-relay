@@ -14,6 +14,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,22 +27,22 @@ import (
 )
 
 const (
-	chatEchoBudget      = 10 * time.Second
-	chatEchoMaxBytes    = 64 * 1024
-	chatEchoMaxLines    = 100
-	chatHistoryTimeout  = 4 * time.Second
-	chatDialTimeout     = 6 * time.Second
-	chatHandshakeTMO    = 6 * time.Second
-	chatSessionsPath    = "/api/session/list"
-	chatSessionsTimeout = 4 * time.Second
+	chatEchoBudget     = 10 * time.Second
+	chatEchoMaxBytes   = 64 * 1024
+	chatEchoMaxLines   = 100
+	chatHistoryTimeout = 4 * time.Second
+	chatDialTimeout    = 6 * time.Second
+	chatHandshakeTMO   = 6 * time.Second
+	chatSessionsPath   = "/api/session/list"
 )
 
 // Variables, not constants, so the orchestration tests can shorten the
-// confirmation window without a real 5s sleep. Tests in this package do not
-// run in parallel.
+// confirmation window and the session-list deadline without real 5s/4s sleeps.
+// Tests in this package do not run in parallel.
 var (
-	chatConfirmBudget = 5 * time.Second
-	chatConfirmEvery  = 250 * time.Millisecond
+	chatConfirmBudget   = 5 * time.Second
+	chatConfirmEvery    = 250 * time.Millisecond
+	chatSessionsTimeout = 4 * time.Second
 )
 
 // liveChatSession is the production chatSession. Close is the only reliable
@@ -56,6 +58,104 @@ type liveChatSession struct {
 	// directions; see resolveSession.
 	mainMu        sync.Mutex
 	mainSessionID string
+
+	// The job stamps its identifiers here before the first History/Send so a
+	// session-list failure can be logged with the chat/peer that caused it.
+	// These are diagnostic only; they never affect addressing.
+	logMu  sync.Mutex
+	chatID string
+	peerID string
+}
+
+func (l *liveChatSession) setJobContext(chatID, peerID string) {
+	if l == nil {
+		return
+	}
+	l.logMu.Lock()
+	l.chatID, l.peerID = chatID, peerID
+	l.logMu.Unlock()
+}
+
+func (l *liveChatSession) logContext() (chatID, peerID, accountID string) {
+	if l == nil {
+		return "?", "?", "?"
+	}
+	l.logMu.Lock()
+	chatID, peerID = l.chatID, l.peerID
+	l.logMu.Unlock()
+	if chatID == "" {
+		chatID = "?"
+	}
+	if peerID == "" {
+		peerID = "?"
+	}
+	if l.accountID == "" {
+		accountID = "?"
+	} else {
+		accountID = l.accountID
+	}
+	return chatID, peerID, accountID
+}
+
+// logSessionListFailure writes one metadata-only line. It deliberately carries
+// no token, cookie, session id, request path body or upstream response body;
+// shape is a count/flag summary (see sessionListShape).
+func (l *liveChatSession) logSessionListFailure(cf *chatFailure, shape string) {
+	if cf == nil {
+		cf = newChatFailure("muse_upstream_error", "session_list", true)
+	}
+	chatID, peerID, accountID := l.logContext()
+	code := cf.Code
+	if code == "" {
+		code = "muse_upstream_error"
+	}
+	line := fmt.Sprintf("muse chat: session list failed chat=%s peer=%s account=%s stage=session_list reason=%s",
+		chatAuditValue(chatID), chatAuditValue(peerID), chatAuditValue(accountID), chatAuditValue(code))
+	if cf.Status > 0 {
+		line += fmt.Sprintf(" status=%d", cf.Status)
+	}
+	if shape != "" {
+		line += " shape=" + shape
+	}
+	log.Printf("%s", line)
+}
+
+// sessionListShape summarizes only the response envelope shape. It never
+// includes a session_id value: entries holds one two-character presence flag
+// per row (P/p for is_primary, T/t for is_thread, - for absent).
+func sessionListShape(list chatSessionList, resolvedID string) string {
+	primaryField, threadField := 0, 0
+	flags := make([]string, 0, len(list.Sessions))
+	for _, e := range list.Sessions {
+		p, t := "-", "-"
+		if e.IsPrimary != nil {
+			primaryField++
+			if *e.IsPrimary {
+				p = "P"
+			} else {
+				p = "p"
+			}
+		}
+		if e.IsThread != nil {
+			threadField++
+			if *e.IsThread {
+				t = "T"
+			} else {
+				t = "t"
+			}
+		}
+		flags = append(flags, p+t)
+	}
+	resolved := "no"
+	if resolvedID != "" {
+		resolved = "yes"
+	}
+	flagText := "none"
+	if len(flags) > 0 {
+		flagText = strings.Join(flags, ",")
+	}
+	return fmt.Sprintf("sessions=%d primary_field=%d thread_field=%d entries=%s resolved=%s",
+		len(list.Sessions), primaryField, threadField, flagText, resolved)
 }
 
 func (l *liveChatSession) Close() {
@@ -381,7 +481,9 @@ func (l *liveChatSession) resolveSession(ctx context.Context, sessionID string) 
 		return sessionID, nil
 	}
 	if l == nil || l.cc == nil {
-		return "", newChatFailure("muse_upstream_error", "session_list", true)
+		cf := newChatFailure("muse_upstream_error", "session_list", true)
+		l.logSessionListFailure(cf, "unavailable")
+		return "", cf
 	}
 	l.mainMu.Lock()
 	defer l.mainMu.Unlock()
@@ -393,18 +495,26 @@ func (l *liveChatSession) resolveSession(ctx context.Context, sessionID string) 
 	resp, err := l.cc.call(rctx, http.MethodGet, chatSessionsPath, nil, nil)
 	cancel()
 	if err != nil {
-		return "", chatFailureFromNoise("session_list", err)
+		cf := chatFailureFromNoise("session_list", err)
+		l.logSessionListFailure(cf, "unavailable")
+		return "", cf
 	}
 	if resp.Status < 200 || resp.Status >= 300 {
-		return "", chatStatusFailure("session_list", resp.Status, false)
+		cf := chatStatusFailure("session_list", resp.Status, false)
+		l.logSessionListFailure(cf, fmt.Sprintf("unparsed body_bytes=%d", len(resp.Body)))
+		return "", cf
 	}
 	var list chatSessionList
 	if err := json.Unmarshal(resp.Body, &list); err != nil {
-		return "", newChatFailure("muse_protocol_drift", "session_list", false)
+		cf := newChatFailure("muse_protocol_drift", "session_list", false)
+		l.logSessionListFailure(cf, fmt.Sprintf("invalid_json body_bytes=%d", len(resp.Body)))
+		return "", cf
 	}
 	id := mainChatSessionID(list.Sessions)
 	if id == "" {
-		return "", newChatFailure("muse_main_chat_unresolved", "session_list", false)
+		cf := newChatFailure("muse_main_chat_unresolved", "session_list", false)
+		l.logSessionListFailure(cf, sessionListShape(list, ""))
+		return "", cf
 	}
 	l.mainSessionID = id
 	return id, nil

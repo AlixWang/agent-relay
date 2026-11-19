@@ -730,6 +730,9 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 		return chatOutcome{Status: ChatStatusFailed, Error: cerr, Stage: cerr.Class}
 	}
 	job.setSession(sess)
+	if live, ok := sess.(*liveChatSession); ok {
+		live.setJobContext(job.ID, job.PeerID)
+	}
 	if job.cancelRequested() {
 		return cancelledOutcome(job)
 	}
@@ -740,9 +743,25 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 		if job.cancelRequested() {
 			return cancelledOutcome(job)
 		}
+		cf := chatFailureAs(berr)
+		reason := cf.Code
+		if reason == "" {
+			reason = "muse_upstream_error"
+		}
+		line := fmt.Sprintf("muse chat: baseline history failed chat=%s peer=%s account=%s stage=sending error_class=muse_history_unavailable reason=%s",
+			chatAuditValue(job.ID), chatAuditValue(job.PeerID), chatAuditValue(job.AccountID),
+			chatAuditValue(reason))
+		if cf.Stage != "" {
+			line += " failure_stage=" + chatAuditValue(cf.Stage)
+		}
+		if cf.Status > 0 {
+			line += fmt.Sprintf(" status=%d", cf.Status)
+		}
+		log.Printf("%s", line)
 		cerr := chatErrorFromFailure(berr)
 		cerr.Code = "muse_history_unavailable"
-		return chatOutcome{Status: ChatStatusFailed, Error: cerr, Stage: "sending"}
+		return chatOutcome{Status: ChatStatusFailed, Error: cerr, Stage: "sending",
+			FailureReason: reason, FailureStatus: cf.Status}
 	}
 	baseline := maxChatSeq(baselineEvents.ChatEvents)
 	job.setBaseline(baseline)
@@ -1059,6 +1078,12 @@ func (s *Service) auditOutcome(job *ChatJob, o chatOutcome, now int64) {
 		}
 		detail = fmt.Sprintf("chat=%s stage=%s error_class=%s",
 			chatAuditValue(job.ID), chatAuditValue(stage), chatAuditValue(code))
+		if o.FailureReason != "" {
+			detail += " reason=" + chatAuditValue(o.FailureReason)
+		}
+		if o.FailureStatus > 0 {
+			detail += fmt.Sprintf(" status=%d", o.FailureStatus)
+		}
 	case ChatStatusReplyUnknown:
 		action = "muse.chat.failed"
 		detail = fmt.Sprintf("chat=%s stage=poll error_class=muse_reply_unknown",
@@ -1261,6 +1286,12 @@ type chatOutcome struct {
 	Stage      string
 	Cancel     string
 	Actor      string
+
+	// FailureReason/FailureStatus preserve the underlying chatFailure for
+	// audit only. They are never copied into ChatError (the public error code
+	// stays muse_history_unavailable).
+	FailureReason string
+	FailureStatus int
 }
 
 func cancelledOutcome(job *ChatJob) chatOutcome {
