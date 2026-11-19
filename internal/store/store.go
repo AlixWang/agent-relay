@@ -137,6 +137,16 @@ type Message struct {
 	ExpiresAt int64
 }
 
+// ThreadPage is one cursor page of a message thread. Messages are always
+// oldest-first so callers can concatenate pages without re-sorting. HasMore
+// points in the direction the caller asked for: older rows for the newest /
+// before cursor page, newer rows for an after cursor page.
+type ThreadPage struct {
+	Messages []*Message
+	Total    int
+	HasMore  bool
+}
+
 // PermissionRequest is the server-side row for one permission_request
 // message (request_id = message id). The decision CAS runs against this
 // table: first decision wins, repeats are idempotent, flips are rejected.
@@ -232,6 +242,13 @@ type Store interface {
 	VisibleTo(peerID string, since int64, limit int) ([]*Message, error)
 	ThreadMessages(rootID string, limit int) ([]*Message, error)
 	LastNInThread(rootID string, n int) ([]*Message, error)
+	// ThreadPage returns one cursor page of a thread, always oldest-first.
+	// afterSeq > 0 selects messages newer than that cursor (polling), and
+	// HasMore then reports newer rows beyond the page. beforeSeq > 0 selects
+	// messages older than that cursor; with neither cursor it returns the
+	// newest page. HasMore in those two modes reports older rows beyond it.
+	// Total is the thread's full row count, independent of the page.
+	ThreadPage(rootID string, beforeSeq, afterSeq int64, limit int) (*ThreadPage, error)
 	// LastNVisibleInThread is the room read-back (GET /messages/room): the
 	// newest messages of a thread the peer may read, own messages included.
 	LastNVisibleInThread(rootID, peerID string, n int) ([]*Message, error)
@@ -1527,6 +1544,78 @@ func (s *sqliteStore) LastNInThread(rootID string, n int) ([]*Message, error) {
 		out[len(rev)-1-i] = m
 	}
 	return out, rows.Err()
+}
+
+// ThreadPage implements cursor pagination for one thread. See the Store
+// interface for the direction of HasMore in each mode.
+const (
+	defaultThreadPageSize = 50
+	maxThreadPageSize     = 200
+)
+
+func (s *sqliteStore) ThreadPage(rootID string, beforeSeq, afterSeq int64, limit int) (*ThreadPage, error) {
+	if limit <= 0 {
+		limit = defaultThreadPageSize
+	}
+	if limit > maxThreadPageSize {
+		limit = maxThreadPageSize
+	}
+	// Fetch one extra row to answer HasMore without a second query.
+	const cols = `SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
+		status,op,target,detail,decision,expires_at
+		FROM messages WHERE root_id=?`
+	var (
+		rows       *sql.Rows
+		err        error
+		descending bool
+	)
+	switch {
+	case afterSeq > 0:
+		// Polling: walk forward from the client's cursor.
+		rows, err = s.db.Query(cols+` AND seq>? ORDER BY seq ASC LIMIT ?`, rootID, afterSeq, limit+1)
+	case beforeSeq > 0:
+		// Older page: newest rows below the cursor, then reverse.
+		rows, err = s.db.Query(cols+` AND seq<? ORDER BY seq DESC LIMIT ?`, rootID, beforeSeq, limit+1)
+		descending = true
+	default:
+		// Newest page, the default the console opens on.
+		rows, err = s.db.Query(cols+` ORDER BY seq DESC LIMIT ?`, rootID, limit+1)
+		descending = true
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	msgs := make([]*Message, 0, limit+1)
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	page := &ThreadPage{HasMore: len(msgs) > limit}
+	if page.HasMore {
+		msgs = msgs[:limit]
+	}
+	if descending {
+		out := make([]*Message, len(msgs))
+		for i, m := range msgs {
+			out[len(msgs)-1-i] = m
+		}
+		msgs = out
+	}
+	page.Messages = msgs
+
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE root_id=?`, rootID).Scan(&page.Total); err != nil {
+		return nil, err
+	}
+	return page, nil
 }
 
 // LastNVisibleInThread returns the newest n messages of one thread that peerID

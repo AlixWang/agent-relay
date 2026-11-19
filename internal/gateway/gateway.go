@@ -1506,11 +1506,17 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 		}, p, total))
 		return
 	}
-	msgs, err := s.st.ThreadMessages(thread, 1000)
+	// Thread timeline is cursor-paginated (DESIGN §9): the console opens on
+	// the newest page instead of the first 1000 rows from the beginning of
+	// the thread, which made every message past #1000 invisible. before_seq
+	// walks into history, after_seq is the 3s poll cursor.
+	pageSize, beforeSeq, afterSeq := parseThreadPage(r)
+	page, err := s.st.ThreadPage(thread, beforeSeq, afterSeq, pageSize)
 	if err != nil {
 		writeErr(w, 500, "thread failed")
 		return
 	}
+	msgs := page.Messages
 	// Read receipts are computed here, from the watermark table, for every
 	// thread. The console used to re-derive them in JavaScript from ack rows
 	// intersected with a member list, which is how the same message could
@@ -1571,7 +1577,15 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, item)
 	}
-	body := map[string]any{"ok": true, "items": items}
+	body := map[string]any{
+		"ok": true, "items": items,
+		"page_size": pageSize, "has_more": page.HasMore, "total": page.Total,
+		"oldest_seq": int64(0), "newest_seq": int64(0),
+	}
+	if len(msgs) > 0 {
+		body["oldest_seq"] = msgs[0].Seq
+		body["newest_seq"] = msgs[len(msgs)-1].Seq
+	}
 	if roomMembers != nil {
 		body["room"] = map[string]any{
 			"id": thread, "members": roomMembers,
