@@ -21,8 +21,9 @@ const (
 )
 
 type chatHistoryResponse struct {
-	ChatEvents []chatEvent `json:"chat_events"`
-	HasMore    bool        `json:"has_more"`
+	ChatEvents []chatEvent          `json:"chat_events"`
+	HasMore    bool                 `json:"has_more"`
+	Result     *chatHistoryResponse `json:"result"`
 }
 
 type chatEvent struct {
@@ -96,6 +97,9 @@ func parseChatHistory(raw []byte) (*chatHistoryResponse, error) {
 	var out chatHistoryResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
+	}
+	if out.Result != nil {
+		return out.Result, nil
 	}
 	return &out, nil
 }

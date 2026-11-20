@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestParseChatHistoryResultEnvelope(t *testing.T) {
+	raw := []byte(`{"result":{"chat_events":[{"event_name":"message.user","seq":7,"message_id":"m7","payload":{"display_text":"pwd"}}],"has_more":true}}`)
+	h, err := parseChatHistory(raw)
+	if err != nil {
+		t.Fatalf("parse wrapped history: %v", err)
+	}
+	if len(h.ChatEvents) != 1 || h.ChatEvents[0].Seq != 7 || h.ChatEvents[0].Payload.DisplayText != "pwd" {
+		t.Fatalf("wrapped history: %+v", h)
+	}
+	if !h.HasMore {
+		t.Fatal("wrapped has_more was lost")
+	}
+}
+
 func histEvent(event string, seq int64, session, text, status string) chatEvent {
 	return chatEvent{
 		EventName: event, Seq: seq, MessageID: event + "-" + strconvI(seq),
