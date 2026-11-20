@@ -322,7 +322,8 @@ func buildAppRequest(verb, path string, body []byte, headers []noiseHeader) *app
 // unchanged. New code that needs another service must use
 // sendServiceFrameWithService and pass the service explicitly.
 func (c *noiseConn) sendServiceFrame(ctx context.Context, sf *serviceFrame) error {
-	return c.sendServiceFrameWithService(ctx, 0, sf)
+	_, err := c.sendServiceFrameWithService(ctx, 0, sf)
+	return err
 }
 
 // sendServiceFrameWithService encrypts and writes one ServiceFrame on the given
@@ -331,18 +332,18 @@ func (c *noiseConn) sendServiceFrame(ctx context.Context, sf *serviceFrame) erro
 // connection's read loop may serve several streams, but writes stay
 // serialized here. The read path is service-agnostic: ServiceResponse has no
 // service field and chatConn dispatches by stream id.
-func (c *noiseConn) sendServiceFrameWithService(ctx context.Context, service int, sf *serviceFrame) error {
+func (c *noiseConn) sendServiceFrameWithService(ctx context.Context, service int, sf *serviceFrame) (writeAttempted bool, err error) {
 	envelope := encodeServiceRequest(service, sf)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	wire, err := c.encryptFrame(envelope)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := c.ws.Write(ctx, websocket.MessageBinary, wire); err != nil {
-		return newNoiseError("rpc", noiseNetworkClass(err), true, err)
+		return true, newNoiseError("rpc", noiseNetworkClass(err), true, err)
 	}
-	return nil
+	return true, nil
 }
 
 // doRPC is the existing unary GET compatibility layer. verifyNoiseRPC keeps

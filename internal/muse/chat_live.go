@@ -433,21 +433,39 @@ type chatSessionListEntry struct {
 
 type chatSessionList struct {
 	Sessions []chatSessionListEntry `json:"sessions"`
-	// Result carries the gateway's wrapped response shape. muse-cli's
-	// gateway.call_json accepts both {"sessions":[...]} and
-	// {"result":{"sessions":[...]}} by returning d["result"] when present, so
-	// the chat path must accept both as well. Only this one envelope layer is
-	// documented; deeper or alternative envelopes are not guessed here.
-	Result *chatSessionList `json:"result"`
 }
 
-// entries returns the effective sessions list, unwrapping the documented
-// result envelope exactly once.
 func (l chatSessionList) entries() []chatSessionListEntry {
-	if l.Result != nil {
-		return l.Result.Sessions
-	}
 	return l.Sessions
+}
+
+// unwrapMuseResultEnvelope accepts the two response shapes documented by the
+// Muse gateway and unwraps exactly one result layer. Callers still validate
+// the required fields for their own payload.
+func unwrapMuseResultEnvelope(raw []byte) ([]byte, string, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return nil, "invalid", err
+	}
+	if result, ok := top["result"]; ok {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(result, &object); err != nil {
+			return nil, "result", err
+		}
+		return result, "result", nil
+	}
+	return raw, "bare", nil
+}
+
+func decodeMuseResultEnvelope(raw []byte, dst any) (string, error) {
+	payload, shape, err := unwrapMuseResultEnvelope(raw)
+	if err != nil {
+		return shape, err
+	}
+	if err := json.Unmarshal(payload, dst); err != nil {
+		return shape, err
+	}
+	return shape, nil
 }
 
 // sessionListTopKeys returns a sorted, value-free summary of the top-level JSON
@@ -538,7 +556,7 @@ func (l *liveChatSession) resolveSession(ctx context.Context, sessionID string) 
 		return "", cf
 	}
 	var list chatSessionList
-	if err := json.Unmarshal(resp.Body, &list); err != nil {
+	if _, err := decodeMuseResultEnvelope(resp.Body, &list); err != nil {
 		cf := newChatFailure("muse_protocol_drift", "session_list", false)
 		l.logSessionListFailure(cf, fmt.Sprintf("invalid_json body_bytes=%d", len(resp.Body)))
 		return "", cf
@@ -632,12 +650,10 @@ func (l *liveChatSession) Send(ctx context.Context, sessionID, text, nodeID stri
 	if err != nil {
 		return res, newChatFailure("muse_protocol_drift", "send", false)
 	}
-	sink, err := l.cc.openStream(ctx, http.MethodPost, "/chat/stream", body, nil)
+	sink, evidence, err := l.cc.openStream(ctx, http.MethodPost, "/chat/stream", body, nil)
+	res.Evidence = evidence
 	if err != nil {
-		cf := chatFailureFromNoise("send", err)
-		// The request may have reached the server before the write failed.
-		cf.Wrote = true
-		return res, cf
+		return res, chatFailureFromNoise("send", err)
 	}
 	defer func() {
 		// Terminal frames unregister themselves; this is idempotent for the
@@ -649,56 +665,45 @@ func (l *liveChatSession) Send(ctx context.Context, sessionID, text, nodeID stri
 	defer cancel()
 	var buf bytes.Buffer
 	lines := 0
-	status := 0
-	echo := false
 	for {
 		select {
 		case f := <-sink.ch:
 			if f.Err != nil {
-				cf := chatFailureFromNoise("send", f.Err)
-				cf.Wrote = true
-				return res, cf
+				return res, chatFailureFromNoise("send", f.Err)
 			}
 			if f.Reset != nil {
 				cf := newChatFailure("muse_protocol_drift", "send", false)
-				cf.Wrote = true
-				cf.Status = status
+				cf.Status = res.Status
 				return res, cf
 			}
 			if f.Response != nil {
-				echo = true
-				status = f.Response.Status
-				if status >= 400 {
-					res.Wrote = true
-					res.Status = status
-					return res, chatStatusFailure("send", status, true)
+				res.Echo = true
+				res.Status = f.Response.Status
+				if res.Status >= 400 {
+					switch res.Status {
+					case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusTooManyRequests:
+						res.Evidence = chatSendRejected
+					}
+					return res, chatStatusFailure("send", res.Status, true)
 				}
 				if len(f.Response.Body) > 0 {
 					buf.Write(f.Response.Body)
 				}
 				if f.Response.EndBody {
-					res.Wrote = true
-					res.Status = status
-					res.Echo = echo
 					lines += countFullLines(&buf, &res, true)
 					res.EchoLines = lines
 					return res, nil
 				}
 			}
 			if f.BodyChunk != nil {
-				echo = true
+				res.Echo = true
 				if len(f.BodyChunk.Data) > 0 {
 					buf.Write(f.BodyChunk.Data)
 				}
 				if buf.Len() > chatEchoMaxBytes || lines > chatEchoMaxLines {
-					res.Wrote = true
-					res.Status = status
 					return res, newChatFailure("muse_stream_record_too_large", "send", false)
 				}
 				if f.BodyChunk.EndBody {
-					res.Wrote = true
-					res.Status = status
-					res.Echo = echo
 					lines += countFullLines(&buf, &res, true)
 					res.EchoLines = lines
 					return res, nil
@@ -707,19 +712,12 @@ func (l *liveChatSession) Send(ctx context.Context, sessionID, text, nodeID stri
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {
 				cf := newChatFailure("muse_cancelled", "send", false)
-				cf.Wrote = true
-				res.Wrote = true
-				res.Status = status
-				res.Echo = echo
 				res.EchoLines = lines
 				return res, cf
 			}
 			// §1.4: a stream that does not end within 10s is not a send
 			// failure. Stop waiting for the opaque echo and let the job
 			// confirm delivery from history.
-			res.Wrote = true
-			res.Status = status
-			res.Echo = echo
 			res.EchoLines = lines + countFullLines(&buf, &res, false)
 			res.TimedOut = true
 			return res, nil

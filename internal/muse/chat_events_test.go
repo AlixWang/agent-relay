@@ -19,6 +19,33 @@ func TestParseChatHistoryResultEnvelope(t *testing.T) {
 	}
 }
 
+func TestParseChatHistoryEnvelopeShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		ok   bool
+	}{
+		{name: "bare", raw: `{"chat_events":[],"has_more":false}`, ok: true},
+		{name: "wrapped", raw: `{"result":{"chat_events":[],"has_more":true}}`, ok: true},
+		{name: "malformed", raw: `{"chat_events":`, ok: false},
+		{name: "missing", raw: `{}`, ok: false},
+		{name: "nested result", raw: `{"result":{"result":{"chat_events":[]}}}`, ok: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := parseChatHistory([]byte(tc.raw))
+			if tc.ok {
+				if err != nil || h == nil || h.ChatEvents == nil {
+					t.Fatalf("parse history: h=%+v err=%v", h, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected protocol error, got %+v", h)
+			}
+		})
+	}
+}
+
 func histEvent(event string, seq int64, session, text, status string) chatEvent {
 	return chatEvent{
 		EventName: event, Seq: seq, MessageID: event + "-" + strconvI(seq),

@@ -15,6 +15,7 @@ const {
   museSessionOK, museWakeUnconfirmed, museWakeTone, museWakeLabel,
   museVMText, museVMTitle, museChatHash, parseMuseChatHash,
   museChatCodeText, museChatErrorText, museChatBudget, museChatCountdown,
+  museChatContextMatches,
 } = mod;
 
 const assert = (cond, msg) => {
@@ -113,5 +114,11 @@ assert(museChatBudget('nope') === 180, 'bad budget falls back');
 assert(museChatCountdown(1000, 958) === '42s', 'countdown');
 assert(museChatCountdown(1000, 1200) === '0s', 'countdown floor');
 assert(museChatCountdown(0, 0) === '', 'no deadline');
+
+const routeState = { chatLoadToken: 4, chatPeer: 'alice', chatSession: 's1' };
+assert(museChatContextMatches({ loadToken: 4, peer: 'alice', session: 's1' }, routeState), 'chat context matches');
+assert(!museChatContextMatches({ loadToken: 3, peer: 'alice', session: 's1' }, routeState), 'stale load token rejected');
+assert(!museChatContextMatches({ loadToken: 4, peer: 'bob', session: 's1' }, routeState), 'stale peer rejected');
+assert(!museChatContextMatches({ loadToken: 4, peer: 'alice', session: 's2' }, routeState), 'stale session rejected');
 
 console.log('PASS: muse URL/state helpers');

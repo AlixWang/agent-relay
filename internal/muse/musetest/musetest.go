@@ -47,13 +47,14 @@ type Chunk struct {
 // the default end_body=true for an empty initial response, which is what a
 // multi-frame chat.stream echo uses.
 type Response struct {
-	Status  int
-	Headers map[string]string
-	Body    []byte
-	EndBody bool
-	NoEnd   bool
-	Reset   *Reset
-	Chunk   *Chunk
+	Disconnect bool
+	Status     int
+	Headers    map[string]string
+	Body       []byte
+	EndBody    bool
+	NoEnd      bool
+	Reset      *Reset
+	Chunk      *Chunk
 
 	streamID int64
 }
@@ -278,6 +279,9 @@ type mockWriter struct {
 }
 
 func (w *mockWriter) write(resp Response) error {
+	if resp.Disconnect {
+		return w.ws.CloseNow()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	respWire := encodeResponse(resp)

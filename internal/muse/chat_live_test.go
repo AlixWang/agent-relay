@@ -158,7 +158,7 @@ func TestLiveChatSessionResolvesMainChatForSendAndHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if !res.Wrote || !res.Echo {
+	if res.Evidence != chatSendMayHaveArrived || !res.Echo {
 		t.Fatalf("send result: %+v", res)
 	}
 
@@ -228,12 +228,12 @@ func TestLiveChatSessionUnresolvedMainChatNeverWrites(t *testing.T) {
 	})
 	sess := newLiveChatSessionForTest(t, ws.URL)
 
-	_, err := sess.Send(context.Background(), "", "must not send", "node-1")
+	result, err := sess.Send(context.Background(), "", "must not send", "node-1")
 	if err == nil {
 		t.Fatal("send succeeded without a resolvable main chat")
 	}
 	cf := chatFailureAs(err)
-	if cf.Code != "muse_main_chat_unresolved" || cf.Wrote {
+	if cf.Code != "muse_main_chat_unresolved" || result.Evidence != chatSendNotAttempted {
 		t.Fatalf("failure: %+v", cf)
 	}
 	if streams != 0 {
@@ -282,6 +282,135 @@ func TestMainChatSessionIDSelection(t *testing.T) {
 // exercises the real send/history address resolution.
 type liveChatGateway struct {
 	sess chatSession
+}
+
+func TestChatSendEvidenceThroughNoise(t *testing.T) {
+	oldBudget, oldEvery := chatConfirmBudget, chatConfirmEvery
+	chatConfirmBudget, chatConfirmEvery = 250*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { chatConfirmBudget, chatConfirmEvery = oldBudget, oldEvery })
+	for _, tc := range []struct {
+		name, wantStatus, wantCode string
+		status                     int
+		landed, disconnect         bool
+	}{
+		{"reset_after_landing", ChatStatusWaiting, "", 0, true, false},
+		{"reset_without_history", ChatStatusDeliveryUnknown, "muse_delivery_unknown", 0, false, false},
+		{"connection_lost_after_write", ChatStatusDeliveryUnknown, "muse_delivery_unknown", 0, true, true},
+		{"ambiguous_502_after_landing", ChatStatusWaiting, "", 502, true, false},
+		{"unauthorized", ChatStatusFailed, "muse_needs_reauth", 401, false, false},
+		{"forbidden", ChatStatusFailed, "muse_egress_forbidden", 403, false, false},
+		{"unknown_session", ChatStatusFailed, "unknown_session", 404, false, false},
+		{"rate_limited", ChatStatusFailed, "muse_upstream_rate_limited", 429, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := newMainChatUpstream()
+			ws := musetest.New(t)
+			ws.SetStreamHandler(func(req musetest.Request, emit *musetest.Emitter) musetest.Response {
+				if req.Path != "/chat/stream" {
+					return upstream.handle(req, emit)
+				}
+				if tc.landed {
+					upstream.handle(req, emit)
+				}
+				if tc.disconnect {
+					return musetest.Response{Disconnect: true}
+				}
+				if tc.status != 0 {
+					return musetest.Response{Status: tc.status, EndBody: true}
+				}
+				return musetest.Response{Reset: &musetest.Reset{Code: 1}}
+			})
+			session := newLiveChatSessionForTest(t, ws.URL)
+			env := newChatTestEnv(t)
+			view := env.start(t, &liveChatGateway{sess: session}, ChatStartRequest{})
+			got := waitChatStatus(t, env.svc, view.ChatID, ChatStatusWaiting, ChatStatusDeliveryUnknown, ChatStatusFailed)
+			if got.Status == ChatStatusWaiting {
+				if _, err := env.svc.CancelChat(context.Background(), view.ChatID, "admin"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			waitChatDone(t, env.svc, view.ChatID)
+			if got.Status != tc.wantStatus || (got.UserSeq > 0) != (tc.wantStatus == ChatStatusWaiting) ||
+				(tc.wantCode != "" && (got.Error == nil || got.Error.Code != tc.wantCode)) {
+				t.Fatalf("unexpected snapshot: %+v", got)
+			}
+			writes, histories := 0, 0
+			for _, req := range ws.Requests() {
+				if req.Path == "/chat/stream" {
+					writes++
+				}
+				if strings.HasPrefix(req.Path, "/chat/history?") {
+					histories++
+				}
+			}
+			if writes != 1 || (tc.wantStatus == ChatStatusFailed && histories != 1) || (!tc.disconnect && tc.wantStatus != ChatStatusFailed && histories <= 1) {
+				t.Fatalf("writes=%d history reads=%d", writes, histories)
+			}
+			sent, err := env.st.ListAudit("", "muse.chat.sent", 0, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantStatus == ChatStatusWaiting {
+				wantEcho := "echo=no"
+				if tc.status != 0 {
+					wantEcho = "echo=yes"
+				}
+				if len(sent) != 1 || !strings.Contains(sent[0].Detail, wantEcho) || !strings.Contains(sent[0].Detail, "delivery=confirmed") {
+					t.Fatalf("confirmed audit: %+v", sent)
+				}
+			} else if len(sent) != 0 {
+				t.Fatal("audited delivery without confirmation")
+			}
+		})
+	}
+}
+
+func TestChatCancelDuringSendOrConfirmation(t *testing.T) {
+	for _, phase := range []string{"sending", "confirming"} {
+		t.Run(phase, func(t *testing.T) {
+			upstream := newMainChatUpstream()
+			ws := musetest.New(t)
+			blocked := make(chan struct{})
+			ws.SetStreamHandler(func(req musetest.Request, emit *musetest.Emitter) musetest.Response {
+				if (phase == "sending" && req.Path == "/chat/stream") || (phase == "confirming" && strings.HasPrefix(req.Path, "/chat/history?") && strings.Contains(req.Path, "limit=20")) {
+					close(blocked)
+					return musetest.Response{Status: 200, NoEnd: true}
+				}
+				return upstream.handle(req, emit)
+			})
+			env := newChatTestEnv(t)
+			view := env.start(t, &liveChatGateway{sess: newLiveChatSessionForTest(t, ws.URL)}, ChatStartRequest{})
+			select {
+			case <-blocked:
+			case <-time.After(5 * time.Second):
+				t.Fatal("request did not reach " + phase)
+			}
+			if _, err := env.svc.CancelChat(context.Background(), view.ChatID, "admin"); err != nil {
+				t.Fatal(err)
+			}
+			waitChatDone(t, env.svc, view.ChatID)
+			got, err := env.svc.GetChat(view.ChatID)
+			if err != nil || got.Status != ChatStatusCancelled || got.ConfirmedAt != 0 {
+				t.Fatalf("after cancel: %+v, %v", got, err)
+			}
+			writes, histories := 0, 0
+			for _, req := range ws.Requests() {
+				if req.Path == "/chat/stream" {
+					writes++
+				}
+				if strings.HasPrefix(req.Path, "/chat/history?") {
+					histories++
+				}
+			}
+			wantHistories := 1
+			if phase == "confirming" {
+				wantHistories++
+			}
+			if writes != 1 || histories != wantHistories {
+				t.Fatalf("writes=%d histories=%d", writes, histories)
+			}
+		})
+	}
 }
 
 func (g *liveChatGateway) Open(context.Context, string) (chatSession, error) {

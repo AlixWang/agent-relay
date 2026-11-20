@@ -11,7 +11,6 @@ type chatFailure struct {
 	Retryable  bool
 	RetryAfter int
 	Status     int
-	Wrote      bool
 	Cause      error
 }
 
@@ -61,8 +60,16 @@ func errorsAs(err error, target **chatFailure) bool {
 	return false
 }
 
+type chatSendEvidence uint8
+
+const (
+	chatSendNotAttempted chatSendEvidence = iota
+	chatSendMayHaveArrived
+	chatSendRejected
+)
+
 type chatSendResult struct {
-	Wrote       bool
+	Evidence    chatSendEvidence
 	Status      int
 	Echo        bool
 	EchoLines   int

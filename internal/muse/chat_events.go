@@ -21,9 +21,8 @@ const (
 )
 
 type chatHistoryResponse struct {
-	ChatEvents []chatEvent          `json:"chat_events"`
-	HasMore    bool                 `json:"has_more"`
-	Result     *chatHistoryResponse `json:"result"`
+	ChatEvents []chatEvent `json:"chat_events"`
+	HasMore    bool        `json:"has_more"`
 }
 
 type chatEvent struct {
@@ -94,12 +93,20 @@ type chatParseResult struct {
 }
 
 func parseChatHistory(raw []byte) (*chatHistoryResponse, error) {
-	var out chatHistoryResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
+	payload, _, err := unwrapMuseResultEnvelope(raw)
+	if err != nil {
 		return nil, err
 	}
-	if out.Result != nil {
-		return out.Result, nil
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return nil, err
+	}
+	if _, ok := fields["chat_events"]; !ok {
+		return nil, fmt.Errorf("muse history missing chat_events")
+	}
+	var out chatHistoryResponse
+	if err := json.Unmarshal(payload, &out); err != nil {
+		return nil, err
 	}
 	return &out, nil
 }

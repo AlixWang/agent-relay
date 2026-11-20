@@ -185,29 +185,22 @@ func (c *chatConn) failAll(err error) {
 	}
 }
 
-// writeRequest keeps the daemon-only chat path unchanged (service 0).
-func (c *chatConn) writeRequest(ctx context.Context, sink *chatSink, verb, path string,
-	body []byte, headers []noiseHeader) error {
-
-	return c.writeRequestService(ctx, 0, sink, verb, path, body, headers)
-}
-
 // writeRequestService registers the sink before sending so a fast response
 // cannot race the map insertion, then writes exactly one request frame on the
 // requested service.
 func (c *chatConn) writeRequestService(ctx context.Context, service int, sink *chatSink,
-	verb, path string, body []byte, headers []noiseHeader) error {
+	verb, path string, body []byte, headers []noiseHeader) (writeAttempted bool, err error) {
 
 	if err := c.register(sink); err != nil {
-		return err
+		return false, err
 	}
 	sf := &serviceFrame{StreamID: sink.streamID, Request: buildAppRequest(verb, path, body, headers)}
-	if err := c.parent.sendServiceFrameWithService(ctx, service, sf); err != nil {
+	writeAttempted, err = c.parent.sendServiceFrameWithService(ctx, service, sf)
+	if err != nil {
 		c.unregister(sink.streamID, sink)
 		sink.close()
-		return err
 	}
-	return nil
+	return writeAttempted, err
 }
 
 // call is a unary daemon (service 0) application request on a chat connection.
@@ -229,7 +222,7 @@ func (c *chatConn) callService(ctx context.Context, service int, verb, path stri
 		c.unregister(sink.streamID, sink)
 		sink.close()
 	}()
-	if err := c.writeRequestService(ctx, service, sink, verb, path, body, headers); err != nil {
+	if _, err := c.writeRequestService(ctx, service, sink, verb, path, body, headers); err != nil {
 		return nil, err
 	}
 	var resp *appResponse
@@ -281,13 +274,17 @@ func (c *chatConn) callService(ctx context.Context, service int, verb, path stri
 // sink immediately. The caller owns consumption and should unregister on any
 // early exit; terminal frames already unregister themselves in readLoop.
 func (c *chatConn) openStream(ctx context.Context, verb, path string, body []byte,
-	headers []noiseHeader) (*chatSink, error) {
+	headers []noiseHeader) (*chatSink, chatSendEvidence, error) {
 
 	sink := newChatSink(c.nextStreamID())
-	if err := c.writeRequest(ctx, sink, verb, path, body, headers); err != nil {
-		return nil, err
+	attempted, err := c.writeRequestService(ctx, 0, sink, verb, path, body, headers)
+	if !attempted {
+		return nil, chatSendNotAttempted, err
 	}
-	return sink, nil
+	if err != nil {
+		return nil, chatSendMayHaveArrived, err
+	}
+	return sink, chatSendMayHaveArrived, nil
 }
 
 func (c *chatConn) unregisterStream(s *chatSink) {

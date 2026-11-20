@@ -84,7 +84,7 @@ func TestChatConnPostBodyAndInterleavedStreams(t *testing.T) {
 	cc := dialChatTestConn(t, ws.URL)
 
 	body, _ := json.Marshal(map[string]any{"items": []any{map[string]string{"type": "text", "text": "hi"}}})
-	sink, err := cc.openStream(context.Background(), http.MethodPost, "/chat/stream", body, nil)
+	sink, _, err := cc.openStream(context.Background(), http.MethodPost, "/chat/stream", body, nil)
 	if err != nil {
 		t.Fatalf("openStream: %v", err)
 	}

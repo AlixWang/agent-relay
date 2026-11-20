@@ -53,7 +53,7 @@ func (f *fakeChatSession) Send(_ context.Context, _, text, _ string) (chatSendRe
 	if f.sendFn != nil {
 		return f.sendFn(text)
 	}
-	return chatSendResult{Wrote: true, Status: 200, Echo: true}, nil
+	return chatSendResult{Evidence: chatSendMayHaveArrived, Status: 200, Echo: true}, nil
 }
 
 func (f *fakeChatSession) Cancel(_ context.Context, sessionID string) (chatCancelResult, error) {
@@ -367,7 +367,9 @@ func TestChatTimeoutAndDraftPartial(t *testing.T) {
 		t.Fatalf("partial: %+v", got)
 	}
 	rows, _ := env.st.ListAudit("", "muse.chat.timeout", 0, 20)
-	if len(rows) != 1 || !strings.Contains(rows[0].Detail, "partial=yes") {
+	if len(rows) != 1 || !strings.Contains(rows[0].Detail, "partial=yes") ||
+		!strings.Contains(rows[0].Detail, "assistant_events=1") ||
+		!strings.Contains(rows[0].Detail, "draft_events=1") {
 		t.Fatalf("timeout audit: %+v", rows)
 	}
 }

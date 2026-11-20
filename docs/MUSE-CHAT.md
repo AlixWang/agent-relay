@@ -54,7 +54,7 @@ preparing → sending → confirming → waiting → replied
 
 - `preparing`：worker 在 `opMu` 内做 session/token/必要时 wake；失败未发消息。
 - `sending`：读 baseline（`chat.history`）+ 最近 5 条 busy check，然后 `muse.chat.sending` 审计；审计写不进去就不发。之后写 `chat.stream`。
-- `confirming`：等 echo（≤10s）并在 history 找自己的 `message.user`（≤5s）。找不到 → `delivery_unknown`，**绝不自动重发**。
+- `confirming`：写前失败或 `chat.stream` 明确拒绝（401/403/404/429）直接报错。请求可能已写入时，即使流 reset、断连或 echo 超时（≤10s），也只读 history 确认（≤5s）。仅匹配到 baseline 之后自己的 `message.user` 才算已投递；未匹配或无法读取 → `delivery_unknown`，**绝不自动重发**。
 - `waiting`：从确认投递起算预算（默认 180s，最大 300s），每 2s ±10% 轮询 `chat.history limit=20`；连续 3 次瞬态失败才重连一次只读继续，再失败 → `reply_unknown`。
 - 回复判定：`message.assistant` + `seq>baseline` + 两处 `reply_to_message_id` 都为空 + 有文本/agent 附件/卡片 + `status` 非空 + scope 匹配；`reply_to_message_id` 非空是主动推送，不算回复。同一窗口的后续候选放 `additional_replies`；期间有其他 user → `confidence=ambiguous` + warning，不阻断返回。
 - 超时**不**自动 cancel；显式 `cancel` 才 best-effort 发 `chat.cancel`（4s 超时，4xx 视为 unsupported），无论 RPC 成败本地都 `cancelled`。不调用 `delete_turn`，不删除已发消息。
@@ -82,7 +82,7 @@ preparing → sending → confirming → waiting → replied
 | `muse.chat.sending` | `admin` | chat, peer, account, session, baseline, text_len, text_sha256, request_id, access=1 |
 | `muse.chat.sent` | `system` | chat, echo, user_seq, delivery=confirmed, elapsed_ms |
 | `muse.chat.replied` | `system` | chat, reply_seq, reply_id, reply_status, elapsed_ms, polls, confidence |
-| `muse.chat.timeout` | `system` | chat, partial, last_seq, elapsed_ms, polls |
+| `muse.chat.timeout` | `system` | chat, partial, last_seq, elapsed_ms, polls, history_reads, history_errors, new_event_polls, last_seq_advanced, assistant_events, draft_events |
 | `muse.chat.cancelled` | `system` | chat, cancel=sent/unsupported/skipped |
 | `muse.chat.failed` | `system` | chat, stage, error_class |
 | `muse.chat.delivery_unknown` | `system` | chat, reason, last_seq |

@@ -779,97 +779,68 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 		return chatOutcome{Status: ChatStatusFailed, Stage: "send",
 			Error: &ChatError{Code: "muse_audit_unavailable", Class: "send"}}
 	}
+	if job.cancelRequested() {
+		return cancelledOutcome(job)
+	}
 	job.setSentAt(s.now().Unix())
 	sendRes, serr := sess.Send(ctx, job.SessionID, job.Text, job.NodeID)
-	if serr != nil {
-		if job.cancelRequested() {
-			return cancelledOutcome(job)
-		}
-		cf := chatErrorFromFailure(serr)
-		if sendRes.Wrote && shouldConfirmAfterSend(cf) {
-			job.advance(ChatStatusConfirming, s.now().Unix())
-			if seq, dup, cerr := s.confirmChat(ctx, sess, job); seq > 0 {
-				job.setConfirmed(seq, s.now().Unix(), dup)
-				// Fall through to the wait phase; the message did land.
-			} else {
-				if job.cancelRequested() {
-					return cancelledOutcome(job)
-				}
-				if cerr != nil {
-					// A history read failure still means "we cannot know".
-				}
-				return chatOutcome{Status: ChatStatusDeliveryUnknown, Stage: "confirm",
-					Error: &ChatError{Code: "muse_delivery_unknown", Class: "confirm"}}
-			}
-		} else {
-			return chatOutcome{Status: ChatStatusFailed, Error: cf, Stage: cf.Class}
-		}
-	} else {
-		job.advance(ChatStatusConfirming, s.now().Unix())
-		seq, dup, cerr := s.confirmChat(ctx, sess, job)
-		if seq <= 0 {
-			if job.cancelRequested() {
-				return cancelledOutcome(job)
-			}
-			if cerr != nil {
-				// Leave the detailed upstream stage out of the public error.
-			}
-			return chatOutcome{Status: ChatStatusDeliveryUnknown, Stage: "confirm",
-				Error: &ChatError{Code: "muse_delivery_unknown", Class: "confirm"}}
-		}
-		job.setConfirmed(seq, s.now().Unix(), dup)
+	if job.cancelRequested() {
+		return cancelledOutcome(job)
 	}
+	if sendRes.Evidence != chatSendMayHaveArrived {
+		cf := chatErrorFromFailure(serr)
+		return chatOutcome{Status: ChatStatusFailed, Error: cf, Stage: cf.Class}
+	}
+	job.advance(ChatStatusConfirming, s.now().Unix())
+	seq, duplicate := s.confirmChat(ctx, sess, job)
+	if job.cancelRequested() {
+		return cancelledOutcome(job)
+	}
+	if seq <= 0 {
+		return chatOutcome{Status: ChatStatusDeliveryUnknown, Stage: "confirm",
+			Error: &ChatError{Code: "muse_delivery_unknown", Class: "confirm"}}
+	}
+	job.setConfirmed(seq, s.now().Unix(), duplicate)
 
 	job.setDeadline(job.Confirmed() + int64(job.Budget/time.Second))
 	job.advance(ChatStatusWaiting, s.now().Unix())
-	if seq := job.UserSeqValue(); seq > 0 {
-		now := s.now().Unix()
-		detail := fmt.Sprintf("chat=%s echo=yes user_seq=%d delivery=confirmed elapsed_ms=%d",
-			job.ID, seq, elapsedMS(job, now))
-		if err := s.st.AppendAudit("system", "muse.chat.sent", truncate(detail, chatAuditDetail), now); err != nil {
-			log.Printf("muse chat: audit sent failed for %s: %v", job.ID, err)
-		}
-		_ = s.st.SetMuseChatStatus(job.AccountID, now, ChatStatusWaiting)
+	now := s.now().Unix()
+	echo := "no"
+	if sendRes.Echo {
+		echo = "yes"
 	}
+	detail := fmt.Sprintf("chat=%s echo=%s user_seq=%d delivery=confirmed elapsed_ms=%d",
+		job.ID, echo, seq, elapsedMS(job, now))
+	if err := s.st.AppendAudit("system", "muse.chat.sent", truncate(detail, chatAuditDetail), now); err != nil {
+		log.Printf("muse chat: audit sent failed for %s: %v", job.ID, err)
+	}
+	_ = s.st.SetMuseChatStatus(job.AccountID, now, ChatStatusWaiting)
 	return s.waitForReply(ctx, sess, job)
-}
-
-func shouldConfirmAfterSend(cf *ChatError) bool {
-	if cf == nil {
-		return false
-	}
-	switch cf.Code {
-	case "muse_upstream_rate_limited", "muse_needs_reauth", "muse_egress_forbidden",
-		"unknown_session", "muse_cancelled", "muse_vm_unavailable", "muse_audit_unavailable":
-		return false
-	}
-	return true
 }
 
 // confirmChat waits up to 5s for our message.user to appear in history. The
 // reply budget starts only once delivery is confirmed (D7/D12).
-func (s *Service) confirmChat(ctx context.Context, sess chatSession, job *ChatJob) (int64, bool, error) {
+func (s *Service) confirmChat(ctx context.Context, sess chatSession, job *ChatJob) (int64, bool) {
 	cctx, cancel := context.WithTimeout(ctx, chatConfirmBudget)
 	defer cancel()
-	var lastErr error
 	for {
+		if job.cancelRequested() || cctx.Err() != nil {
+			return 0, false
+		}
 		hist, err := sess.History(cctx, job.SessionID, 20, 0)
 		if err == nil {
 			if seq, dup, found := findChatUser(hist.ChatEvents, job.BaselineValue(), job.Text); found {
-				return seq, dup, nil
+				return seq, dup
 			}
 			job.bumpLastSeq(maxChatSeq(hist.ChatEvents))
-		} else {
-			lastErr = err
-			if errors.Is(err, context.Canceled) {
-				return 0, false, err
-			}
+		} else if errors.Is(err, context.Canceled) {
+			return 0, false
 		}
 		timer := time.NewTimer(chatConfirmEvery)
 		select {
 		case <-cctx.Done():
 			timer.Stop()
-			return 0, false, lastErr
+			return 0, false
 		case <-timer.C:
 		}
 	}
@@ -888,13 +859,14 @@ func (s *Service) waitForReply(ctx context.Context, sess chatSession, job *ChatJ
 	consecutive := 0
 	reconnects := 0
 	var lastParse chatParseResult
+	stats := chatPollStats{}
 
 	for {
 		if job.cancelRequested() {
 			return cancelledOutcome(job)
 		}
 		if s.now().Unix() >= deadline {
-			return timeoutOutcome(lastParse)
+			return timeoutOutcome(lastParse, stats)
 		}
 
 		events, maxSeq, err := s.pollChatHistory(ctx, sess, job)
@@ -903,11 +875,12 @@ func (s *Service) waitForReply(ctx context.Context, sess chatSession, job *ChatJ
 			job.bumpLastSeq(maxSeq)
 		}
 		if err != nil {
+			stats.HistoryErrors++
 			if job.cancelRequested() {
 				return cancelledOutcome(job)
 			}
 			if ctx.Err() != nil {
-				return timeoutOutcome(lastParse)
+				return timeoutOutcome(lastParse, stats)
 			}
 			consecutive++
 			if consecutive >= 3 {
@@ -933,11 +906,25 @@ func (s *Service) waitForReply(ctx context.Context, sess chatSession, job *ChatJ
 				if job.cancelRequested() {
 					return cancelledOutcome(job)
 				}
-				return timeoutOutcome(lastParse)
+				return timeoutOutcome(lastParse, stats)
 			}
 			continue
 		}
 		consecutive = 0
+		stats.HistoryReads++
+		if maxSeq > lastSeq {
+			stats.NewEventPolls++
+			stats.LastSeqAdvanced = true
+		}
+		for _, ev := range events {
+			if ev.Seq <= job.BaselineValue() || ev.EventName != "message.assistant" {
+				continue
+			}
+			stats.AssistantEvents++
+			if ev.Payload.Status == "" {
+				stats.DraftEvents++
+			}
+		}
 
 		if maxSeq > 0 && lastSeq > 0 && maxSeq < lastSeq {
 			return chatOutcome{Status: ChatStatusFailed, Stage: "poll",
@@ -966,7 +953,7 @@ func (s *Service) waitForReply(ctx context.Context, sess chatSession, job *ChatJ
 			if job.cancelRequested() {
 				return cancelledOutcome(job)
 			}
-			return timeoutOutcome(lastParse)
+			return timeoutOutcome(lastParse, stats)
 		}
 	}
 }
@@ -1057,8 +1044,14 @@ func (s *Service) auditOutcome(job *ChatJob, o chatOutcome, now int64) {
 		if o.Partial != "" {
 			partial = "yes"
 		}
-		detail = fmt.Sprintf("chat=%s partial=%s last_seq=%d elapsed_ms=%d polls=%d",
-			chatAuditValue(job.ID), partial, job.LastSeqValue(), elapsedMS(job, now), job.PollsValue())
+		advanced := "no"
+		if o.PollStats.LastSeqAdvanced {
+			advanced = "yes"
+		}
+		detail = fmt.Sprintf("chat=%s partial=%s last_seq=%d elapsed_ms=%d polls=%d history_reads=%d history_errors=%d new_event_polls=%d last_seq_advanced=%s assistant_events=%d draft_events=%d",
+			chatAuditValue(job.ID), partial, job.LastSeqValue(), elapsedMS(job, now), job.PollsValue(),
+			o.PollStats.HistoryReads, o.PollStats.HistoryErrors, o.PollStats.NewEventPolls,
+			advanced, o.PollStats.AssistantEvents, o.PollStats.DraftEvents)
 	case ChatStatusDeliveryUnknown:
 		action = "muse.chat.delivery_unknown"
 		detail = fmt.Sprintf("chat=%s reason=no_user_event last_seq=%d",
@@ -1286,12 +1279,22 @@ type chatOutcome struct {
 	Stage      string
 	Cancel     string
 	Actor      string
+	PollStats  chatPollStats
 
 	// FailureReason/FailureStatus preserve the underlying chatFailure for
 	// audit only. They are never copied into ChatError (the public error code
 	// stays muse_history_unavailable).
 	FailureReason string
 	FailureStatus int
+}
+
+type chatPollStats struct {
+	HistoryReads    int
+	HistoryErrors   int
+	NewEventPolls   int
+	AssistantEvents int
+	DraftEvents     int
+	LastSeqAdvanced bool
 }
 
 func cancelledOutcome(job *ChatJob) chatOutcome {
@@ -1303,12 +1306,13 @@ func cancelledOutcome(job *ChatJob) chatOutcome {
 		Error: &ChatError{Code: "muse_cancelled", Class: "cancel"}}
 }
 
-func timeoutOutcome(parse chatParseResult) chatOutcome {
+func timeoutOutcome(parse chatParseResult, stats chatPollStats) chatOutcome {
 	return chatOutcome{
 		Status: ChatStatusTimeout, Stage: "wait",
 		Error:   &ChatError{Code: "muse_reply_timeout", Class: "wait", Retryable: true},
 		Partial: parse.DraftText, Draft: parse.DraftText != "",
-		Warnings: parse.Warnings,
+		Warnings:  parse.Warnings,
+		PollStats: stats,
 	}
 }
 
@@ -1395,11 +1399,14 @@ func (j *ChatJob) finish(o chatOutcome, now int64) bool {
 
 func (j *ChatJob) advance(status string, now int64) {
 	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.Canceled || isChatTerminal(j.Status) {
+		return
+	}
 	j.Status = status
 	if now > 0 {
 		j.Updated = now
 	}
-	j.mu.Unlock()
 }
 
 func (j *ChatJob) setSession(sess chatSession) {

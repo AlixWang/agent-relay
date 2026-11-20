@@ -26,6 +26,7 @@ export const museState = {
   chatLoading: false,
   chatError: '',
   chatLoadToken: 0,
+  chatPollToken: 0,
   chatSending: false,
 };
 
@@ -36,6 +37,11 @@ const MUSE_CHAT_SETTINGS = '/admin/muse/chat/settings';
 
 export const museChatURL = (id, action = '') =>
   MUSE_CHAT + '/' + encodeURIComponent(id) + (action ? '/' + action : '');
+
+export function museChatContextMatches(snapshot, state = museState) {
+  return !!snapshot && snapshot.loadToken === state.chatLoadToken &&
+    snapshot.peer === state.chatPeer && snapshot.session === state.chatSession;
+}
 
 const CHAT_ACTIVE = new Set(['preparing', 'sending', 'confirming', 'waiting']);
 const CHAT_TEXT_MAX = 4000;
@@ -1031,6 +1037,7 @@ function chatThreadURL(peer, session) {
 }
 
 function stopChatPolling() {
+  museState.chatPollToken++;
   if (museState.chatTimer) {
     clearTimeout(museState.chatTimer);
     museState.chatTimer = null;
@@ -1041,12 +1048,17 @@ function startMuseChatPolling(id) {
   stopChatPolling();
   if (!id) return;
   const token = museState.chatLoadToken;
+  const pollToken = museState.chatPollToken;
+  const peer = museState.chatPeer;
+  const session = museState.chatSession;
   let failures = 0;
   const tick = async () => {
-    if (!id || token !== museState.chatLoadToken) return;
+    if (!id || !museChatContextMatches({ loadToken: token, peer, session }) ||
+        pollToken !== museState.chatPollToken) return;
     try {
       const v = await api(museChatURL(id));
-      if (token !== museState.chatLoadToken) return;
+      if (!museChatContextMatches({ loadToken: token, peer, session }) ||
+          pollToken !== museState.chatPollToken) return;
       failures = 0;
       mergeJobView(v);
       if (currentRoute === 'muse-chat') renderMuseChat();
@@ -1058,7 +1070,8 @@ function startMuseChatPolling(id) {
         refreshMuse();
       }
     } catch (err) {
-      if (token !== museState.chatLoadToken) return;
+      if (!museChatContextMatches({ loadToken: token, peer, session }) ||
+          pollToken !== museState.chatPollToken) return;
       if (err.status === 404) {
         museState.chatTimer = null;
         museState.chatJob = null;
@@ -1165,6 +1178,8 @@ async function enterMuseChat(a) {
 async function sendChatPage(e) {
   if (e) e.preventDefault();
   const peer = museState.chatPeer;
+  const session = museState.chatSession;
+  const loadToken = museState.chatLoadToken;
   const a = accountByPeer(peer);
   if (!peer || !a) return;
   if (!museChatReady()) { showChatError(museChatCodeText('muse_chat_disabled')); return; }
@@ -1186,6 +1201,10 @@ async function sendChatPage(e) {
         client_request_id: chatNewRequestID(),
       }),
     });
+    if (!museChatContextMatches({ loadToken, peer, session })) {
+      museState.chatSending = false;
+      return;
+    }
     const job = mergeJobView(v);
     job.text = text;
     const ta = $('mchatText');
@@ -1196,6 +1215,10 @@ async function sendChatPage(e) {
     startMuseChatPolling(v.chat_id);
   } catch (err) {
     museState.chatSending = false;
+    if (!museChatContextMatches({ loadToken, peer, session })) {
+      renderMuseChatHeader();
+      return;
+    }
     const body = err.body || {};
     if (err.status === 409 && body.code === 'muse_chat_in_progress' && body.chat_id) {
       toast('该成员已有进行中的对话，已附着到现有对话', 'info', 5000);
