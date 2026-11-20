@@ -87,9 +87,9 @@ export async function refreshWork() {
       const offline = t.assignee_online === false ? `<span class="badge bad xs">${icon('alert', 'xs')}离线</span>` : '';
       return `<tr class="clickable" data-root="${esc(t.thread_root)}">
         <td>
-          <div class="thread-cell">
-            <code>#${t.id}</code>
-            <small title="${esc(t.last_preview)}">${esc(t.last_preview || '（无消息）')}</small>
+          <div class="work-summary">
+            <strong title="${esc(t.last_preview || '')}">${esc(t.last_preview || '（无消息）')}</strong>
+            <small>#${esc(t.id)}</small>
           </div>
         </td>
         <td>

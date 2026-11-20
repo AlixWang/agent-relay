@@ -163,7 +163,7 @@
     <main id="main">
       <!-- ---------- 工作台 ---------- -->
       <section id="page-work" class="page" hidden>
-        <div class="stats">
+        <div class="stats work-stats">
           <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-alert"/></svg>待我处理</span><b id="workAttention">-</b></div>
           <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-activity"/></svg>进行中</span><b id="workWorking">-</b></div>
           <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-inbox"/></svg>全部未结束</span><b id="workOpen">-</b></div>
@@ -708,60 +708,51 @@
             <div class="cmd-sessions-scroll" id="mchatSessions"></div>
           </aside>
           <div class="cmd-chat">
-            <div class="cmd-chat-header">
+            <div class="cmd-chat-header mchat-header">
               <div class="cmd-chat-title">
                 <button class="btn-icon only-mobile" id="mchatListBtn" data-tip="成员列表" aria-label="成员列表"><svg class="icon"><use href="#i-menu"/></svg></button>
-                <div>
-                  <h2 id="mchatTitle">直接对话</h2>
-                  <p class="mchat-sub" id="mchatSub">选择成员开始对话</p>
-                </div>
-                <span class="badge muted" id="mchatState">—</span>
+                <h2 id="mchatTitle">直接对话</h2>
               </div>
               <div class="cmd-chat-actions">
-                <span class="badge muted" id="mchatRuntime">—</span>
-                <a class="btn btn-ghost btn-sm" id="mchatRuntimeLink" href="#muse">运行时开关</a>
                 <select id="mchatSession" class="mchat-session-select" aria-label="对话线程"></select>
-                <button class="btn btn-outline btn-sm" id="mchatStop" disabled><svg class="icon"><use href="#i-pause"/></svg>停止</button>
-                <details class="dropdown" id="mchatMore">
-                  <summary class="btn-icon" aria-label="更多操作"><svg class="icon"><use href="#i-sliders"/></svg></summary>
-                  <div class="menu">
-                    <button type="button" class="danger" id="mchatDisable">停用直接对话</button>
-                  </div>
-                </details>
+                <button type="button" class="btn-icon" id="mchatSettingsBtn" aria-label="对话设置" title="对话设置" aria-haspopup="dialog"><svg class="icon"><use href="#i-sliders"/></svg></button>
               </div>
             </div>
             <div class="cmd-stream" id="mchatStream"></div>
             <div class="cmd-dock">
-              <div class="alert alert-warn chat-visibility" id="mchatVisibility"><svg class="icon"><use href="#i-eye"/></svg><span>消息会进入成员 Muse 主聊天或指定 side chat，成员本人可见；此通道不是审批通道。</span></div>
-              <p class="mchat-inline-hint" id="mchatFirstHint" hidden></p>
+              <div class="mchat-visibility" id="mchatVisibility"><svg class="icon"><use href="#i-eye"/></svg><span>成员本人可见，发送后不可撤回，可能触发 agent 操作。审批请到 Muse 中处理。</span></div>
               <p class="alert alert-bad" id="mchatErr" hidden></p>
               <form class="cmd-composer-box" id="mchatForm">
-                <div class="cmd-composer-toolbar">
-                  <div class="mchat-advanced">
-                    <label class="mchat-field">等待预算
-                      <select id="mchatBudget">
-                        <option value="30">30 秒</option>
-                        <option value="60">60 秒</option>
-                        <option value="90">90 秒</option>
-                        <option value="180" selected>180 秒（默认）</option>
-                        <option value="300">300 秒（最大）</option>
-                      </select>
-                    </label>
-                    <label class="mchat-field">side chat（已存在）
-                      <input id="mchatSessionInput" maxlength="128" placeholder="留空 = 主聊天" autocomplete="off" spellcheck="false">
-                    </label>
-                    <button type="button" class="btn btn-ghost btn-sm" id="mchatSessionApply">切换线程</button>
-                  </div>
+                <textarea id="mchatText" rows="2" maxlength="4000" aria-label="消息内容" placeholder="输入消息，Enter 换行"></textarea>
+                <div class="mchat-send-row">
                   <span id="mchatCount" class="muted xs">0 / 4000</span>
-                </div>
-                <div class="cmd-input-row">
-                  <textarea id="mchatText" rows="2" maxlength="4000" placeholder="输入纯文本；Enter 换行，发送用按钮。"></textarea>
+                  <button type="button" class="btn btn-outline" id="mchatStop" hidden><svg class="icon"><use href="#i-pause"/></svg>停止</button>
                   <button type="submit" class="btn btn-primary cmd-send-btn" id="mchatSend"><svg class="icon"><use href="#i-send"/></svg>发送</button>
                 </div>
               </form>
             </div>
           </div>
         </div>
+        <dialog class="modal" id="mchatSettings" aria-labelledby="mchatSettingsTitle" closedby="any">
+          <div class="mchat-settings-body">
+            <h2 id="mchatSettingsTitle">对话设置</h2>
+            <label class="field">等待回复的时长
+              <select id="mchatBudget">
+                <option value="30">30 秒</option>
+                <option value="60">60 秒</option>
+                <option value="90">90 秒</option>
+                <option value="180" selected>180 秒（默认）</option>
+                <option value="300">300 秒（最大）</option>
+              </select>
+            </label>
+            <label class="field">已有线程 ID
+              <input id="mchatSessionInput" maxlength="128" placeholder="留空进入主聊天" autocomplete="off" spellcheck="false">
+            </label>
+            <button type="button" class="btn btn-outline" id="mchatSessionApply">切换线程</button>
+            <div class="row-btns"><span class="badge muted" id="mchatRuntime">—</span><a id="mchatRuntimeLink" href="#muse">运行时开关</a></div>
+            <div class="modal-foot"><button type="button" class="btn btn-ghost" id="mchatDisable">停用直接对话</button><button type="button" class="btn btn-outline" data-close>关闭</button></div>
+          </div>
+        </dialog>
       </section>
 
       <!-- ---------- 邀请 & Prompt ---------- -->

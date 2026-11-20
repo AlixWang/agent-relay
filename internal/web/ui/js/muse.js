@@ -768,14 +768,6 @@ function activeChatJob() {
   return null;
 }
 
-function chatStatusTone(status) {
-  if (CHAT_ACTIVE.has(status)) return 'info';
-  if (status === 'replied') return 'ok';
-  if (status === 'failed' || status === 'delivery_unknown' || status === 'reply_unknown') return 'bad';
-  if (status === 'timeout' || status === 'cancelled') return 'warn';
-  return 'muted';
-}
-
 function showChatError(msg) {
   museState.chatError = msg || '';
   const el = $('mchatErr');
@@ -848,10 +840,10 @@ function chatStatusLine(job, nowSec) {
     case 'confirming': text = '确认投递…'; break;
     case 'waiting': {
       const left = museChatCountdown(job.deadline_at, now);
-      text = '等待回复' + (left ? ' · 剩余 ' : '…');
+      text = '已投递，等待回复' + (left ? ' · 剩余 ' : '…');
       break;
     }
-    case 'timeout': text = '等待超时；未自动取消生成。'; tone = 'warn'; break;
+    case 'timeout': text = '已投递，等待回复超时。Muse 仍可能继续生成。'; tone = 'warn'; break;
     case 'delivery_unknown': text = museChatCodeText('muse_delivery_unknown'); tone = 'bad'; break;
     case 'reply_unknown': text = museChatCodeText('muse_reply_unknown'); tone = 'bad'; break;
     case 'cancelled': text = '已取消（cancel=' + (job.cancel || 'skipped') + '）；已发出的消息不会删除。'; tone = 'warn'; break;
@@ -900,21 +892,11 @@ function renderMuseChatHeader() {
   const peer = museState.chatPeer;
   const a = accountByPeer(peer);
   const ready = museChatReady();
-  const jobs = chatThreadJobs();
   const active = activeChatJob();
-  const latest = active || (jobs.length ? jobs[jobs.length - 1] : null);
   const title = $('mchatTitle');
-  if (title) title.textContent = peer ? `与 ${peer} 的 Muse agent 对话` : '直接对话';
-  const sub = $('mchatSub');
-  if (sub) {
-    sub.textContent = !peer ? '选择已开通成员开始对话'
-      : (museState.chatSession ? `side chat · ${museState.chatSession}` : '主聊天 · 消息对成员可见');
-  }
-  const badge = $('mchatState');
-  if (badge) {
-    const status = latest ? latest.status : '';
-    badge.textContent = status ? museChatStatusLabel(status) : '未发送';
-    badge.className = 'badge ' + (status ? chatStatusTone(status) : 'muted');
+  if (title) {
+    title.textContent = peer || '选择成员';
+    title.title = peer;
   }
   const rt = $('mchatRuntime');
   if (rt) {
@@ -934,32 +916,12 @@ function renderMuseChatHeader() {
     sess.innerHTML = opts.join('');
     sess.value = museState.chatSession;
   }
-  const sessInput = $('mchatSessionInput');
-  if (sessInput && document.activeElement !== sessInput) sessInput.value = museState.chatSession;
   const stop = $('mchatStop');
-  if (stop) stop.disabled = !(active || (museState.chatJob && CHAT_ACTIVE.has(museState.chatJob.status)));
+  if (stop) stop.hidden = !(active || (museState.chatJob && CHAT_ACTIVE.has(museState.chatJob.status)));
   const send = $('mchatSend');
   if (send) send.disabled = !ready || !peer || !a || !a.chat_enabled || !!active || museState.chatSending;
   const more = $('mchatDisable');
   if (more) more.disabled = !a;
-  const hint = $('mchatFirstHint');
-  if (hint) {
-    const show = !!(ready && a && a.chat_enabled && !jobs.length && !museState.chatLoading);
-    hint.hidden = !show;
-    if (show) {
-      const target = museState.chatSession ? '指定的 side chat' : 'Muse 主聊天';
-      hint.innerHTML = `首次向 <b>${esc(peer)}</b> 发送：消息进入${target}，成员本人可见且不可撤回。`;
-    }
-  }
-  const vis = $('mchatVisibility');
-  if (vis) {
-    const span = vis.querySelector('span');
-    if (span) {
-      span.textContent = peer
-        ? `消息会进入 ${peer} 的${museState.chatSession ? ' side chat（' + museState.chatSession + '）' : ' Muse 主聊天'}，成员本人可见；agent 可能因此执行操作。此通道不是审批通道，不能代替成员在 Muse 中点击原生审批卡。`
-        : '消息会进入成员 Muse 主聊天或指定 side chat，成员本人可见；此通道不是审批通道。';
-    }
-  }
 }
 
 function renderMuseChatList() {
@@ -1144,6 +1106,7 @@ export async function openMuseChatRoute() {
   } else {
     const a = accountByPeer(target);
     if (!a) museState.chatError = '找不到该成员的 Muse 授权。';
+    else if (!museChatReady()) museState.chatError = museChatCodeText('muse_chat_disabled');
     else if (!a.chat_enabled) museState.chatError = museChatCodeText('muse_chat_access_required');
   }
   const budget = $('mchatBudget');
@@ -1271,7 +1234,6 @@ async function disableChatAccess() {
       method: 'POST',
       body: JSON.stringify({ enabled: false, reason: 'console' }),
     });
-    $('mchatMore')?.removeAttribute('open');
     toast(`已停用 ${a.peer_id} 的直接对话`, 'ok');
     await refreshMuse();
     location.hash = '#muse';
@@ -1341,10 +1303,18 @@ export function stopMuse() {
 }
 
 export function stopMuseChat() {
+  if ($('mchatSettings')?.open) $('mchatSettings').close();
   stopChatPolling();
 }
 
 export function initMuse() {
+  const settings = $('mchatSettings');
+  setupDialog(settings);
+  $('mchatSettingsBtn').onclick = () => {
+    $('mchatSessionInput').value = museState.chatSession;
+    settings.showModal();
+  };
+  $('mchatRuntimeLink').onclick = () => settings.close();
   const dlg = $('museDlg');
   if (dlg) {
     setupDialog(dlg);
@@ -1363,11 +1333,14 @@ export function initMuse() {
   const chatStop = $('mchatStop');
   if (chatStop) chatStop.onclick = cancelChatPage;
   const chatDisable = $('mchatDisable');
-  if (chatDisable) chatDisable.onclick = disableChatAccess;
+  if (chatDisable) chatDisable.onclick = () => { settings.close(); disableChatAccess(); };
   const chatSession = $('mchatSession');
   if (chatSession) chatSession.onchange = () => switchChatSession(chatSession.value);
   const chatSessionApply = $('mchatSessionApply');
-  if (chatSessionApply) chatSessionApply.onclick = () => switchChatSession($('mchatSessionInput')?.value || '');
+  if (chatSessionApply) chatSessionApply.onclick = () => {
+    settings.close();
+    switchChatSession($('mchatSessionInput').value);
+  };
   const chatBack = $('mchatBackMuse');
   if (chatBack) chatBack.onclick = () => { location.hash = '#muse'; };
   const chatListBtn = $('mchatListBtn');

@@ -29,11 +29,10 @@ v2 相对 v1 的变化：删除开通同意弹窗与两次发送确认，`chat_e
 - 线程来源只有本进程内存 job：`GET /admin/muse/chat/thread?peer_id=...&session=...` 返回最近 1 小时的 jobs（操作者已发文本、回复、状态）。刷新后同进程 1 小时内可恢复；进程重启或超过 1 小时显示边界提示 + “去 Muse 查看”。**不落库、不读 `chat.history` 回填**。
 - 历史文本只在 thread 端点返回（admin-only、不写日志/审计）；job 轮询端点 `GET /admin/muse/chat/{id}` 仍不返回文本。
 - 一次一个在途 job：发送按钮在 active 时禁用（仍可继续打字）。收到 409 `muse_chat_in_progress` 时自动附着现有 `chat_id` 读取进展；不排队。
-- side chat 属于线程身份（`session` 参数）：页眉下拉 / 高级输入切换线程，切换即切线程，不新建 sid。输入只接受已存在 session（服务端仍会以 `unknown_session` 失败兜底）。
-- 预算在“高级”里逐轮选择，默认 180 秒，范围 30–300（受服务端 `max_budget_secs` 上限约束）；倒计时只在确认投递后开始。
-- 停止 = 确认 + `chat.cancel`；关闭 = 回列表，不改服务端；停用成员 = overflow 里的 danger 操作 + `access_revoke` 审计。运行中禁用会停掉在途 job 的本地等待。
-- 运行时开关在聊天页只放只读徽标 + 回 Muse 页链接，不放全局 kill switch。
-- 首次向某成员/线程发送时有一行内联提示（非弹窗、无需输入），之后常驻可见性提示仍在。已删除首次 peer_id 输入确认和每次发送确认弹窗。
+- 可通过页眉下拉切换线程，也可在「对话设置」输入已有线程 ID。`session` 参数标识线程，未知 ID 由服务端返回 `unknown_session`。
+- 「对话设置」可调整等待回复的时长，默认 180 秒，范围 30–300 秒，受服务端 `max_budget_secs` 上限约束。倒计时从确认投递开始。
+- 对话进行中，输入区显示「停止」。确认后调用 `chat.cancel`。「对话设置」内可查看运行时状态、返回 Muse 页或停用成员。停用仍需确认，记录 `access_revoke` 审计并停止本地等待。
+- 输入框上方常驻提示，说明成员可见、消息不可撤回、可能触发 agent 操作，以及原生审批入口。
 - 异常按状态/错误码呈现，**绝不自动重发、绝不伪造成功**。`delivery_unknown` 只能新发一条（新 `client_request_id`）并重新确认；`timeout` 不自动 cancel；`ambiguous` 照旧标注。
 - 任务隔离：独立路由/视觉/输入；没有 task/result、task/chat kind、@、ack。
 
