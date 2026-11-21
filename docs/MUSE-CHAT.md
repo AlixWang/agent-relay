@@ -30,7 +30,7 @@ v2 相对 v1 的变化：删除开通同意弹窗与两次发送确认，`chat_e
 - 历史文本只在 thread 端点返回（admin-only、不写日志/审计）；job 轮询端点 `GET /admin/muse/chat/{id}` 仍不返回文本。
 - 一次一个在途 job：发送按钮在 active 时禁用（仍可继续打字）。收到 409 `muse_chat_in_progress` 时自动附着现有 `chat_id` 读取进展；不排队。
 - 可通过页眉下拉切换线程，也可在「对话设置」输入已有线程 ID。`session` 参数标识线程，未知 ID 由服务端返回 `unknown_session`。
-- 「对话设置」可调整等待回复的时长，默认 180 秒，范围 30–300 秒，受服务端 `max_budget_secs` 上限约束。倒计时从确认投递开始。
+- 「对话设置」可调整等待回复的时长：面板默认选中服务端上限（`max_budget_secs`，示例配置 300 秒；服务端 `muse_chat_default_budget_secs` 仍默认 180 秒），范围 30–300 秒。Muse agent 长任务常超过 3 分钟，且 `timeout` 是终态（不追认迟到回复），所以默认给足上限。倒计时从确认投递开始。
 - 对话进行中，输入区显示「停止」。确认后调用 `chat.cancel`。「对话设置」内可查看运行时状态、返回 Muse 页或停用成员。停用仍需确认，记录 `access_revoke` 审计并停止本地等待。
 - 输入框上方常驻提示，说明成员可见、消息不可撤回、可能触发 agent 操作，以及原生审批入口。
 - 异常按状态/错误码呈现，**绝不自动重发、绝不伪造成功**。`delivery_unknown` 只能新发一条（新 `client_request_id`）并重新确认；`timeout` 不自动 cancel；`ambiguous` 照旧标注。

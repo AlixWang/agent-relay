@@ -28,6 +28,13 @@ export const museState = {
   chatLoadToken: 0,
   chatPollToken: 0,
   chatSending: false,
+  // Incremental-render bookkeeping for #mchatStream: the markup that is
+  // currently on screen and the job ids it already showed. The poll tick runs
+  // once a second while a reply is pending, so re-assigning innerHTML every
+  // tick replayed every card's entry animation (a visible blink) and dropped
+  // text selection / scroll anchoring.
+  chatSig: '',
+  chatSeen: null,
 };
 
 const MUSE_ACCOUNTS = '/admin/muse/accounts';
@@ -45,7 +52,10 @@ export function museChatContextMatches(snapshot, state = museState) {
 
 const CHAT_ACTIVE = new Set(['preparing', 'sending', 'confirming', 'waiting']);
 const CHAT_TEXT_MAX = 4000;
-const CHAT_BUDGET_DEFAULT = 180;
+// The panel preselects the server ceiling: Muse agent turns routinely run
+// past three minutes, and a timeout is terminal (no late-reply recovery), so
+// the default wait should be the longest the server allows.
+const CHAT_BUDGET_DEFAULT = 300;
 const CHAT_BUDGET_MIN = 30;
 const CHAT_BUDGET_MAX = 300;
 const CHAT_SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -829,20 +839,19 @@ function renderChatReply(reply) {
   return text + media + list + more;
 }
 
-function chatStatusLine(job, nowSec) {
+// chatStatusLine renders the clock-free part of the status line. The remaining
+// seconds live in a placeholder span that refreshChatLiveText fills in after
+// the markup is (or is not) written: if the seconds were part of the markup,
+// every tick would change the HTML and force a full re-render.
+function chatStatusLine(job) {
   if (job.reply) return '';
-  const now = nowSec || Math.floor(Date.now() / 1000);
   let text = '';
   let tone = '';
   switch (job.status) {
     case 'preparing': text = '准备中…'; break;
     case 'sending': text = '发送中…'; break;
     case 'confirming': text = '确认投递…'; break;
-    case 'waiting': {
-      const left = museChatCountdown(job.deadline_at, now);
-      text = '已投递，等待回复' + (left ? ' · 剩余 ' : '…');
-      break;
-    }
+    case 'waiting': text = job.deadline_at ? '已投递，等待回复 · 剩余 ' : '已投递，等待回复…'; break;
     case 'timeout': text = '已投递，等待回复超时。Muse 仍可能继续生成。'; tone = 'warn'; break;
     case 'delivery_unknown': text = museChatCodeText('muse_delivery_unknown'); tone = 'bad'; break;
     case 'reply_unknown': text = museChatCodeText('muse_reply_unknown'); tone = 'bad'; break;
@@ -853,22 +862,32 @@ function chatStatusLine(job, nowSec) {
   }
   if (!text && !job.error) return '';
   const parts = [];
-  if (text) parts.push(`<span class="mchat-status-line ${tone}">${esc(text)}${job.status === 'waiting' && job.deadline_at ? `<span class="mchat-countdown">${esc(museChatCountdown(job.deadline_at, now))}</span>` : ''}</span>`);
+  if (text) {
+    const tick = job.status === 'waiting' && job.deadline_at
+      ? `<span class="mchat-countdown" data-deadline="${Number(job.deadline_at)}"></span>`
+      : '';
+    parts.push(`<span class="mchat-status-line ${tone}">${esc(text)}${tick}</span>`);
+  }
   if (!text && job.error) parts.push(`<span class="mchat-status-line bad">${esc(museChatErrorText(job))}</span>`);
   return parts.join('');
 }
 
-function renderThreadJob(job, nowSec) {
+// museChatJobHTML renders one job card. It is time-independent on purpose:
+// the countdown and the streamed draft are placeholders that the caller fills
+// in, so the returned markup only changes when the job actually changes.
+export function museChatJobHTML(job, isNew = false) {
   const when = job.created_at ? fmtTime(job.created_at) : '';
-  let html = `<article class="cmd-msg msg-self">
+  const cls = isNew ? ' is-new' : '';
+  let html = `<article class="cmd-msg msg-self${cls}">
     <div class="cmd-msg-bubble">
       <div class="cmd-msg-header"><div class="cmd-msg-author"><b>操作者</b></div><div class="cmd-msg-info"><span>${esc(when)}</span></div></div>
       <div class="cmd-msg-body mchat-text">${esc(job.text || '')}</div>
     </div>
   </article>`;
-  const body = job.reply ? renderChatReply(job.reply) : chatStatusLine(job, nowSec);
+  const body = job.reply ? renderChatReply(job.reply) : chatStatusLine(job);
   const draft = !job.reply && job.partial_text
-    ? `<div class="alert alert-warn"><svg class="icon"><use href="#i-timer"/></svg><span>已有草稿（未完成，不是最终回复）：${esc(job.partial_text)}</span></div>` : '';
+    ? `<div class="alert alert-warn" data-chat-draft="${esc(job.chat_id)}"><svg class="icon"><use href="#i-timer"/></svg><span>已有草稿（未完成，不是最终回复）：<span class="mchat-draft-text"></span></span></div>` : '';
+  const peerName = esc(museState.chatPeer);
   const warnings = (job.warnings || []).length
     ? `<p class="muted xs">注意：${(job.warnings || []).map((x) => ({
       concurrent_user_activity: '期间有其他成员消息，回复归属可能不唯一',
@@ -876,9 +895,8 @@ function renderThreadJob(job, nowSec) {
       may_need_native_approval: '回复可能涉及原生审批，请到成员 Muse 逐条处理',
       duplicate_user_text: '窗口内出现重复的用户文本，回复归属可能不唯一',
     })[x] || x).map(esc).join('；')}</p>` : '';
-  const peerName = esc(museState.chatPeer);
   if (body || draft || warnings) {
-    html += `<article class="cmd-msg msg-peer">
+    html += `<article class="cmd-msg msg-peer${cls}">
       <div class="cmd-msg-bubble">
         <div class="cmd-msg-header"><div class="cmd-msg-author"><b>${peerName}</b></div><div class="cmd-msg-info"><span>${esc(job.updated_at ? fmtTime(job.updated_at) : '')}</span></div></div>
         ${body}${draft}${warnings}
@@ -886,6 +904,24 @@ function renderThreadJob(job, nowSec) {
     </article>`;
   }
   return html;
+}
+
+// refreshChatLiveText fills the placeholders museChatJobHTML leaves behind:
+// the per-second countdown and the streamed draft text. Both are plain
+// textContent writes, so a tick repaints a few characters instead of the
+// whole thread.
+function refreshChatLiveText(stream, jobs, nowSec) {
+  const byId = new Map((jobs || []).map((j) => [j.chat_id, j]));
+  stream.querySelectorAll('.mchat-countdown').forEach((el) => {
+    const text = museChatCountdown(Number(el.dataset.deadline || 0), nowSec);
+    if (el.textContent !== text) el.textContent = text;
+  });
+  stream.querySelectorAll('[data-chat-draft]').forEach((el) => {
+    const job = byId.get(el.dataset.chatDraft);
+    const text = (job && job.partial_text) || '';
+    const target = el.querySelector('.mchat-draft-text') || el;
+    if (target.textContent !== text) target.textContent = text;
+  });
 }
 
 function renderMuseChatHeader() {
@@ -913,7 +949,13 @@ function renderMuseChatHeader() {
     if (museState.chatSession && !seen.includes(museState.chatSession)) {
       opts.push(`<option value="${esc(museState.chatSession)}" selected>side chat · ${esc(museState.chatSession)}</option>`);
     }
-    sess.innerHTML = opts.join('');
+    const html = opts.join('');
+    // Re-populating a <select> every poll tick closes an open dropdown and
+    // repaints the control; the option list only changes on a session switch.
+    if (sess.dataset.opts !== html) {
+      sess.innerHTML = html;
+      sess.dataset.opts = html;
+    }
     sess.value = museState.chatSession;
   }
   const stop = $('mchatStop');
@@ -928,21 +970,24 @@ function renderMuseChatList() {
   const el = $('mchatSessions');
   if (!el) return;
   const enabled = (museState.accounts || []).filter((a) => a.chat_enabled);
-  if (!enabled.length) {
-    el.innerHTML = '<div class="cmd-empty-hint">还没有已开通直接对话的成员。<br>回到 Muse 保活页，点成员行的「对话」即可开通并进入。</div>';
-    return;
-  }
-  el.innerHTML = '<div class="cmd-group-label">已开通成员</div>' + enabled.map((a) => {
-    const active = a.peer_id === museState.chatPeer;
-    const preview = a.last_chat_status ? museChatStatusLabel(a.last_chat_status) : '尚未对话';
-    return `<div class="cmd-session-item${active ? ' active' : ''}" data-chat-peer="${esc(a.peer_id)}" role="button" tabindex="0">
+  const html = !enabled.length
+    ? '<div class="cmd-empty-hint">还没有已开通直接对话的成员。<br>回到 Muse 保活页，点成员行的「对话」即可开通并进入。</div>'
+    : '<div class="cmd-group-label">已开通成员</div>' + enabled.map((a) => {
+      const active = a.peer_id === museState.chatPeer;
+      const preview = a.last_chat_status ? museChatStatusLabel(a.last_chat_status) : '尚未对话';
+      return `<div class="cmd-session-item${active ? ' active' : ''}" data-chat-peer="${esc(a.peer_id)}" role="button" tabindex="0">
       <div class="cmd-session-avatar">${avatar(a.peer_id)}</div>
       <div class="cmd-session-meta">
         <div class="cmd-session-name"><span>${esc(a.peer_id)}</span></div>
         <div class="cmd-session-preview">${esc(preview)}</div>
       </div>
     </div>`;
-  }).join('');
+    }).join('');
+  // Same reason as the select: rebuilding the list on every poll tick throws
+  // away focus and repaints avatars for no change.
+  if (el.dataset.sig === html) return;
+  el.innerHTML = html;
+  el.dataset.sig = html;
   el.querySelectorAll('[data-chat-peer]').forEach((row) => {
     row.onclick = () => {
       $('mchatLayout')?.classList.remove('sessions-open');
@@ -952,25 +997,43 @@ function renderMuseChatList() {
   });
 }
 
-function renderMuseChatMessages() {
+// museChatJobsHTML renders the whole thread. prevSeen is the set of job ids
+// already on screen: only ids missing from it get the entry animation, and an
+// unchanged set of jobs must yield byte-identical markup so the caller can
+// skip the innerHTML write entirely (that write is what used to blink the
+// thread on every tick).
+export function museChatJobsHTML(jobs, prevSeen) {
+  const animate = !!(prevSeen && prevSeen.size);
+  return (jobs || []).map((j) => museChatJobHTML(j, animate && !prevSeen.has(j.chat_id))).join('');
+}
+
+// renderMuseChatMessages is exported for the console test lane, which drives
+// it against a stub DOM to pin the "a poll tick must not rewrite the stream"
+// behaviour that keeps the thread from blinking.
+export function renderMuseChatMessages() {
   const stream = $('mchatStream');
   if (!stream) return;
   const peer = museState.chatPeer;
   const a = accountByPeer(peer);
+  const clearState = () => { museState.chatSig = ''; museState.chatSeen = null; };
   if (!peer) {
+    clearState();
     stream.innerHTML = '<div class="mchat-boundary"><svg class="icon"><use href="#i-message"/></svg><p>从 Muse 保活页的成员行点「对话」进入。<br>只显示本进程最近 1 小时的对话；更早或完整内容请去成员 Muse 查看。</p></div>';
     return;
   }
   if (!a) {
+    clearState();
     stream.innerHTML = '<div class="mchat-boundary"><svg class="icon"><use href="#i-alert"/></svg><p>找不到该成员的 Muse 授权。</p></div>';
     return;
   }
   if (!museState.chatThread) {
+    clearState();
     stream.innerHTML = '<div class="skel"><i></i></div>';
     return;
   }
   const jobs = chatThreadJobs();
   if (!jobs.length) {
+    clearState();
     const boundary = museState.chatSession
       ? `该 side chat 在本进程最近 1 小时内没有可恢复的对话。`
       : `本进程最近 1 小时内没有可恢复的对话。`;
@@ -978,11 +1041,24 @@ function renderMuseChatMessages() {
     return;
   }
   const now = Math.floor(Date.now() / 1000);
-  const nearBottom = !stream.dataset.ready ||
-    stream.scrollHeight - stream.scrollTop - stream.clientHeight < 100;
-  stream.innerHTML = jobs.map((j) => renderThreadJob(j, now)).join('');
-  stream.dataset.ready = '1';
-  if (nearBottom) stream.scrollTop = stream.scrollHeight;
+  const prev = museState.chatSeen;
+  const seen = new Set(jobs.map((j) => j.chat_id));
+  // The signature is rendered as if every card were already on screen, so the
+  // entry-animation class does not make the tick after a new message look like
+  // a change (that would re-render the thread a second time for nothing).
+  const sig = museChatJobsHTML(jobs, seen);
+  if (museState.chatSig !== sig) {
+    const nearBottom = !stream.dataset.ready ||
+      stream.scrollHeight - stream.scrollTop - stream.clientHeight < 100;
+    stream.innerHTML = museChatJobsHTML(jobs, prev);
+    stream.dataset.ready = '1';
+    museState.chatSig = sig;
+    museState.chatSeen = seen;
+    if (nearBottom) stream.scrollTop = stream.scrollHeight;
+  }
+  // Countdown seconds and the streamed draft change every tick without
+  // changing the structure above; patch them in place instead of rebuilding.
+  refreshChatLiveText(stream, jobs, now);
 }
 
 function renderMuseChat() {
@@ -1110,7 +1186,7 @@ export async function openMuseChatRoute() {
     else if (!a.chat_enabled) museState.chatError = museChatCodeText('muse_chat_access_required');
   }
   const budget = $('mchatBudget');
-  if (budget) budget.value = String(museChatBudget(CHAT_BUDGET_DEFAULT, museState.chatStatus?.max_budget_secs));
+  if (budget) setChatBudgetValue(budget, museChatBudget(CHAT_BUDGET_DEFAULT, museState.chatStatus?.max_budget_secs));
   if (currentRoute === 'muse-chat') renderMuseChat();
   if (target) await loadMuseChatThread();
 }
@@ -1270,6 +1346,17 @@ function switchChatSession(session) {
   } else {
     location.hash = hash;
   }
+}
+
+// setChatBudgetValue keeps the select usable when the server ceiling is not one
+// of the static options: muse_chat_max_budget_secs accepts any 30-300 value, and
+// the panel default is that ceiling.
+function setChatBudgetValue(sel, secs) {
+  const value = String(secs);
+  if (![...sel.options].some((o) => o.value === value)) {
+    sel.add(new Option('服务端上限 ' + value + ' 秒', value));
+  }
+  sel.value = value;
 }
 
 function countChatText() {

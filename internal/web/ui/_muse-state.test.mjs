@@ -15,7 +15,8 @@ const {
   museSessionOK, museWakeUnconfirmed, museWakeTone, museWakeLabel,
   museVMText, museVMTitle, museChatHash, parseMuseChatHash,
   museChatCodeText, museChatErrorText, museChatBudget, museChatCountdown,
-  museChatContextMatches,
+  museChatContextMatches, museChatJobHTML, museChatJobsHTML, museState,
+  renderMuseChatMessages,
 } = mod;
 
 const assert = (cond, msg) => {
@@ -106,11 +107,11 @@ assert(museChatCodeText('muse_chat_in_progress').includes('不会排队'), 'in-p
 assert(museChatErrorText({ error: { code: 'muse_delivery_unknown' } }).includes('不会自动重发'), 'delivery unknown copy');
 assert(museChatErrorText(null) === '', 'no error copy');
 
-assert(museChatBudget(180) === 180, 'default budget');
+assert(museChatBudget(180) === 180, 'explicit budget is kept');
 assert(museChatBudget(10) === 30, 'budget floor');
 assert(museChatBudget(999) === 300, 'budget ceiling');
 assert(museChatBudget(200, 120) === 120, 'server max wins');
-assert(museChatBudget('nope') === 180, 'bad budget falls back');
+assert(museChatBudget('nope') === 300, 'bad budget falls back to the panel default');
 assert(museChatCountdown(1000, 958) === '42s', 'countdown');
 assert(museChatCountdown(1000, 1200) === '0s', 'countdown floor');
 assert(museChatCountdown(0, 0) === '', 'no deadline');
@@ -120,5 +121,126 @@ assert(museChatContextMatches({ loadToken: 4, peer: 'alice', session: 's1' }, ro
 assert(!museChatContextMatches({ loadToken: 3, peer: 'alice', session: 's1' }, routeState), 'stale load token rejected');
 assert(!museChatContextMatches({ loadToken: 4, peer: 'bob', session: 's1' }, routeState), 'stale peer rejected');
 assert(!museChatContextMatches({ loadToken: 4, peer: 'alice', session: 's2' }, routeState), 'stale session rejected');
+
+// --- job card markup -------------------------------------------------------
+//
+// The Muse chat stream is re-rendered on a ~1s poll tick. Anything that
+// encodes the clock in the markup turns that tick into a full innerHTML
+// replacement, which replays the card entry animation (the reported blink),
+// kills text selection and jumps the scroll position. These asserts pin the
+// two properties that keep the tick cheap: the markup is clock-free, and an
+// unchanged thread renders byte-identical HTML.
+const waitJob = {
+  chat_id: 'mc_1', status: 'waiting', text: 'hi <there>', reply: null,
+  partial_text: '', warnings: [], error: null, cancel: '',
+  created_at: 1_900_000_000, updated_at: 1_900_000_010, deadline_at: 1_900_000_100,
+};
+const waitHTML = museChatJobHTML(waitJob);
+assert(waitHTML === museChatJobHTML(waitJob), 'job card markup is deterministic');
+assert(waitHTML.includes('data-deadline="1900000100"'), 'countdown carries its deadline');
+assert(/<span class="mchat-countdown" data-deadline="1900000100"><\/span>/.test(waitHTML),
+  'countdown span renders empty (seconds are patched, not rendered)');
+assert(!waitHTML.includes('1900000100s'), 'seconds never enter the markup');
+assert(waitHTML.includes('已投递，等待回复 · 剩余 '), 'waiting copy keeps the 剩余 label');
+assert(waitHTML.includes('hi &lt;there&gt;'), 'operator text is escaped');
+assert(!waitHTML.includes('is-new'), 'no animation class without a previous render');
+assert(museChatJobHTML(waitJob, true).includes('cmd-msg msg-self is-new'), 'new card gets is-new');
+assert(museChatJobHTML(waitJob, true).includes('cmd-msg msg-peer is-new'), 'new peer card gets is-new');
+
+const draftHTML = museChatJobHTML({ ...waitJob, partial_text: 'still writing' });
+assert(!draftHTML.includes('still writing'), 'draft text is not baked into the markup');
+assert(draftHTML.includes('data-chat-draft="mc_1"'), 'draft alert is addressable for in-place text');
+assert(draftHTML.includes('mchat-draft-text'), 'draft alert keeps its patch target');
+
+const timeoutHTML = museChatJobHTML({ ...waitJob, status: 'timeout', deadline_at: 0, updated_at: 1_900_000_200 });
+assert(timeoutHTML.includes('mchat-status-line warn'), 'timeout keeps the warn tone');
+assert(timeoutHTML.includes('已投递，等待回复超时'), 'timeout copy');
+assert(!timeoutHTML.includes('mchat-countdown'), 'no countdown once the wait ended');
+
+const jobDone = { ...waitJob, chat_id: 'mc_2', status: 'replied', reply: { text: 'ok' }, deadline_at: 0 };
+const liveJobs = [waitJob, jobDone];
+const seenAll = new Set(['mc_1', 'mc_2']);
+const stable = museChatJobsHTML(liveJobs, seenAll);
+assert(stable === museChatJobsHTML(liveJobs, seenAll), 'unchanged thread renders identical HTML');
+assert(!stable.includes('is-new'), 're-rendering a known thread animates nothing');
+const fresh = museChatJobsHTML(liveJobs, new Set(['mc_1']));
+assert(fresh.includes('is-new'), 'a job that appeared after the last render animates');
+assert((fresh.match(/is-new/g) || []).length === 2, 'both cards of the new job animate');
+assert(fresh.replace(/ is-new/g, '') === stable,
+  'the animation class is the only difference between written markup and signature');
+assert(!museChatJobsHTML(liveJobs, null).includes('is-new'), 'first paint animates nothing');
+
+// --- poll tick against a stub DOM ------------------------------------------
+//
+// The renderer is driven with a minimal element: the contract is that a tick
+// carrying the same jobs writes no innerHTML at all, and that the countdown
+// and the streamed draft are patched as text instead. A regression here is
+// exactly the reported "the page blinks on every second".
+const stream = {
+  dataset: {}, scrollTop: 0, clientHeight: 100, scrollHeight: 400, writes: 0,
+  countdowns: new Map(), drafts: new Map(), _html: '',
+};
+Object.defineProperty(stream, 'innerHTML', {
+  get() { return stream._html; },
+  set(v) { stream.writes++; stream._html = v; },
+});
+stream.querySelectorAll = (sel) => {
+  if (sel === '.mchat-countdown') {
+    return [...stream._html.matchAll(/<span class="mchat-countdown" data-deadline="(\d+)"><\/span>/g)].map((m) => {
+      if (!stream.countdowns.has(m[1])) {
+        stream.countdowns.set(m[1], { dataset: { deadline: m[1] }, textContent: '' });
+      }
+      return stream.countdowns.get(m[1]);
+    });
+  }
+  if (sel === '[data-chat-draft]') {
+    return [...stream._html.matchAll(/<div class="alert alert-warn" data-chat-draft="([^"]+)"/g)].map((m) => {
+      if (!stream.drafts.has(m[1])) {
+        const target = { textContent: '' };
+        stream.drafts.set(m[1], { dataset: { chatDraft: m[1] }, querySelector: () => target, target });
+      }
+      return stream.drafts.get(m[1]);
+    });
+  }
+  return [];
+};
+
+const priorDocument = globalThis.document;
+const realNow = Date.now;
+globalThis.document = { getElementById: (id) => (id === 'mchatStream' ? stream : null) };
+
+const baseSecs = 1_900_000_000;
+Date.now = () => baseSecs * 1000;
+museState.chatPeer = 'alice';
+museState.accounts = [{ peer_id: 'alice', chat_enabled: true }];
+museState.chatThread = { jobs: [waitJob] };
+museState.chatSig = '';
+museState.chatSeen = null;
+renderMuseChatMessages();
+assert(stream.writes === 1, 'first render writes the stream once');
+const tick = stream.countdowns.get(String(waitJob.deadline_at));
+assert(tick && tick.textContent === '100s', 'countdown is filled from the deadline');
+
+Date.now = () => (baseSecs + 1) * 1000;
+renderMuseChatMessages();
+assert(stream.writes === 1, 'a tick with unchanged jobs does not rewrite the stream');
+assert(tick.textContent === '99s', 'a tick patches the seconds in place');
+
+museState.chatThread = { jobs: [{ ...waitJob, partial_text: 'still' }] };
+renderMuseChatMessages();
+const draftWrites = stream.writes;
+assert(draftWrites === 2, 'a draft appearing rewrites the stream once');
+assert(stream.drafts.get('mc_1').target.textContent === 'still', 'draft text is filled in');
+museState.chatThread = { jobs: [{ ...waitJob, partial_text: 'still writing' }] };
+renderMuseChatMessages();
+assert(stream.writes === draftWrites, 'a growing draft does not rewrite the stream');
+assert(stream.drafts.get('mc_1').target.textContent === 'still writing', 'a growing draft is patched in place');
+
+museState.chatThread = { jobs: [{ ...waitJob, status: 'timeout', deadline_at: 0, updated_at: baseSecs + 2 }] };
+renderMuseChatMessages();
+assert(stream.writes === draftWrites + 1, 'a status change still rewrites the stream');
+
+Date.now = realNow;
+globalThis.document = priorDocument;
 
 console.log('PASS: muse URL/state helpers');

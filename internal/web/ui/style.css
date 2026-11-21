@@ -904,6 +904,12 @@ main.full-bleed {
   to { opacity: 1; }
 }
 
+/* The Muse chat stream replaces its markup whenever a job changes state. Only
+   cards that are genuinely new may fade in; letting every re-render replay the
+   entry animation blinked the whole thread on every poll tick. */
+#mchatStream .cmd-msg { animation: none; }
+#mchatStream .cmd-msg.is-new { animation: fadeIn 0.15s ease-out; }
+
 .cmd-msg.msg-self {
   align-self: flex-end;
   align-items: flex-end;
