@@ -432,3 +432,49 @@ func TestVerifyNoiseSessionRefreshFailureDoesNotMarkAuth(t *testing.T) {
 		t.Fatalf("verifyNoise changed AuthState: %+v", res)
 	}
 }
+
+func TestVerifyNoiseRetriesDial502(t *testing.T) {
+	origDelays := noiseDial5xxDelays
+	noiseDial5xxDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { noiseDial5xxDelays = origDelays })
+
+	_, httpSrv := newNoiseHTTPFixture(t)
+	ws := musetest.New(t)
+	var hits int
+	var mu sync.Mutex
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		n := hits
+		mu.Unlock()
+		if n <= 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		// Redirect/upgrade not needed if we fail on 3rd? Even better: test that
+		// 2x 502 triggers 3rd dial (which hits 403 -> non-retryable and stops
+		// immediately), proving 502 IS retried while 403 is NOT retried.
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(proxy.Close)
+
+	gateway := "ws" + strings.TrimPrefix(proxy.URL, "http") + "/v1/noise"
+	svc := newNoiseService(httpSrv.URL, gateway)
+	err := svc.verifyNoise(context.Background(), newNoiseResult(), &sessionResponse{Status: "assigned", VMID: "vm-1"})
+	if err == nil || !strings.Contains(err.Error(), "noise dial: 403 (attempt 3/3") {
+		t.Fatalf("expected 502x2 then 403 on attempt 3/3, got: %v", err)
+	}
+	if hits != 3 {
+		t.Fatalf("dial attempts = %d, want 3", hits)
+	}
+
+	// Single 403 must fail on attempt 1/3 without retrying.
+	mu.Lock()
+	hits = 10
+	mu.Unlock()
+	err2 := svc.verifyNoise(context.Background(), newNoiseResult(), &sessionResponse{Status: "assigned", VMID: "vm-1"})
+	if err2 == nil || !strings.Contains(err2.Error(), "noise dial: 403 (attempt 1/3") {
+		t.Fatalf("403 must not retry, got: %v", err2)
+	}
+	_ = ws
+}

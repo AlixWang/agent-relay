@@ -60,7 +60,17 @@ const (
 	chatRatePeerMinute    = 6
 	chatRatePeerHour      = 30
 	chatRateGlobalMinute  = 30
+
+	// autoWakeAuditWindowSecs suppresses identical repeated muse.auto_wake
+	// audit rows (e.g. a node whose VM sleeps and repeatedly fails wake in the
+	// exact same way) to at most once per hour per peer.
+	autoWakeAuditWindowSecs = int64(3600)
 )
+
+type autoWakeAuditStamp struct {
+	key string
+	at  int64
+}
 
 // Options configures the optional Muse integration. Zero durations select the
 // documented defaults; an empty BaseURL means https://muse.ai.
@@ -219,7 +229,8 @@ type Service struct {
 	// 15-minute keepalive would otherwise keep the presence hook inside its
 	// cooldown and block offline recovery. In-memory on purpose; a restart can
 	// at worst allow one extra wake.
-	wakeEvents map[string]int64
+	wakeEvents        map[string]int64
+	lastAutoWakeAudit map[string]autoWakeAuditStamp
 
 	// Direct-chat state. chatMu protects the job/lease maps and the runtime
 	// switch; it never covers network I/O or a job wait, so a 180s dialogue
@@ -333,9 +344,10 @@ func New(st store.Store, opt Options) (*Service, error) {
 				return http.ErrUseLastResponse
 			},
 		},
-		waking:       map[string]bool{},
-		backoff:      map[string]int64{},
-		wakeEvents:   map[string]int64{},
+		waking:            map[string]bool{},
+		backoff:           map[string]int64{},
+		wakeEvents:        map[string]int64{},
+		lastAutoWakeAudit: map[string]autoWakeAuditStamp{},
 		chatJobs:     map[string]*ChatJob{},
 		chatActive:   map[string]string{},
 		chatRequests: map[string]chatIdem{},
@@ -1013,10 +1025,42 @@ func (s *Service) autoWake(accountID, peerID string) {
 		detail = fmt.Sprintf("peer=%s account=%s ok=%v vm=%s wake_ok=%v wake_state=%s error=%s wake_error=%s",
 			peerID, accountID, res.OK, res.VMState, res.WakeOK, res.WakeState, res.Error, res.WakeError)
 	}
-	if shouldAuditAutoWake(prev, res, err) {
+	if shouldAuditAutoWake(prev, res, err) && s.allowAutoWakeAudit(peerID, autoWakeAuditKey(res, err), now) {
 		_ = s.st.AppendAudit("system", "muse.auto_wake", truncate(detail, 500), now)
 	}
 	log.Printf("muse: auto-wake %s", truncate(detail, 300))
+}
+
+func normalizeAuditError(s string) string {
+	if idx := strings.Index(s, " (attempt "); idx >= 0 {
+		return strings.TrimSpace(s[:idx])
+	}
+	return strings.TrimSpace(s)
+}
+
+func autoWakeAuditKey(res *Result, err error) string {
+	if err != nil {
+		return "err:" + normalizeAuditError(err.Error())
+	}
+	if res == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("ok=%v|wok=%v|ws=%s|e=%s|we=%s",
+		res.OK, res.WakeOK, res.WakeState,
+		normalizeAuditError(res.Error), normalizeAuditError(res.WakeError))
+}
+
+func (s *Service) allowAutoWakeAudit(peerID, key string, now int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastAutoWakeAudit == nil {
+		s.lastAutoWakeAudit = map[string]autoWakeAuditStamp{}
+	}
+	if last, ok := s.lastAutoWakeAudit[peerID]; ok && last.key == key && now-last.at < autoWakeAuditWindowSecs {
+		return false
+	}
+	s.lastAutoWakeAudit[peerID] = autoWakeAuditStamp{key: key, at: now}
+	return true
 }
 
 // shouldAuditAutoWake reports whether one auto-wake attempt deserves an audit

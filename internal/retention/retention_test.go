@@ -415,3 +415,105 @@ func TestActiveThreadIsPinned(t *testing.T) {
 		t.Fatalf("active thread was archived: %+v", stats)
 	}
 }
+
+func TestActiveLargeThreadNotReportedSkipped(t *testing.T) {
+	st := openTest(t)
+	r := New(st, Policy{MessageTTLDays: 30, DataDir: t.TempDir()})
+	now := int64(100 * 86400)
+	for i := 0; i < scanCap+5; i++ {
+		ts := now - 40*86400
+		if i == scanCap+4 {
+			ts = now - 60 // newest message inside TTL keeps the thread active
+		}
+		_, err := st.InsertMessage(&store.Message{
+			ID: "m-" + string(rune('a'+i/26)) + string(rune('a'+i%26)) + "-" + string(rune('0'+i%10)),
+			Sender: "operator", Recipient: "alice", RootID: "op/alice",
+			Kind: "status", Payload: "ok", CreatedAt: ts,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["threads_skipped"] != 0 {
+		t.Fatalf("active large thread reported skipped: %+v", stats)
+	}
+	audits, _ := st.ListAudit("system", "retention.skipped", 0, 10)
+	if len(audits) != 0 {
+		t.Fatalf("unexpected retention.skipped audit: %+v", audits)
+	}
+}
+
+func TestArchivedRoomMessagesArchivedAfterTTL(t *testing.T) {
+	st := openTest(t)
+	dir := t.TempDir()
+	r := New(st, Policy{MessageTTLDays: 30, DataDir: dir})
+	now := int64(100 * 86400)
+	old := now - 31*86400
+
+	_ = st.CreateRoom(&store.Room{ID: "grp_old", Name: "Old", CreatedAt: old, ArchivedAt: old + 100})
+	_, err := st.InsertMessage(&store.Message{
+		ID: "rm1", Sender: "operator", Recipient: "grp_old",
+		RootID: "grp_old", Kind: "chat", Payload: "bye", CreatedAt: old,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["messages_archived"] != 1 || stats["messages_deleted"] != 1 {
+		t.Fatalf("archived room stats: %+v", stats)
+	}
+	if got, _ := st.GetBySenderID("operator", "rm1"); got != nil {
+		t.Fatal("archived room message was not deleted")
+	}
+}
+
+func TestPurgeLogNoiseV2Once(t *testing.T) {
+	st := openTest(t)
+	now := int64(1000)
+	_ = st.AppendAudit("alice", "thread.fuse_tripped", "thread=op/alice count=60 window=3600s", now-50)
+	_ = st.AppendAudit("system", "retention.skipped", "threads=1 cap=1000", now-40)
+	_ = st.AppendAudit("system", "muse.auto_wake", "peer=alice account=ma1 ok=true vm=UNKNOWN wake_ok=false wake_state=unconfirmed error= wake_error=noise dial: 502 (attempt 1/3, 0.8s)", now-30)
+	_ = st.AppendAudit("system", "muse.auto_wake", "peer=alice account=ma1 ok=false error=session failed", now-20)
+	_ = st.AppendAudit("system", "peer.status", "peer=alice status=active", now-10)
+	if _, _, err := st.InsertAgentLogs([]*store.AgentLog{
+		{EventID: "ds1", Ts: now - 20, ReceivedAt: now - 20, PeerID: "alice", Level: "info", Source: "relay-watch", Event: "watchdog.daemon_started"},
+		{EventID: "err1", Ts: now - 10, ReceivedAt: now - 10, PeerID: "alice", Level: "error", Source: "relay-watch", Event: "worker.timeout"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := New(st, Policy{AuditRetentionDays: 30, AgentLogRetentionDays: 7, DataDir: t.TempDir()})
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["log_noise_purged"] != 4 || stats["audit_fuse_tripped_purged"] != 1 ||
+		stats["audit_auto_wake_502_purged"] != 1 || stats["audit_retention_skipped_purged"] != 1 ||
+		stats["agent_daemon_started_purged"] != 1 {
+		t.Fatalf("unexpected v2 purge stats: %+v", stats)
+	}
+	// Real auto_wake failure + peer.status + retention.purged remain.
+	aw, _ := st.ListAudit("system", "muse.auto_wake", 0, 10)
+	if len(aw) != 1 || !strings.Contains(aw[0].Detail, "session failed") {
+		t.Fatalf("remaining muse.auto_wake: %+v", aw)
+	}
+	_, total, _ := st.ListAgentLogsPage(store.AgentLogFilter{PeerID: "alice"}, 10, 0)
+	if total != 1 {
+		t.Fatalf("remaining agent logs = %d, want 1", total)
+	}
+	// Second run is a no-op.
+	stats2, err := r.RunOnce(now + 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats2["log_noise_purged"] != 0 {
+		t.Fatalf("second run purged again: %+v", stats2)
+	}
+}

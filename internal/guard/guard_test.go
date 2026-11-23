@@ -405,3 +405,36 @@ func TestPolicyRulesMatchVersion(t *testing.T) {
 		t.Fatal("rate change must change policy version")
 	}
 }
+
+func TestFuseTrippedAuditThrottled(t *testing.T) {
+	st := openTestStore(t)
+	g := New(st, Limits{FuseMaxMessages: 2, FuseMaxAgeSecs: 3600, RatePerMinute: 60})
+	now := time.Now().Unix()
+
+	sendOK(t, g, st, &Envelope{ID: "m1", To: "bob", From: "alice", Payload: "第一条任务消息：请开始执行检查任务并汇报进展"}, now)
+	sendOK(t, g, st, &Envelope{ID: "m2", To: "bob", From: "alice", InReplyTo: "m1", Payload: "第二条补充消息：请附带完整的日志和诊断结果"}, now+1)
+
+	for i := 0; i < 3; i++ {
+		_, err := g.Check(&Envelope{ID: "r" + string(rune('a'+i)), To: "bob", From: "alice", InReplyTo: "m1", Payload: "tripped"}, now+10+int64(i))
+		if err == nil {
+			t.Fatal("expected fuse rejection")
+		}
+	}
+	rows, err := st.ListAudit("alice", "fuse.tripped", 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("fuse.tripped rows within 10m = %d, want 1", len(rows))
+	}
+
+	// After 10 minutes, another rejection records a second audit row.
+	_, err = g.Check(&Envelope{ID: "r-later", To: "bob", From: "alice", InReplyTo: "m1", Payload: "tripped"}, now+620)
+	if err == nil {
+		t.Fatal("expected fuse rejection")
+	}
+	rows, _ = st.ListAudit("alice", "fuse.tripped", 0, 20)
+	if len(rows) != 2 {
+		t.Fatalf("fuse.tripped rows after 10m = %d, want 2", len(rows))
+	}
+}

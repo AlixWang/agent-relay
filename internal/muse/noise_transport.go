@@ -129,7 +129,8 @@ func dialNoiseConn(ctx context.Context, client *http.Client, gatewayURL, vmID, a
 	ws, resp, err := websocket.Dial(ctx, u.String(), opts)
 	if err != nil {
 		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols {
-			return nil, newNoiseError("dial", noiseStatusClass(resp.StatusCode), false, err)
+			retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+			return nil, newNoiseError("dial", noiseStatusClass(resp.StatusCode), retryable, err)
 		}
 		return nil, newNoiseError("dial", noiseNetworkClass(err), true, err)
 	}

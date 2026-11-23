@@ -32,6 +32,7 @@ type TicketView struct {
 type Service struct {
 	st            store.Store
 	onlineSecs    int64
+	ticketTTLDays int
 	policyVersion string
 	now           func() int64
 
@@ -55,6 +56,10 @@ func New(st store.Store, onlineSecs int64) *Service {
 // SetPolicyVersion records the deterministic admission policy version on
 // newly projected tickets. It must be called before Start/Rebuild.
 func (s *Service) SetPolicyVersion(v string) { s.policyVersion = v }
+
+// SetTicketTTLDays configures ended-ticket pruning right after Rebuild so
+// expired historical tickets are not rebuilt on boot only to be pruned 5m later.
+func (s *Service) SetTicketTTLDays(days int) { s.ticketTTLDays = days }
 
 // Start rebuilds the projection in the background and then runs a 2 second
 // pass loop. It never blocks the relay's HTTP server; projection is a read
@@ -115,6 +120,9 @@ func (s *Service) Rebuild(ctx context.Context) error {
 		return fmt.Errorf("max seq: %w", err)
 	}
 	_, _ = s.st.PruneOrphanTickets()
+	if s.ticketTTLDays > 0 {
+		_, _ = s.st.PruneTickets(s.now() - int64(s.ticketTTLDays)*86400)
+	}
 	if _, err := s.st.ExpireAssignmentLeases(s.now()); err != nil {
 		return fmt.Errorf("expire assignment leases: %w", err)
 	}

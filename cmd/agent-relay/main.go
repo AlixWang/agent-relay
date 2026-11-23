@@ -102,6 +102,7 @@ func main() {
 	g := guard.New(st, guard.LimitsFromConfig(cfg))
 	_ = st.UpsertPolicyVersion(g.PolicyVersion(), g.PolicyRules(), time.Now().Unix())
 	workSvc.SetPolicyVersion(g.PolicyVersion())
+	workSvc.SetTicketTTLDays(cfg.MessageTTLDays)
 	fx := effects.New(st)
 	fx.RegisterWebhook()
 	if err := prompts.RecordTemplateRevisions(st, time.Now().Unix()); err != nil {
@@ -161,6 +162,15 @@ func main() {
 	if museSvc != nil {
 		p.OnOffline = func(peerID string, offlineSecs int64) {
 			museSvc.MaybeWakeOffline(peerID, offlineSecs)
+		}
+		if cfg.MuseAutoWake {
+			p.ShouldAuditOffline = func(peerID string) bool {
+				acct, err := st.GetMuseAccountByPeer(peerID)
+				if err != nil || acct == nil {
+					return true
+				}
+				return !acct.Enabled || !acct.AutoWake || acct.AuthState == "needs_reauth" || acct.VMState == "DISABLED"
+			}
 		}
 	}
 
@@ -366,7 +376,8 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resS
 	case <-ctx.Done():
 		return
 	case <-time.After(5 * time.Minute):
-		if stats, err := r.RunOnce(time.Now().Unix()); err != nil {
+		stats, err := r.RunOnce(time.Now().Unix())
+		if err != nil {
 			log.Printf("retention: %v", err)
 		} else {
 			log.Printf("retention: %+v", stats)
@@ -378,14 +389,15 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resS
 				log.Printf("resources: expired %d pending submissions", n)
 			}
 		}
-		_ = st.Vacuum()
+		compactDB(st, stats)
 	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if stats, err := r.RunOnce(time.Now().Unix()); err != nil {
+			stats, err := r.RunOnce(time.Now().Unix())
+			if err != nil {
 				log.Printf("retention: %v", err)
 			} else {
 				log.Printf("retention: %+v", stats)
@@ -397,7 +409,28 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resS
 					log.Printf("resources: expired %d pending submissions", n)
 				}
 			}
-			_ = st.Vacuum()
+			compactDB(st, stats)
 		}
+	}
+}
+
+func compactDB(st store.Store, stats map[string]int64) {
+	var deleted int64
+	for _, k := range []string{
+		"audit_noise_purged", "log_noise_purged", "messages_deleted",
+		"peers_pruned", "audit_pruned", "agent_logs_pruned",
+		"agent_logs_trimmed", "permissions_pruned", "tickets_pruned",
+	} {
+		deleted += stats[k]
+	}
+	freelist, _ := st.FreelistSize()
+	if deleted >= 50 || stats["audit_noise_purged"] > 0 || stats["log_noise_purged"] > 0 || freelist >= 1<<20 {
+		if err := st.Vacuum(); err != nil {
+			log.Printf("retention: vacuum: %v", err)
+		}
+		return
+	}
+	if err := st.CheckpointTruncate(); err != nil {
+		log.Printf("retention: checkpoint: %v", err)
 	}
 }

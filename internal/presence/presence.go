@@ -99,18 +99,22 @@ type Service struct {
 	// block: the Muse integration spawns its own goroutine. Nil disables the
 	// hook.
 	OnOffline func(peerID string, offlineSecs int64)
+	// ShouldAuditOffline optionally gates writing peer.offline to audit_log.
+	// Nil means always audit (subject to offlineAuditWindowSecs). Returning
+	// false skips only the audit row; OnOffline and webhook effects still run.
+	ShouldAuditOffline func(peerID string) bool
 
 	mu        sync.Mutex
 	wasOnline map[string]bool
 	// lastOfflineAudit is the last time a peer.offline audit row was written,
 	// per peer. A flapping node can cross the timeout repeatedly; one audit
-	// row per 30 minutes is enough to reconstruct the outage. Restart loss is
+	// row per 6 hours is enough to reconstruct the outage. Restart loss is
 	// acceptable: this is best-effort noise reduction, not a durable contract.
 	lastOfflineAudit map[string]int64
 }
 
 // offlineAuditWindowSecs is the per-peer throttle for peer.offline audit rows.
-const offlineAuditWindowSecs = int64(30 * 60)
+const offlineAuditWindowSecs = int64(6 * 3600)
 
 // New creates a presence Service.
 func New(st store.Store, onlineTimeoutSecs int64, webhookURL string) *Service {
@@ -282,7 +286,8 @@ func (s *Service) Sweep(now int64) {
 
 		offlineSecs := now - p.LastSeen
 		kind, key, payload := s.webhookEffect(p.ID, offlineSecs, now)
-		throttled := lastAudit > 0 && now-lastAudit < offlineAuditWindowSecs
+		throttled := (lastAudit > 0 && now-lastAudit < offlineAuditWindowSecs) ||
+			(s.ShouldAuditOffline != nil && !s.ShouldAuditOffline(p.ID))
 		if throttled {
 			// Keep the offline notification itself unchanged; only the audit
 			// row is deduplicated. The effect key still changes per

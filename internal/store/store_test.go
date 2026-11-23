@@ -1,6 +1,7 @@
 package store
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -580,5 +581,41 @@ func TestUpdatePeerScript(t *testing.T) {
 	// FindPeerFold shares the same column list.
 	if p, n, err := st.FindPeerFold("P1"); err != nil || n != 1 || p.ScriptVersion != "1.1.0" {
 		t.Fatalf("fold script mismatch: p=%+v n=%d err=%v", p, n, err)
+	}
+}
+
+func TestVacuumAndCheckpointTruncateWal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	bigPayload := strings.Repeat("x", 4096)
+	for i := 0; i < 80; i++ {
+		if err := st.AppendAudit("alice", "bulk.test", bigPayload, int64(1000+i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if walBefore := st.DBWalSize(); walBefore == 0 {
+		t.Fatalf("expected non-zero WAL before vacuum, got 0")
+	}
+	if _, err := st.PruneAudit(2000); err != nil {
+		t.Fatal(err)
+	}
+	freeBefore, err := st.FreelistSize()
+	if err != nil || freeBefore == 0 {
+		t.Fatalf("expected non-zero freelist after bulk delete, got %d (err=%v)", freeBefore, err)
+	}
+	if err := st.Vacuum(); err != nil {
+		t.Fatalf("vacuum: %v", err)
+	}
+	freeAfter, err := st.FreelistSize()
+	if err != nil || freeAfter != 0 {
+		t.Fatalf("freelist after vacuum = %d (err=%v), want 0", freeAfter, err)
+	}
+	if walAfter := st.DBWalSize(); walAfter != 0 {
+		t.Fatalf("WAL after vacuum+checkpoint = %d, want 0", walAfter)
 	}
 }

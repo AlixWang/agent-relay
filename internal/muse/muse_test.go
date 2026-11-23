@@ -921,6 +921,37 @@ func TestAutoWakeAuditsOnlyOnFailureOrStateChange(t *testing.T) {
 	}
 }
 
+func TestAutoWakeAuditsThrottledForRepeatedFailure(t *testing.T) {
+	env := newTestEnv(t, true)
+	a := env.authorize(t, "alice")
+	audits := func() []*store.AuditEntry {
+		t.Helper()
+		entries, err := env.st.ListAudit("system", "muse.auto_wake", 0, 100)
+		if err != nil {
+			t.Fatalf("list audit: %v", err)
+		}
+		return entries
+	}
+
+	env.fake.setSessionCode(http.StatusInternalServerError)
+	env.svc.autoWake(a.ID, "alice")
+	if got := audits(); len(got) != 1 {
+		t.Fatalf("first failure audits = %d, want 1", len(got))
+	}
+	// Identical failure within 1 hour is suppressed.
+	env.clock += 600
+	env.svc.autoWake(a.ID, "alice")
+	if got := audits(); len(got) != 1 {
+		t.Fatalf("repeated failure within 1h wrote audit: %+v", got)
+	}
+	// After 1 hour, a fresh failure row is recorded.
+	env.clock += 3001
+	env.svc.autoWake(a.ID, "alice")
+	if got := audits(); len(got) != 2 {
+		t.Fatalf("failure after 1h audits = %d, want 2", len(got))
+	}
+}
+
 func TestAutoWakeDisabledGlobally(t *testing.T) {
 	env := newTestEnv(t, false)
 	env.authorize(t, "alice")

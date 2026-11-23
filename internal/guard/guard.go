@@ -78,8 +78,11 @@ type Guard struct {
 	limits        Limits
 	mu            sync.Mutex
 	hits          map[string][]int64 // sender → unix-second timestamps
+	lastFuseAudit map[string]int64   // actor+"\x00"+rootID → last audit ts
 	policyVersion string
 }
+
+const fuseAuditWindowSecs = int64(10 * 60)
 
 // New creates a Guard over st.
 func New(st store.Store, lim Limits) *Guard {
@@ -87,8 +90,23 @@ func New(st store.Store, lim Limits) *Guard {
 		st:            st,
 		limits:        lim,
 		hits:          map[string][]int64{},
+		lastFuseAudit: map[string]int64{},
 		policyVersion: policyVersion(lim),
 	}
+}
+
+func (g *Guard) allowFuseAudit(actor, rootID string, now int64) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.lastFuseAudit == nil {
+		g.lastFuseAudit = map[string]int64{}
+	}
+	key := actor + "\x00" + rootID
+	if last, ok := g.lastFuseAudit[key]; ok && now-last < fuseAuditWindowSecs {
+		return false
+	}
+	g.lastFuseAudit[key] = now
+	return true
 }
 
 // PolicyVersion is the deterministic identity of the task admission policy.
@@ -173,8 +191,10 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 				return nil, err
 			}
 			if count >= g.limits.RoomFuseMaxMessages {
-				_ = g.st.AppendAudit(env.From, "thread.fuse_tripped",
-					fmt.Sprintf("thread=%s count=%d window=%ds", rootID, count, g.limits.RoomFuseWindowSecs), now)
+				if g.allowFuseAudit(env.From, rootID, now) {
+					_ = g.st.AppendAudit(env.From, "thread.fuse_tripped",
+						fmt.Sprintf("thread=%s count=%d window=%ds", rootID, count, g.limits.RoomFuseWindowSecs), now)
+				}
 				return nil, &Rejection{Code: "loop_fuse_tripped",
 					Reason: fmt.Sprintf("thread %s exceeded %d messages in %d minutes; wait before posting again",
 						rootID, g.limits.RoomFuseMaxMessages, g.limits.RoomFuseWindowSecs/60)}
@@ -186,8 +206,10 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 			return nil, err
 		}
 		if count >= g.limits.FuseMaxMessages {
-			_ = g.st.AppendAudit(env.From, "fuse.tripped",
-				fmt.Sprintf("thread=%s count=%d", rootID, count), now)
+			if g.allowFuseAudit(env.From, rootID, now) {
+				_ = g.st.AppendAudit(env.From, "fuse.tripped",
+					fmt.Sprintf("thread=%s count=%d", rootID, count), now)
+			}
 			return nil, &Rejection{Code: "loop_fuse_tripped",
 				Reason: fmt.Sprintf("thread %s exceeded %d messages; ask a human to reset the fuse", rootID, g.limits.FuseMaxMessages)}
 		}

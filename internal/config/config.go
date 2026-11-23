@@ -149,7 +149,7 @@ func Default() *Config {
 		AuditRetentionDays:           30,
 		AgentLogRetentionDays:        7,
 		AgentLogRatePerMinute:        60,
-		AgentLogMaxRowsPerPeer:       20000,
+		AgentLogMaxRowsPerPeer:       2000,
 		MaxBodyBytes:                 1 << 20,
 		ResourceSelfRegistration:     true,
 		ResourcePendingMax:           20,

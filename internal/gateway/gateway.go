@@ -1842,7 +1842,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	body := map[string]any{
-		"ok": true, "db_bytes": size, "max_seq": maxSeq,
+		"ok": true, "db_bytes": size, "db_wal_bytes": s.st.DBWalSize(), "max_seq": maxSeq,
 		"peers_total": len(peers), "peers_online": online,
 		"protocol": s.cfg.Protocol, "min_client": s.cfg.MinClient,
 		"prompt_version": prompts.PromptVersion,

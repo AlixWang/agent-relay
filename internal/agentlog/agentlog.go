@@ -23,6 +23,11 @@ const (
 	MaxFieldBytes   = 4096
 	MaxTaskIDRunes  = 128
 	MaxThreadRunes  = 128
+
+	// noisyInfoEventWindowSecs folds repetitive routine info heartbeats
+	// (such as watchdog.daemon_started from older watch scripts after each VM
+	// sleep/wake) to at most one stored row per peer per hour.
+	noisyInfoEventWindowSecs = int64(3600)
 )
 
 var (
@@ -76,11 +81,12 @@ func (e *RateError) Error() string { return ErrRateLimited.Error() }
 
 // Ingestor owns the per-peer rate limiter and store writes.
 type Ingestor struct {
-	st      store.Store
-	rate    int
-	maxRows int
-	mu      sync.Mutex
-	hits    map[string][]int64
+	st        store.Store
+	rate      int
+	maxRows   int
+	mu        sync.Mutex
+	hits      map[string][]int64
+	lastNoisy map[string]int64
 
 	redact     func(string) (string, []string)
 	onRedacted func(peerID string, names []string)
@@ -90,7 +96,13 @@ func New(st store.Store, ratePerMinute, maxRowsPerPeer int) *Ingestor {
 	if ratePerMinute <= 0 {
 		ratePerMinute = 60
 	}
-	return &Ingestor{st: st, rate: ratePerMinute, maxRows: maxRowsPerPeer, hits: map[string][]int64{}}
+	return &Ingestor{
+		st:        st,
+		rate:      ratePerMinute,
+		maxRows:   maxRowsPerPeer,
+		hits:      map[string][]int64{},
+		lastNoisy: map[string]int64{},
+	}
 }
 
 // SetRedactor masks stored secret values in the free-text parts of an event
@@ -158,10 +170,11 @@ func (i *Ingestor) Ingest(peerID string, b Batch, now int64) (*Result, error) {
 		ev.ReceivedAt = now
 		ev.ClientVersion = truncate(b.Client.Version, 64)
 		ev.ClientRev = truncate(b.Client.Rev, 64)
+		if i.suppressNoisyEvent(peerID, ev, now) {
+			result.Duplicates++
+			continue
+		}
 		batch = append(batch, ev)
-	}
-	if len(batch) == 0 {
-		return result, nil
 	}
 	if len(redacted) > 0 && i.onRedacted != nil {
 		uniq := map[string]bool{}
@@ -175,16 +188,36 @@ func (i *Ingestor) Ingest(peerID string, b Batch, now int64) (*Result, error) {
 		sort.Strings(names)
 		i.onRedacted(peerID, names)
 	}
+	if len(batch) == 0 {
+		return result, nil
+	}
 	accepted, duplicates, err := i.st.InsertAgentLogs(batch)
 	if err != nil {
 		return nil, err
 	}
 	result.Accepted = accepted
-	result.Duplicates = duplicates
+	result.Duplicates += duplicates
 	if i.maxRows > 0 {
 		_, _ = i.st.TrimAgentLogs(peerID, i.maxRows)
 	}
 	return result, nil
+}
+
+func (i *Ingestor) suppressNoisyEvent(peerID string, ev *store.AgentLog, now int64) bool {
+	if ev.Level != "info" || ev.Event != "watchdog.daemon_started" {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.lastNoisy == nil {
+		i.lastNoisy = map[string]int64{}
+	}
+	key := peerID + "\x00" + ev.Event
+	if last, ok := i.lastNoisy[key]; ok && now-last < noisyInfoEventWindowSecs {
+		return true
+	}
+	i.lastNoisy[key] = now
+	return false
 }
 
 func (i *Ingestor) allow(peerID string, n int, now int64) (int, bool) {

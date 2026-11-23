@@ -188,17 +188,41 @@ func TestOfflineAuditThrottledPerPeer(t *testing.T) {
 	if offCalls.Load() != 2 {
 		t.Fatalf("flap notification count: %d", offCalls.Load())
 	}
-	// 31 minutes after the last audit, a new transition is recorded again.
-	if err := s.Beat("a", 0, "", 0, "", "", "", "", 4400); err != nil {
+	// 6+ hours after the last audit, a new transition is recorded again.
+	if err := s.Beat("a", 0, "", 0, "", "", "", "", 2301+6*3600+1); err != nil {
 		t.Fatal(err)
 	}
-	s.Sweep(4450)
-	s.Sweep(4701)
+	s.Sweep(2301 + 6*3600 + 50)
+	s.Sweep(2301 + 6*3600 + 350)
 	if got := audits(); len(got) != 2 {
 		t.Fatalf("transition after window missing audit: %+v", got)
 	}
 	if offCalls.Load() != 3 {
 		t.Fatalf("notifications: %d", offCalls.Load())
+	}
+}
+
+func TestOfflineAuditSuppressedByCallback(t *testing.T) {
+	st := openTest(t)
+	if err := st.CreatePeer(&store.Peer{ID: "a", Status: "active", CreatedAt: 1000, LastSeen: 2000}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, 300, "")
+	var offCalls atomic.Int32
+	s.OnOffline = func(string, int64) { offCalls.Add(1) }
+	s.ShouldAuditOffline = func(string) bool { return false }
+
+	s.Sweep(2100)
+	s.Sweep(2301)
+	if offCalls.Load() != 1 {
+		t.Fatalf("OnOffline calls = %d, want 1", offCalls.Load())
+	}
+	entries, err := st.ListAudit("system", "peer.offline", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("suppressed peer wrote peer.offline audit: %+v", entries)
 	}
 }
 

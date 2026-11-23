@@ -43,7 +43,7 @@
 set -euo pipefail
 
 # ---- 常量（服务端从内嵌副本解析 WATCH_VERSION，作为唯一事实来源） ----
-WATCH_VERSION="1.1.0"
+WATCH_VERSION="1.1.1"
 SCRIPT_KIND="muse-watch"
 
 # ---- 0. BASE：环境变量 > 默认 ----
@@ -286,6 +286,7 @@ log_level_of() {
   case "${1-}" in
     *skip*|*truncated*|*duplicate*) printf 'warn' ;;
     *error*|*failed*|*timeout*|*missing*|*unreachable*) printf 'error' ;;
+    watchdog.daemon_started|relay_daemon_started|spool.drained|messages_pending|worker.started|worker_started_notify) printf 'debug' ;;
     *) printf 'info' ;;
   esac
 }
@@ -930,6 +931,22 @@ if ! daemon_alive; then
   )
   rm -f "$AUTH_FAIL_MARKER"
   log "relay_daemon_started" '{"transport":"sse"}'
+  # 频繁重启告警：常规拉起仅记 debug 本地日志，5 分钟内重启 >= 3 次才上报 warn。
+  _now_ds="$(date +%s)"
+  _ds_file="$BASE/.daemon_starts"
+  _ds_warn="$BASE/.daemon_crash_warn_ts"
+  _ds_tmp="$(mktemp 2>/dev/null || true)"
+  if [ -n "$_ds_tmp" ]; then
+    { [ -f "$_ds_file" ] && awk -v cut="$((_now_ds - 300))" '$1+0 >= cut {print $1}' "$_ds_file" 2>/dev/null || true; echo "$_now_ds"; } > "$_ds_tmp"
+    mv "$_ds_tmp" "$_ds_file" 2>/dev/null || rm -f "$_ds_tmp" 2>/dev/null || true
+    _ds_cnt="$(wc -l < "$_ds_file" 2>/dev/null | tr -d '[:space:]' || echo 0)"
+    _ds_last_warn="$(as_uint "$(cat "$_ds_warn" 2>/dev/null || echo 0)")"
+    if [ "$(as_uint "$_ds_cnt")" -ge 3 ] && [ "$((_now_ds - _ds_last_warn))" -ge 300 ]; then
+      printf '%s' "$_now_ds" > "$_ds_warn" 2>/dev/null || true
+      log_event warn "watchdog.daemon_crash_loop" "relay-tail 短时间内频繁重启" \
+        "$(jq -cn --argjson restarts "$_ds_cnt" '{restarts:$restarts,window_secs:300}' 2>/dev/null || echo '{}')"
+    fi
+  fi
 fi
 
 # ---- 2.7 worker 存活检查：超时未 ack 发 status/cancelled ----
@@ -1223,6 +1240,10 @@ fi
       tto="$(printf '%s' "$tline" | jq -r '.to // ""' 2>/dev/null || true)"
       troot="$(printf '%s' "$tline" | jq -r '.root_id // ""' 2>/dev/null || true)"
       [ -z "$tid" ] && continue
+      # 去重：已在 pending 中的任务不再重复发 status/started 或重复追加入 pending。
+      if [ -s "$tmp_pending2" ] && jq -e --arg id "$tid" '.id == $id' "$tmp_pending2" >/dev/null 2>&1; then
+        continue
+      fi
       [ -z "$tto" ] && tto="$ME_IDENTITY"  # 收到的 1:1 任务 recipient 恒为自己
       pending_to="$tto"
       case "$tto" in
@@ -1264,7 +1285,21 @@ fi
 reason="$(IFS='；'; echo "${reasons[*]}")"
 wake_ids="$(printf '%s' "$out" | jq -c '[.tasks[]?.id]' 2>/dev/null || echo '[]')"
 wake_first="$(printf '%s' "$wake_ids" | jq -r '.[0] // ""' 2>/dev/null || true)"
-log_event info "wake.requested" "请求唤醒 worker" \
+wake_log_key="$wake_ids"
+[ "$wake_log_key" = "[]" ] && wake_log_key="$reason"
+wake_log_now="$(date +%s)"
+wake_log_prev_key="$(cat "$BASE/.last_wake_log_key" 2>/dev/null || true)"
+wake_log_prev_ts="$(as_uint "$(cat "$BASE/.last_wake_log_ts" 2>/dev/null || echo 0)")"
+wake_req_level="info"
+wake_fail_level="error"
+if [ -n "$wake_log_key" ] && [ "$wake_log_key" = "$wake_log_prev_key" ] && [ "$((wake_log_now - wake_log_prev_ts))" -lt 60 ]; then
+  wake_req_level="debug"
+  wake_fail_level="debug"
+else
+  printf '%s' "$wake_log_key" > "$BASE/.last_wake_log_key" 2>/dev/null || true
+  printf '%s' "$wake_log_now" > "$BASE/.last_wake_log_ts" 2>/dev/null || true
+fi
+log_event "$wake_req_level" "wake.requested" "请求唤醒 worker" \
   "$(jq -cn --arg reason "$reason" --argjson ids "$wake_ids" '{reason:$reason,task_ids:$ids}' 2>/dev/null || echo '{}')" "$wake_first" ""
 # Refresh the read-only background before the worker starts, so every wake
 # sees the conversation it is joining. Failure is non-fatal: a missing
@@ -1294,7 +1329,7 @@ fi
 wake_rc=0
 if ! wake "$reason" "$final_payload"; then
   wake_rc=1
-  log_event error "wake.failed" "wake 调用失败" \
+  log_event "$wake_fail_level" "wake.failed" "wake 调用失败" \
     "$(jq -cn --arg reason "$reason" '{reason:$reason}' 2>/dev/null || echo '{}')"
 fi
 # Advance only after the wake decision actually resolved. A busy worker no

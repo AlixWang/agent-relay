@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -421,6 +422,10 @@ type Store interface {
 	// muse.auto_wake success rows and all peer.offline rows (v1.10.1 noise
 	// reduction). Subsequent calls are no-ops.
 	PurgeAuditNoise(now int64) (*AuditNoisePurge, error)
+	// PurgeLogNoiseV2 is a one-time, settings-guarded cleanup of legacy
+	// thread.fuse_tripped storms, 502 dial noise, peer.offline,
+	// retention.skipped, and info watchdog.daemon_started rows.
+	PurgeLogNoiseV2(now int64) (*LogNoisePurge, error)
 	// agent runtime logs (DESIGN §4.11): uploaded diagnostics, not audit.
 	InsertAgentLogs(events []*AgentLog) (accepted, duplicates int, err error)
 	ListAgentLogsPage(f AgentLogFilter, limit, offset int) ([]*AgentLog, int, error)
@@ -437,6 +442,9 @@ type Store interface {
 	AdminCounts() (*AdminCounts, error)
 	// ops
 	DBSize() (int64, error)
+	DBWalSize() int64
+	FreelistSize() (int64, error)
+	CheckpointTruncate() error
 	Vacuum() error
 	Close() error
 }
@@ -457,7 +465,7 @@ func Open(path string) (Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;`); err != nil {
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA journal_size_limit=8388608;`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("pragma: %w", err)
 	}
@@ -2012,9 +2020,39 @@ func (s *sqliteStore) DBSize() (int64, error) {
 	return pageCount * pageSize, nil
 }
 
-func (s *sqliteStore) Vacuum() error {
-	_, err := s.db.Exec(`VACUUM`)
+func (s *sqliteStore) DBWalSize() int64 {
+	if s.path == "" || s.path == ":memory:" {
+		return 0
+	}
+	st, err := os.Stat(s.path + "-wal")
+	if err != nil {
+		return 0
+	}
+	return st.Size()
+}
+
+func (s *sqliteStore) FreelistSize() (int64, error) {
+	var freeCount, pageSize int64
+	if err := s.db.QueryRow(`PRAGMA freelist_count`).Scan(&freeCount); err != nil {
+		return 0, err
+	}
+	if err := s.db.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+		return 0, err
+	}
+	return freeCount * pageSize, nil
+}
+
+func (s *sqliteStore) CheckpointTruncate() error {
+	_, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 	return err
+}
+
+func (s *sqliteStore) Vacuum() error {
+	if _, err := s.db.Exec(`VACUUM`); err != nil {
+		return err
+	}
+	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	return nil
 }
 
 func (s *sqliteStore) Close() error { return s.db.Close() }

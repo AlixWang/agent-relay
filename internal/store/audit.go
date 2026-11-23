@@ -166,3 +166,131 @@ func (s *sqliteStore) PurgeAuditNoise(now int64) (*AuditNoisePurge, error) {
 	}
 	return out, nil
 }
+
+// LogNoisePurge counts one one-time v2 noise cleanup pass.
+type LogNoisePurge struct {
+	FuseTripped        int64
+	AutoWake502        int64
+	PeerOffline        int64
+	RetentionSkipped   int64
+	AgentDaemonStarted int64
+	AlreadyDone        bool
+}
+
+const logNoisePurgeV2Marker = "migrated.log_noise_purge_v2"
+
+// PurgeLogNoiseV2 removes historical storm/noise rows in one transaction and
+// records a settings marker so subsequent boots are no-ops:
+//   - audit_log action='thread.fuse_tripped' (historical loop storms)
+//   - audit_log action='peer.offline' (routine sleep-cycle flaps)
+//   - audit_log action='retention.skipped' (false-positive active thread warnings)
+//   - audit_log action='muse.auto_wake' 502 single-attempt noise or routine successes
+//   - agent_logs level='info' AND event='watchdog.daemon_started'
+func (s *sqliteStore) PurgeLogNoiseV2(now int64) (*LogNoisePurge, error) {
+	out := &LogNoisePurge{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var done int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM settings WHERE key=?`, logNoisePurgeV2Marker).Scan(&done); err != nil {
+		return nil, err
+	}
+	if done > 0 {
+		out.AlreadyDone = true
+		return out, nil
+	}
+
+	delAudit := func(action string) (int64, error) {
+		res, err := tx.Exec(`DELETE FROM audit_log WHERE action=?`, action)
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	}
+	if out.FuseTripped, err = delAudit("thread.fuse_tripped"); err != nil {
+		return nil, err
+	}
+	if out.PeerOffline, err = delAudit("peer.offline"); err != nil {
+		return nil, err
+	}
+	if out.RetentionSkipped, err = delAudit("retention.skipped"); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.Query(`SELECT seq,detail FROM audit_log WHERE action='muse.auto_wake' ORDER BY seq`)
+	if err != nil {
+		return nil, err
+	}
+	var seqs []int64
+	for rows.Next() {
+		var seq int64
+		var detail string
+		if err := rows.Scan(&seq, &detail); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if strings.Contains(detail, "wake_error=noise dial: 502 (attempt 1/3") || autoWakeAuditSucceeded(detail) {
+			seqs = append(seqs, seq)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	const deleteBatch = 400
+	for start := 0; start < len(seqs); start += deleteBatch {
+		end := start + deleteBatch
+		if end > len(seqs) {
+			end = len(seqs)
+		}
+		batch := seqs[start:end]
+		args := make([]any, len(batch))
+		for i, seq := range batch {
+			args[i] = seq
+		}
+		placeholders := strings.Repeat("?,", len(batch)-1) + "?"
+		res, err := tx.Exec(`DELETE FROM audit_log WHERE seq IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		out.AutoWake502 += n
+	}
+
+	res, err := tx.Exec(`DELETE FROM agent_logs WHERE level='info' AND event='watchdog.daemon_started'`)
+	if err != nil {
+		return nil, err
+	}
+	if out.AgentDaemonStarted, err = res.RowsAffected(); err != nil {
+		return nil, err
+	}
+
+	total := out.FuseTripped + out.PeerOffline + out.RetentionSkipped + out.AutoWake502 + out.AgentDaemonStarted
+	if total > 0 {
+		detail := fmt.Sprintf("fuse_tripped=%d peer_offline=%d retention_skipped=%d muse_auto_wake_502=%d agent_daemon_started=%d",
+			out.FuseTripped, out.PeerOffline, out.RetentionSkipped, out.AutoWake502, out.AgentDaemonStarted)
+		if _, err := tx.Exec(`INSERT INTO audit_log(ts,actor,action,detail) VALUES(?,?,?,?)`,
+			now, "system", "retention.purged", detail); err != nil {
+			return nil, err
+		}
+	}
+
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?, '1', ?)`,
+		logNoisePurgeV2Marker, now); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

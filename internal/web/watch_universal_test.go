@@ -437,3 +437,65 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 	}
 	t.Fatalf("timed out waiting for %s", path)
 }
+
+func TestWatchScriptDaemonStartQuietAndCrashLoop(t *testing.T) {
+	f := newWatchFixture(t)
+	if err := os.Remove(filepath.Join(f.base, "relay-tail.pid")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(f.base, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Fake relay-tail exits immediately so each tick observes a dead daemon and restarts it.
+	writeTestFile(t, filepath.Join(f.base, "bin", "relay-tail"), "#!/usr/bin/env bash\nexit 0\n", 0o755)
+	// Fake ps reports a different comm so daemon_alive always treats the pid as dead/reused.
+	writeTestFile(t, filepath.Join(f.fakebin, "ps"), "#!/bin/sh\necho not-relay-tail\n", 0o755)
+
+	env := f.env("RELAY_URL=http://relay.invalid", "AGENT_LOG_UPLOAD=1", "AGENT_LOG_LEVEL=info")
+	// Disable actual curl failure blocking or point curl to echo ok (already echoes {"ok":true}).
+	// To inspect agent-log.jsonl before flush clears it (it only clears >1MB), run 1 tick first.
+	f.run(t, env)
+	agentLog := readOptional(t, filepath.Join(f.base, "spool", "agent-log.jsonl"))
+	if strings.Contains(agentLog, "watchdog.daemon_started") {
+		t.Fatalf("routine daemon_started should be debug-only and not enqueued at info:\n%s", agentLog)
+	}
+	// Two more rapid restarts -> 3 starts within 5m triggers warn watchdog.daemon_crash_loop.
+	f.run(t, env)
+	f.run(t, env)
+	agentLog = readOptional(t, filepath.Join(f.base, "spool", "agent-log.jsonl"))
+	if count := strings.Count(agentLog, "watchdog.daemon_crash_loop"); count != 1 {
+		t.Fatalf("watchdog.daemon_crash_loop count = %d, want 1:\n%s", count, agentLog)
+	}
+}
+
+func TestWatchScriptFailedWakeDedupesStatusAndLogs(t *testing.T) {
+	f := newWatchFixture(t)
+	f.addSpoolTask(t, "dup-task-1", "please do work")
+	curlCalls := filepath.Join(f.root, "curl-calls.log")
+	writeTestFile(t, filepath.Join(f.fakebin, "curl"), fmt.Sprintf(`#!/usr/bin/env bash
+printf 'CALL:%%s\n' "$*" >> %q
+printf '{"ok":true}'
+`, curlCalls), 0o755)
+	writeTestFile(t, filepath.Join(f.base, "relay-watch.local.sh"),
+		"watch_wake() { return 1; }\nwatch_silent() { return 0; }\n", 0o644)
+
+	env := f.env("RELAY_URL=http://relay.invalid", "AGENT_LOG_UPLOAD=1", "AGENT_LOG_LEVEL=info")
+	f.run(t, env)
+	f.run(t, env)
+
+	callsRaw := readOptional(t, curlCalls)
+	if n := strings.Count(callsRaw, "/messages"); n != 1 {
+		t.Fatalf("status/started POST count = %d, want 1:\n%s", n, callsRaw)
+	}
+	pendingRaw := strings.TrimSpace(readOptional(t, filepath.Join(f.base, ".worker_pending")))
+	if lines := strings.Split(pendingRaw, "\n"); len(lines) != 1 {
+		t.Fatalf(".worker_pending lines = %d, want 1:\n%s", len(lines), pendingRaw)
+	}
+	agentLog := readOptional(t, filepath.Join(f.base, "spool", "agent-log.jsonl"))
+	if n := strings.Count(agentLog, `"event":"wake.requested"`); n != 1 {
+		t.Fatalf("wake.requested count = %d, want 1:\n%s", n, agentLog)
+	}
+	if n := strings.Count(agentLog, `"event":"wake.failed"`); n != 1 {
+		t.Fatalf("wake.failed count = %d, want 1:\n%s", n, agentLog)
+	}
+}

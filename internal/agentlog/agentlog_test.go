@@ -125,3 +125,46 @@ func TestIngestCorrectsClientClock(t *testing.T) {
 		t.Fatalf("ts = %d, want 1000", logs[0].Ts)
 	}
 }
+
+func TestIngestFoldsNoisyDaemonStarted(t *testing.T) {
+	st := openLogStore(t)
+	ing := New(st, 100, 0)
+	ev := func(id, level, event string) Event {
+		return Event{ID: id, Level: level, Source: "relay-watch", Event: event}
+	}
+
+	res, err := ing.Ingest("alice", Batch{Events: []Event{
+		ev("d1", "info", "watchdog.daemon_started"),
+		ev("d2", "info", "watchdog.daemon_started"),
+		ev("w1", "warn", "watchdog.daemon_crash_loop"),
+	}}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Accepted != 2 || res.Duplicates != 1 {
+		t.Fatalf("first batch: %+v", res)
+	}
+
+	// Second batch within 1h containing only daemon_started folds cleanly without DB write.
+	res2, err := ing.Ingest("alice", Batch{Events: []Event{ev("d3", "info", "watchdog.daemon_started")}}, 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Accepted != 0 || res2.Duplicates != 1 {
+		t.Fatalf("folded batch: %+v", res2)
+	}
+
+	// After 1h window, one more daemon_started is accepted.
+	res3, err := ing.Ingest("alice", Batch{Events: []Event{ev("d4", "info", "watchdog.daemon_started")}}, 1000+3601)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res3.Accepted != 1 || res3.Duplicates != 0 {
+		t.Fatalf("post-window batch: %+v", res3)
+	}
+
+	_, total, err := st.ListAgentLogsPage(store.AgentLogFilter{PeerID: "alice"}, 20, 0)
+	if err != nil || total != 3 {
+		t.Fatalf("stored total=%d err=%v, want 3", total, err)
+	}
+}

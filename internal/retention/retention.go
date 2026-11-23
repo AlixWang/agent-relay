@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/AlixWang/agent-relay/internal/store"
@@ -46,6 +47,20 @@ func (r *Runner) RunOnce(now int64) (map[string]int64, error) {
 		stats["audit_noise_purged"] = purge.AutoWakeSuccess + purge.PeerOffline
 		stats["audit_auto_wake_purged"] = purge.AutoWakeSuccess
 		stats["audit_peer_offline_purged"] = purge.PeerOffline
+	}
+	if purge2, err := r.st.PurgeLogNoiseV2(now); err != nil {
+		return stats, err
+	} else if purge2 != nil && !purge2.AlreadyDone {
+		total := purge2.FuseTripped + purge2.AutoWake502 + purge2.PeerOffline +
+			purge2.RetentionSkipped + purge2.AgentDaemonStarted
+		if total > 0 {
+			stats["log_noise_purged"] = total
+			stats["audit_fuse_tripped_purged"] = purge2.FuseTripped
+			stats["audit_auto_wake_502_purged"] = purge2.AutoWake502
+			stats["audit_peer_offline_v2_purged"] = purge2.PeerOffline
+			stats["audit_retention_skipped_purged"] = purge2.RetentionSkipped
+			stats["agent_daemon_started_purged"] = purge2.AgentDaemonStarted
+		}
 	}
 	msgCutoff := now - int64(r.policy.MessageTTLDays)*86400
 	if r.policy.MessageTTLDays > 0 {
@@ -143,23 +158,23 @@ func (r *Runner) archiveOldMessages(cutoff, now int64) (archived, deleted, skipp
 		}
 	}
 	for _, root := range roots {
-		msgs, err := r.st.ThreadMessages(root, scanCap+1)
-		if err != nil {
-			return 0, 0, skipped, err
-		}
-		if len(msgs) > scanCap {
-			skipped++
-		}
 		// Pin the whole thread when its newest message is still inside the
-		// retention window. ThreadMessages returns the oldest page, so use
-		// LastNInThread for the newest row; taking msgs[len-1] only worked
-		// for threads shorter than the scan cap.
+		// retention window. Check the newest message BEFORE scanning the
+		// thread so an active thread with >scanCap messages never triggers a
+		// false-positive retention.skipped audit warning.
 		newest, err := r.st.LastNInThread(root, 1)
 		if err != nil {
 			return 0, 0, skipped, err
 		}
 		if len(newest) > 0 && newest[0].CreatedAt >= cutoff {
 			continue
+		}
+		msgs, err := r.st.ThreadMessages(root, scanCap+1)
+		if err != nil {
+			return 0, 0, skipped, err
+		}
+		if len(msgs) > scanCap {
+			skipped++
 		}
 		for _, m := range msgs {
 			if m.CreatedAt > cutoff {
@@ -230,6 +245,32 @@ func (r *Runner) fullyAcked(m *store.Message, active map[string]bool) (bool, err
 				continue
 			}
 			acked, err := r.st.IsAcked(m.Seq, peerID)
+			if err != nil {
+				return false, err
+			}
+			if !acked {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	if strings.HasPrefix(m.Recipient, "grp_") {
+		room, err := r.st.GetRoom(m.Recipient)
+		if err != nil {
+			return false, err
+		}
+		if room == nil || room.ArchivedAt > 0 {
+			return true, nil
+		}
+		members, err := r.st.ListRoomMembers(m.Recipient)
+		if err != nil {
+			return false, err
+		}
+		for _, mem := range members {
+			if mem.PeerID == m.Sender || !active[mem.PeerID] || m.Seq <= mem.StartSeq {
+				continue
+			}
+			acked, err := r.st.IsAcked(m.Seq, mem.PeerID)
 			if err != nil {
 				return false, err
 			}

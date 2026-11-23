@@ -15,13 +15,36 @@ import (
 
 const (
 	// noiseVerifyBudget is the hard ceiling for one whole verification: token
-	// chain + at most three dial/handshake/RPC attempts. It is not per attempt.
-	noiseVerifyBudget = 25 * time.Second
+	// chain + up to three dial/handshake/RPC attempts. 30s leaves enough room
+	// for a cold-waking VM that returns 502 for ~10s before Noise is ready.
+	noiseVerifyBudget = 30 * time.Second
 	noiseTokenTimeout = 4 * time.Second
 	noiseDialTimeout  = 6 * time.Second
 	noiseHandshakeTMO = 6 * time.Second
 	noiseRPCTimeout   = 4 * time.Second
 )
+
+// noiseDial5xxDelays spaces out retries when the hatch WSS proxy returns
+// 502/503/504/429 while a woken VM is still booting (~10-15s cold resume).
+// Overridable in tests so retry tests stay sub-second.
+var noiseDial5xxDelays = []time.Duration{3 * time.Second, 6 * time.Second}
+
+func noiseRetryDelay(attempt int, last *noiseError) time.Duration {
+	if last != nil && last.Stage == "dial" {
+		switch last.Class {
+		case "502", "503", "504", "429":
+			idx := attempt - 2
+			if idx < 0 {
+				idx = 0
+			}
+			if idx >= len(noiseDial5xxDelays) {
+				idx = len(noiseDial5xxDelays) - 1
+			}
+			return noiseDial5xxDelays[idx]
+		}
+	}
+	return time.Duration(attempt-1) * time.Second // 1s, then 2s
+}
 
 // verifyNoise proves that a 200 wake request actually reached a live VM:
 // take one hatch token, then up to three dials completing a Noise XX handshake
@@ -44,7 +67,7 @@ func (s *Service) verifyNoise(ctx context.Context, res *renewResult, sess *sessi
 	for attempt := 1; attempt <= noiseMaxAttempts; attempt++ {
 		attempts = attempt
 		if attempt > 1 {
-			delay := time.Duration(attempt-1) * time.Second // 1s, then 2s
+			delay := noiseRetryDelay(attempt, last)
 			timer := time.NewTimer(delay)
 			select {
 			case <-budget.Done():
