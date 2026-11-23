@@ -426,7 +426,7 @@ func TestActiveLargeThreadNotReportedSkipped(t *testing.T) {
 			ts = now - 60 // newest message inside TTL keeps the thread active
 		}
 		_, err := st.InsertMessage(&store.Message{
-			ID: "m-" + string(rune('a'+i/26)) + string(rune('a'+i%26)) + "-" + string(rune('0'+i%10)),
+			ID:     "m-" + string(rune('a'+i/26)) + string(rune('a'+i%26)) + "-" + string(rune('0'+i%10)),
 			Sender: "operator", Recipient: "alice", RootID: "op/alice",
 			Kind: "status", Payload: "ok", CreatedAt: ts,
 		})

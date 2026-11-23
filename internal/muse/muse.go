@@ -348,13 +348,13 @@ func New(st store.Store, opt Options) (*Service, error) {
 		backoff:           map[string]int64{},
 		wakeEvents:        map[string]int64{},
 		lastAutoWakeAudit: map[string]autoWakeAuditStamp{},
-		chatJobs:     map[string]*ChatJob{},
-		chatActive:   map[string]string{},
-		chatRequests: map[string]chatIdem{},
-		chatSem:      make(chan struct{}, opt.ChatMaxConcurrent),
-		chatRuntime:  opt.DirectChatEnabled,
-		chatPerMin:   map[string][]int64{},
-		chatPerHour:  map[string][]int64{},
+		chatJobs:          map[string]*ChatJob{},
+		chatActive:        map[string]string{},
+		chatRequests:      map[string]chatIdem{},
+		chatSem:           make(chan struct{}, opt.ChatMaxConcurrent),
+		chatRuntime:       opt.DirectChatEnabled,
+		chatPerMin:        map[string][]int64{},
+		chatPerHour:       map[string][]int64{},
 	}
 	s.verifyWake = s.verifyNoise
 	if created {
