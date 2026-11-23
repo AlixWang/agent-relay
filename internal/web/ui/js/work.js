@@ -85,7 +85,7 @@ export async function refreshWork() {
     tbody.innerHTML = items.map((t) => {
       const meta = stageMeta(t.effective_stage || t.stage);
       const offline = t.assignee_online === false ? `<span class="badge bad xs">${icon('alert', 'xs')}离线</span>` : '';
-      return `<tr class="clickable" data-root="${esc(t.thread_root)}">
+      return `<tr class="clickable" data-root="${esc(t.thread_root)}" data-stage-tone="${esc(meta.tone)}">
         <td>
           <div class="work-summary">
             <strong title="${esc(t.last_preview || '')}">${esc(t.last_preview || '（无消息）')}</strong>
@@ -153,6 +153,7 @@ async function refreshWorkCounts() {
       .filter(([k]) => k.startsWith('person/'))
       .reduce((n, [, v]) => n + (v || 0), 0);
     setText('workAttention', totalAttention);
+    $('workAttention')?.closest('.stat')?.classList.toggle('is-pulse', totalAttention > 0);
     setText('workWorking', counts.working || 0);
     setText('workOpen', open.total || 0);
     setText('workFcAttention', totalAttention);

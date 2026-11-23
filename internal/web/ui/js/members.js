@@ -25,7 +25,7 @@ const statusBadge = (st) => {
 const promptBadge = (p) => {
   const v = p.prompt_version ?? 0;
   if (!serverPromptVersion || v >= serverPromptVersion) {
-    return `<span class="badge ok mono" title="指令版本">v${v}</span>`;
+    return `<span class="ver-chip" title="指令版本">v${v}</span>`;
   }
   const when = p.prompt_updated_at ? fmtTime(p.prompt_updated_at) : '从未';
   return `<span class="badge warn mono" title="确认于 ${esc(when)} → 最新 v${serverPromptVersion}">v${v} → v${serverPromptVersion}</span>`;
@@ -39,23 +39,25 @@ const memoryBadge = (p) => {
   }
   const when = p.memory_reconciled_at ? fmtTime(p.memory_reconciled_at) : '未知';
   const tip = `v${mv} · ${when}\n${p.memory_note || ''}`;
-  const cls = mv >= pv ? 'ok' : 'warn';
-  return `<span class="badge ${cls} mono" title="${esc(tip)}">mem v${mv}</span>`;
+  if (mv >= pv) {
+    return `<span class="ver-chip" title="${esc(tip)}">mem v${mv}</span>`;
+  }
+  return `<span class="badge warn mono" title="${esc(tip)}">mem v${mv}</span>`;
 };
 
 const clientBadge = (p) => {
   const v = p.client_version || '';
-  if (!v) return '<span class="muted xs">—</span>';
+  if (!v) return '';
   const rev = p.client_rev || '';
   const when = p.client_updated_at ? fmtTime(p.client_updated_at) : '未知';
   if (rev && serverReceiverRev) {
     if (rev === serverReceiverRev) {
-      return `<span class="badge ok mono" title="接收端与服务端同源码版本（${esc(v)}）">${esc(v)} <em class="muted">rev ${esc(rev)}</em></span>`;
+      return `<span class="ver-chip" title="接收端与服务端同源码版本（${esc(v)} · rev ${esc(rev)}）">${esc(v)}</span>`;
     }
     return `<span class="badge warn mono" title="上报于 ${esc(when)} · rev ${esc(rev)} → 最新 rev ${esc(serverReceiverRev)}（${esc(serverClientVersion)}）">${esc(v)} → 新版</span>`;
   }
   if (!rev && (!serverClientVersion || v === serverClientVersion)) {
-    return `<span class="badge ok mono" title="客户端版本（未上报 rev）">${esc(v)}</span>`;
+    return `<span class="ver-chip" title="客户端版本（未上报 rev）">${esc(v)}</span>`;
   }
   if (!rev) {
     return `<span class="badge warn mono" title="上报于 ${esc(when)} → 最新 ${esc(serverClientVersion)}（未上报 rev）">${esc(v)} → 新版</span>`;
@@ -69,14 +71,14 @@ const clientBadge = (p) => {
 const scriptBadge = (p) => {
   const v = p.script_version || '';
   if (!v) {
-    return '<span class="badge" title="未上报脚本版本（旧脚本；服务端不会催更）">脚本 —</span>';
+    return '<span class="ver-chip" title="未上报脚本版本（旧脚本；服务端不会催更）">脚本 —</span>';
   }
   const kind = p.script_kind || 'muse-watch';
   const when = p.script_updated_at ? fmtTime(p.script_updated_at) : '未知';
   if (serverScriptVersion && v !== serverScriptVersion && kind === 'muse-watch') {
     return `<span class="badge warn mono" title="上报于 ${esc(when)} → 最新 v${esc(serverScriptVersion)}">脚本 v${esc(v)} → v${esc(serverScriptVersion)}</span>`;
   }
-  return `<span class="badge ok mono" title="${esc(kind)} · 上报于 ${esc(when)}">脚本 v${esc(v)}</span>`;
+  return `<span class="ver-chip" title="${esc(kind)} · 上报于 ${esc(when)}">脚本 v${esc(v)}</span>`;
 };
 
 // Resource hub sync (§4.12): only shown once the peer has something to sync
@@ -89,7 +91,7 @@ export const resourcesBadge = (p) => {
   }
   if (!rev) return '';
   const when = p.resources_updated_at ? fmtTime(p.resources_updated_at) : '未知';
-  return `<span class="badge ok" title="资源清单已同步 · ${esc(when)}">${icon('package', 'xs')}资源</span>`;
+  return `<span class="ver-chip" title="资源清单已同步 · ${esc(when)}">资源 ✓</span>`;
 };
 
 const transportBadge = (p) => {
@@ -282,8 +284,8 @@ export async function refreshPeers() {
         </td>
         <td>${transportBadge(p)}</td>
         <td>
-          <div class="ver-stack">
-            <span class="badge mono" title="协议版本">p${p.protocol_version ?? '?'}</span>
+          <div class="ver-matrix">
+            <span class="ver-chip" title="协议版本">p${p.protocol_version ?? '?'}</span>
             ${promptBadge(p)}
             ${memoryBadge(p)}
             ${clientBadge(p)}

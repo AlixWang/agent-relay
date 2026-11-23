@@ -9,6 +9,7 @@ export let serverReceiverRev = '';
 // Version parsed from the server's embedded watch-layer script (stats). Empty
 // means the build has no parsable WATCH_VERSION; badges then stay neutral.
 export let serverScriptVersion = '';
+export let lastStats = null;
 
 export function showLogin(msg) {
   $('app').hidden = true;
@@ -30,6 +31,7 @@ export function showApp() {
 export async function refreshStats() {
   try {
     const s = await api('/admin/stats');
+    lastStats = s;
     if (s.protocol) {
       const verEl = $('sbVer');
       if (verEl) verEl.textContent = `v${s.protocol} · ${s.client_version || 'dev'}`;
@@ -94,10 +96,32 @@ export async function refreshStats() {
     }
 
     const navResource = $('navResource');
+    const pendingResources = (s.resource_submissions_pending || 0) + (s.resource_takedowns_pending || 0);
     if (navResource) {
-      const pendingResources = (s.resource_submissions_pending || 0) + (s.resource_takedowns_pending || 0);
       navResource.textContent = pendingResources > 0 ? pendingResources : '';
       navResource.hidden = pendingResources === 0;
+    }
+
+    const attentionPill = $('attentionPill');
+    const attentionText = $('attentionText');
+    if (attentionPill && attentionText) {
+      const totalAttention =
+        (s.attention_tickets || 0) +
+        (s.pending_approvals || 0) +
+        (s.muse_needs_reauth || 0) +
+        pendingResources;
+      if (totalAttention > 0) {
+        const target = s.attention_tickets > 0 ? 'work'
+          : s.pending_approvals > 0 ? 'threads'
+          : s.muse_needs_reauth > 0 ? 'muse'
+          : 'resources';
+        attentionText.textContent = `${totalAttention} 项待处理`;
+        attentionPill.hidden = false;
+        attentionPill.onclick = () => setRoute(target);
+      } else {
+        attentionPill.hidden = true;
+        attentionPill.onclick = null;
+      }
     }
 
     if (s.prompt_version) serverPromptVersion = s.prompt_version;

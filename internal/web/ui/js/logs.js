@@ -50,6 +50,23 @@ function readHashFilters() {
   if (q.has('range')) logState.range = q.get('range') || '24h';
 }
 
+function syncAdvFilterUI(autoExpand = false) {
+  const count = (logState.source ? 1 : 0) + (logState.event ? 1 : 0);
+  const badge = $('logAdvBadge');
+  if (badge) {
+    badge.textContent = count > 0 ? String(count) : '';
+    badge.hidden = count === 0;
+  }
+  const row = $('logAdvRow');
+  const toggle = $('logAdvToggle');
+  if (autoExpand && count > 0 && row) row.hidden = false;
+  if (toggle && row) {
+    const open = !row.hidden;
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    toggle.classList.toggle('is-open', open || count > 0);
+  }
+}
+
 // Route entry: reset filters, then apply the hash query so links from the
 // members/workbench tables open the right context.
 export function enterLogs() {
@@ -70,6 +87,9 @@ export function enterLogs() {
     const el = $(id);
     if (el) el.value = value;
   }
+  const advRow = $('logAdvRow');
+  if (advRow) advRow.hidden = !(logState.source || logState.event);
+  syncAdvFilterUI(true);
   loadPeerOptions();
   refreshLogs();
   clearInterval(logTimer);
@@ -140,7 +160,10 @@ function renderRows(entries) {
   tbody.querySelectorAll('tr.log-row').forEach((tr) => {
     tr.onclick = () => {
       const detail = tbody.querySelector(`tr.log-fields[data-for="${tr.dataset.seq}"]`);
-      if (detail) detail.hidden = !detail.hidden;
+      if (detail) {
+        detail.hidden = !detail.hidden;
+        tr.classList.toggle('is-open', !detail.hidden);
+      }
     };
   });
   tbody.querySelectorAll('button[data-copy-json]').forEach((btn) => {
@@ -210,6 +233,7 @@ export function initLogs() {
   if (source) source.onchange = (e) => {
     logState.source = e.target.value;
     logState.page = 1;
+    syncAdvFilterUI();
     refreshLogs();
   };
   const range = $('logRange');
@@ -225,9 +249,19 @@ export function initLogs() {
     eventTimer = setTimeout(() => {
       logState.event = e.target.value.trim();
       logState.page = 1;
+      syncAdvFilterUI();
       refreshLogs();
     }, 300);
   };
+  const advToggle = $('logAdvToggle');
+  if (advToggle) {
+    advToggle.onclick = () => {
+      const row = $('logAdvRow');
+      if (!row) return;
+      row.hidden = !row.hidden;
+      syncAdvFilterUI();
+    };
+  }
   const q = $('logQ');
   let timer = null;
   if (q) q.oninput = (e) => {

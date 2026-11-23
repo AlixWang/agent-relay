@@ -125,6 +125,7 @@ func TestConsoleIDsMatchJS(t *testing.T) {
 		"/js/system.js",
 		"/js/command.js",
 		"/js/muse.js",
+		"/js/palette.js",
 	} {
 		req := httptest.NewRequest("GET", p, nil)
 		rec := httptest.NewRecorder()

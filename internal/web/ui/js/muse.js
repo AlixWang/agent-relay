@@ -298,6 +298,7 @@ function renderMuse() {
   set('museTotal', total);
   set('museOK', f.ok ?? 0);
   set('museReauth', f.needs_reauth ?? 0);
+  $('museReauth')?.closest('.stat')?.classList.toggle('is-pulse', (f.needs_reauth ?? 0) > 0);
   set('museAuto', f.auto_wake ?? 0);
   set('museFcAll', total);
   set('museFcOK', f.ok ?? 0);
@@ -1432,6 +1433,8 @@ export function initMuse() {
   if (chatBack) chatBack.onclick = () => { location.hash = '#muse'; };
   const chatListBtn = $('mchatListBtn');
   if (chatListBtn) chatListBtn.onclick = () => $('mchatLayout')?.classList.toggle('sessions-open');
+  const chatScrim = $('mchatScrim');
+  if (chatScrim) chatScrim.onclick = () => $('mchatLayout')?.classList.remove('sessions-open');
   const chatRuntime = $('museChatRuntime');
   if (chatRuntime) chatRuntime.onchange = toggleChatRuntime;
   window.addEventListener('hashchange', () => {

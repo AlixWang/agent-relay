@@ -121,6 +121,7 @@ func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
 		"/js/system.js",
 		"/js/command.js",
 		"/js/message.js",
+		"/js/palette.js",
 		"/",
 	} {
 		code, body := getRaw(t, f, asset, cookie)

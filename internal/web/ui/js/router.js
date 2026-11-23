@@ -41,9 +41,12 @@ export function setRoute(r) {
   }
 
   currentRoute = cleanRoute;
-  if (!location.hash.startsWith('#' + cleanRoute)) {
-    location.hash = cleanRoute;
+  if (!location.hash.startsWith('#' + cleanRoute) || (r.includes('?') && location.hash !== '#' + r)) {
+    location.hash = r;
   }
+
+  const pal = $('cmdPalette');
+  if (pal?.open) pal.close();
 
   document.querySelectorAll('.sb-link').forEach((l) => {
     l.classList.toggle('active', l.dataset.route === cleanRoute);
@@ -72,7 +75,30 @@ export function setRoute(r) {
   if (handler) handler();
 }
 
+function applySidebarCollapsed(collapsed) {
+  const app = $('app');
+  if (app) app.classList.toggle('sb-collapsed', collapsed);
+  if (collapsed) document.documentElement.dataset.sb = 'collapsed';
+  else delete document.documentElement.dataset.sb;
+  const btn = $('sbCollapseBtn');
+  if (btn) {
+    btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    btn.setAttribute('data-tip', collapsed ? '展开侧边栏' : '折叠侧边栏');
+    btn.setAttribute('aria-label', collapsed ? '展开侧边栏' : '折叠侧边栏');
+  }
+  try { localStorage.setItem('ar-sb-collapsed', collapsed ? '1' : '0'); } catch {}
+}
+
+export function toggleSidebarCollapsed() {
+  const cur = $('app')?.classList.contains('sb-collapsed') || document.documentElement.dataset.sb === 'collapsed';
+  applySidebarCollapsed(!cur);
+}
+
 export function initNavigation() {
+  let savedCollapsed = false;
+  try { savedCollapsed = localStorage.getItem('ar-sb-collapsed') === '1'; } catch {}
+  applySidebarCollapsed(savedCollapsed);
+
   document.querySelectorAll('.sb-link').forEach((l) => {
     const href = l.getAttribute('href') || '';
     if (!href.startsWith('#')) return;
@@ -86,6 +112,20 @@ export function initNavigation() {
     const clean = raw.split('?')[0];
     if (clean && clean !== currentRoute) setRoute(raw);
   });
+
+  const sbCollapseBtn = $('sbCollapseBtn');
+  if (sbCollapseBtn) sbCollapseBtn.onclick = toggleSidebarCollapsed;
+
+  const onlinePill = $('onlinePill');
+  if (onlinePill) {
+    onlinePill.onclick = () => setRoute('members');
+    onlinePill.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        setRoute('members');
+      }
+    };
+  }
 
   const menuBtn = $('menuBtn');
   const scrim = $('sbScrim');
