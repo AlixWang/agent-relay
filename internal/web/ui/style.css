@@ -87,10 +87,19 @@ html {
   --accent-soft: rgba(94, 106, 210, 0.14);
   --accent-ring: rgba(129, 140, 248, 0.28);
 
-  /* Brand Coral Pulse (from logo.svg throat/wing) */
+  /* Brand Coral Pulse (from logo.svg core) */
   --pulse: #fb7185;
   --pulse-soft: rgba(244, 63, 94, 0.14);
   --pulse-border: rgba(244, 63, 94, 0.32);
+
+  /* Logo badge tokens */
+  --logo-bg: linear-gradient(145deg, #212944 0%, #121626 100%);
+  --logo-border: rgba(165, 180, 252, 0.22);
+  --logo-arc-hi: #a5b4fc;
+  --logo-arc-lo: #5e6ad2;
+  --logo-echo: #818cf8;
+  --logo-core-hi: #ff7a96;
+  --logo-core-lo: #f43f5e;
 
   /* Telemetry semantics */
   --ok: #34d399;
@@ -144,6 +153,15 @@ html {
   --pulse: #e11d48;
   --pulse-soft: rgba(225, 29, 72, 0.09);
   --pulse-border: rgba(225, 29, 72, 0.26);
+
+  /* Logo badge tokens */
+  --logo-bg: linear-gradient(145deg, #ffffff 0%, #edf0ff 100%);
+  --logo-border: rgba(79, 91, 213, 0.22);
+  --logo-arc-hi: #6366f1;
+  --logo-arc-lo: #434ec0;
+  --logo-echo: #4f5bd5;
+  --logo-core-hi: #fb7185;
+  --logo-core-lo: #e11d48;
 
   --ok: #0f7647;
   --warn: #b45309;
@@ -223,9 +241,25 @@ a { color: inherit; }
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--r-md);
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--logo-bg);
+  border: 1px solid var(--logo-border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), var(--shadow-sm);
 }
-.logo.lg { width: 48px; height: 48px; }
+[data-theme="light"] .logo {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95), 0 2px 8px rgba(79, 91, 213, 0.1);
+}
+.logo.lg {
+  width: 48px;
+  height: 48px;
+  padding: 3px;
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 8px 24px rgba(94, 106, 210, 0.22);
+}
+[data-theme="light"] .logo.lg {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.96), 0 8px 24px rgba(79, 91, 213, 0.14);
+}
 .logo .logo-mark { width: 100%; height: 100%; display: block; }
 
 /* Login */
