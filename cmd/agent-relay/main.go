@@ -154,6 +154,10 @@ func main() {
 		ChatPerPeerPerMin:   cfg.MuseChatPerPeerPerMinute,
 		ChatPerPeerPerHour:  cfg.MuseChatPerPeerPerHour,
 		ChatGlobalPerMinute: cfg.MuseChatGlobalPerMinute,
+
+		TaskNudgeEnabled:  cfg.MuseTaskNudgeEnabled,
+		TaskNudgeAfter:    time.Duration(cfg.MuseTaskNudgeAfterSecs) * time.Second,
+		TaskNudgeCooldown: time.Duration(cfg.MuseTaskNudgeCooldownSecs) * time.Second,
 	})
 	if museErr != nil {
 		museSvc = nil
@@ -241,6 +245,9 @@ func main() {
 	go retentionLoop(ctx, st, cfg, resSvc)
 	if museSvc != nil && cfg.MuseKeepaliveSecs > 0 {
 		go museLoop(ctx, museSvc, cfg)
+	}
+	if museSvc != nil && cfg.MuseDirectChatEnabled && cfg.MuseTaskNudgeEnabled {
+		go museNudgeLoop(ctx, museSvc)
 	}
 
 	log.Printf("agent-relay v%d listening on %s (db=%s)", serverVersion, bind, dbPath)
@@ -359,6 +366,19 @@ func museLoop(ctx context.Context, m *muse.Service, cfg *config.Config) {
 	}
 }
 
+func museNudgeLoop(ctx context.Context, m *muse.Service) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			m.SweepStalledTasks(ctx)
+		}
+	}
+}
+
 func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resSvc *resources.Service) {
 	r := retention.New(st, retention.Policy{
 		MessageTTLDays:         cfg.MessageTTLDays,
@@ -417,14 +437,14 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resS
 func compactDB(st store.Store, stats map[string]int64) {
 	var deleted int64
 	for _, k := range []string{
-		"audit_noise_purged", "log_noise_purged", "messages_deleted",
+		"audit_noise_purged", "log_noise_purged", "status_spam_purged", "messages_deleted",
 		"peers_pruned", "audit_pruned", "agent_logs_pruned",
 		"agent_logs_trimmed", "permissions_pruned", "tickets_pruned",
 	} {
 		deleted += stats[k]
 	}
 	freelist, _ := st.FreelistSize()
-	if deleted >= 50 || stats["audit_noise_purged"] > 0 || stats["log_noise_purged"] > 0 || freelist >= 1<<20 {
+	if deleted >= 50 || stats["audit_noise_purged"] > 0 || stats["log_noise_purged"] > 0 || stats["status_spam_purged"] > 0 || freelist >= 1<<20 {
 		if err := st.Vacuum(); err != nil {
 			log.Printf("retention: vacuum: %v", err)
 		}

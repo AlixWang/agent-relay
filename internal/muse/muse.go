@@ -99,6 +99,11 @@ type Options struct {
 	ChatPerPeerPerMin   int
 	ChatPerPeerPerHour  int
 	ChatGlobalPerMinute int
+
+	// Tiered task warm-wake nudge.
+	TaskNudgeEnabled  bool
+	TaskNudgeAfter    time.Duration
+	TaskNudgeCooldown time.Duration
 }
 
 // Account is the write-only-safe view of one authorization. It intentionally
@@ -231,6 +236,9 @@ type Service struct {
 	// at worst allow one extra wake.
 	wakeEvents        map[string]int64
 	lastAutoWakeAudit map[string]autoWakeAuditStamp
+	nudgedTasks       map[string]int64
+	lastPeerNudge     map[string]int64
+	nudging           map[string]bool
 
 	// Direct-chat state. chatMu protects the job/lease maps and the runtime
 	// switch; it never covers network I/O or a job wait, so a 180s dialogue
@@ -330,6 +338,12 @@ func New(st store.Store, opt Options) (*Service, error) {
 	if opt.ChatGlobalPerMinute <= 0 || opt.ChatGlobalPerMinute > chatRateGlobalMinute {
 		opt.ChatGlobalPerMinute = chatRateGlobalMinute
 	}
+	if opt.TaskNudgeAfter <= 0 {
+		opt.TaskNudgeAfter = 180 * time.Second
+	}
+	if opt.TaskNudgeCooldown <= 0 {
+		opt.TaskNudgeCooldown = 600 * time.Second
+	}
 	s := &Service{
 		st:         st,
 		opts:       opt,
@@ -348,6 +362,9 @@ func New(st store.Store, opt Options) (*Service, error) {
 		backoff:           map[string]int64{},
 		wakeEvents:        map[string]int64{},
 		lastAutoWakeAudit: map[string]autoWakeAuditStamp{},
+		nudgedTasks:       map[string]int64{},
+		lastPeerNudge:     map[string]int64{},
+		nudging:           map[string]bool{},
 		chatJobs:          map[string]*ChatJob{},
 		chatActive:        map[string]string{},
 		chatRequests:      map[string]chatIdem{},
@@ -983,6 +1000,50 @@ func (s *Service) MaybeWakeOffline(peerID string, offlineSecs int64) {
 		return
 	}
 	now := s.now().Unix()
+	cooldown := int64(s.opts.WakeCooldown / time.Second)
+	if cooldown <= 0 {
+		cooldown = 300
+	}
+	if last := s.wakeEventAt(a.ID); last > 0 && now-last < cooldown {
+		return
+	}
+	s.mu.Lock()
+	if s.waking[peerID] {
+		s.mu.Unlock()
+		return
+	}
+	s.waking[peerID] = true
+	s.mu.Unlock()
+	go s.autoWake(a.ID, peerID)
+}
+
+// MaybeWakeForTask is the Tier-1 immediate wake hook when a direct task is
+// enqueued. Unlike MaybeWakeOffline (which waits for online_timeout_secs=300s),
+// it wakes immediately when the peer has been quiet for >120s or its VM is
+// known to be cold (SUSPENDED/STOPPED).
+func (s *Service) MaybeWakeForTask(peerID string) {
+	if s == nil || !s.opts.AutoWake || peerID == "" {
+		return
+	}
+	a, err := s.st.GetMuseAccountByPeer(peerID)
+	if err != nil || a == nil {
+		return
+	}
+	if !a.Enabled || !a.AutoWake || a.AuthState == "needs_reauth" || a.VMState == "DISABLED" {
+		return
+	}
+	if s.chatLeaseActive(a.ID) {
+		return
+	}
+	peer, err := s.st.GetPeer(peerID)
+	if err != nil || peer == nil || peer.Status == "suspended" {
+		return
+	}
+	now := s.now().Unix()
+	coldVM := a.VMState == "SUSPENDED" || a.VMState == "STOPPED"
+	if !coldVM && peer.LastSeen > 0 && now-peer.LastSeen <= 120 {
+		return
+	}
 	cooldown := int64(s.opts.WakeCooldown / time.Second)
 	if cooldown <= 0 {
 		cooldown = 300

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/AlixWang/agent-relay/internal/auth"
 	"github.com/AlixWang/agent-relay/internal/store"
 )
 
@@ -61,6 +63,12 @@ func (r *Runner) RunOnce(now int64) (map[string]int64, error) {
 			stats["audit_retention_skipped_purged"] = purge2.RetentionSkipped
 			stats["agent_daemon_started_purged"] = purge2.AgentDaemonStarted
 		}
+	}
+	if purge3, err := r.st.PurgeStatusSpamV1(now); err != nil {
+		return stats, err
+	} else if purge3 != nil && !purge3.AlreadyDone && purge3.Deleted > 0 {
+		stats["status_spam_purged"] = purge3.Deleted
+		stats["status_spam_groups"] = purge3.Groups
 	}
 	msgCutoff := now - int64(r.policy.MessageTTLDays)*86400
 	if r.policy.MessageTTLDays > 0 {
@@ -157,6 +165,12 @@ func (r *Runner) archiveOldMessages(cutoff, now int64) (archived, deleted, skipp
 			active[p.ID] = true
 		}
 	}
+	var opGlobalRead int64
+	if raw, err := r.st.GetSetting("operator_read_seq"); err == nil && raw != "" {
+		opGlobalRead, _ = strconv.ParseInt(raw, 10, 64)
+	}
+	opPeerReads := map[string]int64{}
+
 	for _, root := range roots {
 		// Pin the whole thread when its newest message is still inside the
 		// retention window. Check the newest message BEFORE scanning the
@@ -189,7 +203,7 @@ func (r *Runner) archiveOldMessages(cutoff, now int64) (archived, deleted, skipp
 				toArchive = append(toArchive, m)
 				continue
 			}
-			ok, err := r.fullyAcked(m, active)
+			ok, err := r.fullyAcked(m, active, opGlobalRead, opPeerReads)
 			if err != nil {
 				return 0, 0, skipped, err
 			}
@@ -238,7 +252,24 @@ func (r *Runner) archiveOldMessages(cutoff, now int64) (archived, deleted, skipp
 	return len(toArchive), len(toArchive), skipped, nil
 }
 
-func (r *Runner) fullyAcked(m *store.Message, active map[string]bool) (bool, error) {
+func (r *Runner) fullyAcked(m *store.Message, active map[string]bool, opGlobalRead int64, opPeerReads map[string]int64) (bool, error) {
+	if m.Kind == "status" {
+		// Lifecycle status logs older than cutoff can be archived once the
+		// thread/ticket is no longer open (OpenTicketMessageSeqs still pins
+		// any status row belonging to an open ticket).
+		return true, nil
+	}
+	if m.Recipient == auth.OperatorID {
+		// Operator reads advance settings watermarks instead of writing acks.
+		peerRead, ok := opPeerReads[m.Sender]
+		if !ok {
+			if raw, err := r.st.GetSetting("operator_read_seq:" + m.Sender); err == nil && raw != "" {
+				peerRead, _ = strconv.ParseInt(raw, 10, 64)
+			}
+			opPeerReads[m.Sender] = peerRead
+		}
+		return m.Seq <= opGlobalRead || m.Seq <= peerRead, nil
+	}
 	if m.Recipient == "*" {
 		for peerID := range active {
 			if peerID == m.Sender {

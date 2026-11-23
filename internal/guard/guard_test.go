@@ -124,11 +124,21 @@ func TestLoopGuardExemptsOperatorDM(t *testing.T) {
 
 	// The assistant's short ack opens the DM thread op/alice.
 	sendOK(t, g, st, &Envelope{ID: "a1", To: auth.OperatorID, From: "alice", Kind: "result", Payload: "收到"}, now)
-	// A short human message in that thread must not read as a courtesy ack.
-	sendOK(t, g, st, &Envelope{ID: "o1", To: "alice", From: auth.OperatorID, Kind: "task", Payload: "你好"}, now+1)
+	// A short human chat message in that thread must not read as a courtesy ack.
+	sendOK(t, g, st, &Envelope{ID: "o1", To: "alice", From: auth.OperatorID, Kind: "chat", Payload: "你好"}, now+1)
 	// The assistant replying briefly to the human must pass too.
 	if _, err := g.Check(&Envelope{ID: "a2", To: auth.OperatorID, From: "alice", Kind: "result", Payload: "收到"}, now+2); err != nil {
 		t.Fatalf("assistant reply after operator DM hit loop guard: %v", err)
+	}
+	// A per-round operator task (op/alice/o2) followed by an explicit short reply also passes.
+	rootTask := sendOK(t, g, st, &Envelope{ID: "o2", To: "alice", From: auth.OperatorID, Kind: "task", Payload: "你好"}, now+3)
+	if rootTask != "op/alice/o2" {
+		t.Fatalf("operator task root = %q, want op/alice/o2", rootTask)
+	}
+	if v, err := g.Check(&Envelope{ID: "a3", To: auth.OperatorID, From: "alice", Kind: "result", InReplyTo: "o2", Payload: "收到"}, now+4); err != nil {
+		t.Fatalf("assistant reply to operator task hit loop guard: %v", err)
+	} else if v.RootID != "op/alice/o2" {
+		t.Fatalf("reply root = %q, want op/alice/o2", v.RootID)
 	}
 }
 
@@ -436,5 +446,95 @@ func TestFuseTrippedAuditThrottled(t *testing.T) {
 	rows, _ = st.ListAudit("alice", "fuse.tripped", 0, 20)
 	if len(rows) != 2 {
 		t.Fatalf("fuse.tripped rows after 10m = %d, want 2", len(rows))
+	}
+}
+
+func TestOperatorThreadExemptFromFuseAndStatusIgnored(t *testing.T) {
+	st := openTestStore(t)
+	lim := Limits{
+		FuseMaxMessages:     3,
+		FuseMaxAgeSecs:      60,
+		RoomFuseMaxMessages: 3,
+		RoomFuseWindowSecs:  3600,
+		RatePerMinute:       1000,
+	}
+	g := New(st, lim)
+	now := time.Now().Unix()
+
+	// Seed 10 old non-status messages in op/lisa (far above FuseMaxMessages=3 and older than 60s).
+	for i := 0; i < 10; i++ {
+		if _, err := st.InsertMessage(&store.Message{
+			ID: "old-" + string(rune('a'+i)), Sender: "lisa", Recipient: auth.OperatorID,
+			Kind: "chat", RootID: "op/lisa", Payload: "old history", CreatedAt: now - 10000, ApprovalState: "n/a",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Operator tasks start an isolated round op/lisa/<id> and are never fused.
+	v, err := g.Check(&Envelope{ID: "op-t1", To: "lisa", From: auth.OperatorID, Kind: "task", Payload: "run check"}, now)
+	if err != nil || v.RootID != "op/lisa/op-t1" {
+		t.Fatalf("operator task: v=%+v err=%v", v, err)
+	}
+	// Operator chat on legacy op/lisa is also never fused.
+	if v2, err := g.Check(&Envelope{ID: "op-c1", To: "lisa", From: auth.OperatorID, Kind: "chat", Payload: "chat check"}, now); err != nil || v2.RootID != "op/lisa" {
+		t.Fatalf("operator chat: v=%+v err=%v", v2, err)
+	}
+
+	// Status messages must not trip the whole-thread fuse on peer threads.
+	sendOK(t, g, st, &Envelope{ID: "pt1", To: "bob", From: "alice", Kind: "task",
+		Payload: "distinct peer task opening thread padding xxxxxxxxxxxxxxxxxxxxxx"}, now)
+	for i := 0; i < 10; i++ {
+		if _, err := st.InsertMessage(&store.Message{
+			ID: "pst-" + string(rune('a'+i)), Sender: "bob", Recipient: "alice",
+			Kind: "status", Status: "progress", InReplyTo: "pt1", RootID: "alice/pt1",
+			Payload: "working", CreatedAt: now + int64(i), ApprovalState: "n/a",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Only 1 non-status message exists in alice/pt1 (< FuseMaxMessages=3), so result passes.
+	if _, err := g.Check(&Envelope{ID: "pr1", To: "alice", From: "bob", Kind: "result", InReplyTo: "pt1",
+		Payload: "finished checking everything with unique result padding xxxxxxxxxx"}, now+20); err != nil {
+		t.Fatalf("status messages wrongly counted toward thread fuse: %v", err)
+	}
+}
+
+func TestStatusSpamGuardAndBroadcastHandshakeRejected(t *testing.T) {
+	st := openTestStore(t)
+	g := New(st, Limits{FuseMaxMessages: 50, FuseMaxAgeSecs: 3600, RatePerMinute: 1000})
+	now := time.Now().Unix()
+
+	// Broadcast tasks cannot receive 1:1 status handshakes.
+	bRoot := sendOK(t, g, st, &Envelope{ID: "bcast-1", To: "*", From: auth.OperatorID, Kind: "task", Payload: "upgrade"}, now)
+	if bRoot != "op/*/bcast-1" {
+		t.Fatalf("broadcast root = %q, want op/*/bcast-1", bRoot)
+	}
+	if code := rejectCode(t, mustErr(g.Check(&Envelope{
+		ID: "bs1", To: auth.OperatorID, From: "alice", Kind: "status", Status: "started",
+		InReplyTo: "bcast-1", Payload: "started",
+	}, now+1))); code != "bad_permission_ref" {
+		t.Fatalf("broadcast status code = %s, want bad_permission_ref", code)
+	}
+	// Broadcast result from peer lands in op/<peer>/<broadcast_id>.
+	if v, err := g.Check(&Envelope{
+		ID: "br1", To: auth.OperatorID, From: "alice", Kind: "result",
+		InReplyTo: "bcast-1", Payload: "upgraded to 1.2.0",
+	}, now+2); err != nil || v.RootID != "op/alice/bcast-1" {
+		t.Fatalf("broadcast result: v=%+v err=%v", v, err)
+	}
+
+	// 1:1 operator task: started is throttled within 10m and blocked once terminal.
+	sendOK(t, g, st, &Envelope{ID: "t1", To: "alice", From: auth.OperatorID, Kind: "task", Payload: "do work"}, now)
+	if _, err := g.Check(&Envelope{ID: "s1", To: auth.OperatorID, From: "alice", Kind: "status", Status: "started", InReplyTo: "t1", Payload: "started"}, now+1); err != nil {
+		t.Fatalf("first started: %v", err)
+	}
+	_, _ = st.InsertMessage(&store.Message{ID: "s1", Sender: "alice", Recipient: auth.OperatorID, Kind: "status", Status: "started", InReplyTo: "t1", RootID: "op/alice/t1", Payload: "started", CreatedAt: now + 1, ApprovalState: "n/a"})
+	if code := rejectCode(t, mustErr(g.Check(&Envelope{ID: "s2", To: auth.OperatorID, From: "alice", Kind: "status", Status: "started", InReplyTo: "t1", Payload: "started"}, now+5))); code != "status_throttled" {
+		t.Fatalf("duplicate started within 10m: %s", code)
+	}
+	// After result/cancelled, further started or cancelled is rejected as terminal.
+	_, _ = st.InsertMessage(&store.Message{ID: "r1", Sender: "alice", Recipient: auth.OperatorID, Kind: "result", InReplyTo: "t1", RootID: "op/alice/t1", Payload: "done", CreatedAt: now + 10, ApprovalState: "n/a"})
+	if code := rejectCode(t, mustErr(g.Check(&Envelope{ID: "s3", To: auth.OperatorID, From: "alice", Kind: "status", Status: "cancelled", InReplyTo: "t1", Payload: "timeout"}, now+2000))); code != "status_already_terminal" {
+		t.Fatalf("cancelled after result: %s", code)
 	}
 }

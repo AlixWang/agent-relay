@@ -517,3 +517,62 @@ func TestPurgeLogNoiseV2Once(t *testing.T) {
 		t.Fatalf("second run purged again: %+v", stats2)
 	}
 }
+
+func TestArchiveOperatorReadMessagesAndStatus(t *testing.T) {
+	st := openTest(t)
+	dir := t.TempDir()
+	now := int64(100 * 86400)
+	old := now - 35*86400
+
+	// Per-round operator task thread: acked by alice, result read by operator via watermark, plus old status.
+	taskSeq, err := st.InsertMessage(&store.Message{
+		ID: "op-old-1", Sender: "operator", Recipient: "alice", Kind: "task",
+		RootID: "op/alice/op-old-1", Payload: "old task", CreatedAt: old, ApprovalState: "n/a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Ack(taskSeq, "alice", old+5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.InsertMessage(&store.Message{
+		ID: "op-old-1-st", Sender: "alice", Recipient: "operator", Kind: "status", Status: "started",
+		InReplyTo: "op-old-1", RootID: "op/alice/op-old-1", Payload: "started", CreatedAt: old + 1, ApprovalState: "n/a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resSeq, err := st.InsertMessage(&store.Message{
+		ID: "op-old-1-res", Sender: "alice", Recipient: "operator", Kind: "result",
+		InReplyTo: "op-old-1", RootID: "op/alice/op-old-1", Payload: "done", CreatedAt: old + 10, ApprovalState: "n/a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mark alice's DM read past resSeq (no acks row exists for operator).
+	if err := st.SetSetting("operator_read_seq:alice", itoa64(resSeq), old+20); err != nil {
+		t.Fatal(err)
+	}
+
+	r := New(st, Policy{MessageTTLDays: 30, DataDir: dir})
+	stats, err := r.RunOnce(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["messages_archived"] != 3 || stats["messages_deleted"] != 3 {
+		t.Fatalf("expected all 3 operator-round messages archived/deleted, got %+v", stats)
+	}
+}
+
+func itoa64(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
+}

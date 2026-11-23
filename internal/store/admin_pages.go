@@ -14,7 +14,8 @@ type ThreadSummary struct {
 	RootID       string   `json:"root_id"`
 	Count        int      `json:"count"`
 	Held         int      `json:"held"`
-	SinceReset   int      `json:"since_reset"` // messages after the fuse watermark
+	SinceReset   int      `json:"since_reset"` // non-status messages after the fuse watermark
+	WindowCount  int      `json:"window_count"`
 	FirstAt      int64    `json:"first_at"`
 	LastAt       int64    `json:"last_at"`
 	LastSeq      int64    `json:"last_seq"`
@@ -26,11 +27,14 @@ type ThreadSummary struct {
 
 // ThreadFilter narrows the thread list. Q matches root_id substring or an
 // exact participant id. Held keeps threads with pending approvals; FusedMin
-// (>0) keeps threads whose post-watermark count reached the fuse limit.
+// (>0) keeps threads whose post-watermark count reached the fuse limit (with
+// RoomFuseMin applied for grp_* threads, while op/* threads are exempt).
 type ThreadFilter struct {
-	Q        string
-	Held     bool
-	FusedMin int
+	Q             string
+	Held          bool
+	FusedMin      int
+	RoomFuseMin   int
+	WindowSinceTs int64
 }
 
 // AuditFilter narrows the audit log. Actor is exact, Action is a prefix
@@ -67,6 +71,11 @@ func (s *sqliteStore) ThreadSummaries(f ThreadFilter, limit, offset int) ([]*Thr
 	limit, offset = clampPage(limit, offset, 20, 500)
 	where := ""
 	var args []any
+	windowExpr := "0 AS window_cnt"
+	if f.WindowSinceTs > 0 {
+		windowExpr = `SUM(CASE WHEN m.seq > COALESCE(f.cleared_seq,0) AND m.created_at > ? AND m.kind != 'status' THEN 1 ELSE 0 END) AS window_cnt`
+		args = append(args, f.WindowSinceTs)
+	}
 	if q := strings.TrimSpace(f.Q); q != "" {
 		where = `WHERE m.root_id IN (SELECT DISTINCT root_id FROM messages
 			WHERE root_id LIKE ? ESCAPE '\' OR sender=? OR recipient=?)`
@@ -77,11 +86,16 @@ func (s *sqliteStore) ThreadSummaries(f ThreadFilter, limit, offset int) ([]*Thr
 		having = append(having, "held>0")
 	}
 	if f.FusedMin > 0 {
-		having = append(having, "since_reset>=?")
+		if f.RoomFuseMin > 0 {
+			having = append(having, `((m.root_id LIKE 'grp\_%' ESCAPE '\' AND window_cnt>=?) OR (m.root_id NOT LIKE 'grp\_%' ESCAPE '\' AND m.root_id NOT LIKE 'op/%' AND since_reset>=?))`)
+		} else {
+			having = append(having, `(m.root_id NOT LIKE 'grp\_%' ESCAPE '\' AND m.root_id NOT LIKE 'op/%' AND since_reset>=?)`)
+		}
 	}
 	grouped := `SELECT m.root_id AS root_id, COUNT(*) AS cnt,
 		SUM(CASE WHEN m.approval_state='pending' THEN 1 ELSE 0 END) AS held,
-		SUM(CASE WHEN m.seq > COALESCE(f.cleared_seq,0) THEN 1 ELSE 0 END) AS since_reset,
+		SUM(CASE WHEN m.seq > COALESCE(f.cleared_seq,0) AND m.kind != 'status' THEN 1 ELSE 0 END) AS since_reset,
+		` + windowExpr + `,
 		MIN(m.created_at) AS first_at, MAX(m.created_at) AS last_at, MAX(m.seq) AS mx,
 		GROUP_CONCAT(DISTINCT m.sender) AS senders,
 		GROUP_CONCAT(DISTINCT m.recipient) AS recipients
@@ -90,14 +104,18 @@ func (s *sqliteStore) ThreadSummaries(f ThreadFilter, limit, offset int) ([]*Thr
 	if len(having) > 0 {
 		grouped += " HAVING " + strings.Join(having, " AND ")
 		if f.FusedMin > 0 {
-			args = append(args, f.FusedMin)
+			if f.RoomFuseMin > 0 {
+				args = append(args, f.RoomFuseMin, f.FusedMin)
+			} else {
+				args = append(args, f.FusedMin)
+			}
 		}
 	}
 	var total int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM (`+grouped+`)`, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	q := `SELECT t.root_id, t.cnt, t.held, t.since_reset, t.first_at, t.last_at, t.mx,
+	q := `SELECT t.root_id, t.cnt, t.held, t.since_reset, t.window_cnt, t.first_at, t.last_at, t.mx,
 		COALESCE(t.senders,''), COALESCE(t.recipients,''),
 		COALESCE(lm.sender,''), COALESCE(lm.kind,''), COALESCE(substr(lm.payload,1,160),'')
 		FROM (` + grouped + `) t LEFT JOIN messages lm ON lm.seq=t.mx
@@ -111,7 +129,7 @@ func (s *sqliteStore) ThreadSummaries(f ThreadFilter, limit, offset int) ([]*Thr
 	for rows.Next() {
 		var t ThreadSummary
 		var senders, recips string
-		if err := rows.Scan(&t.RootID, &t.Count, &t.Held, &t.SinceReset, &t.FirstAt, &t.LastAt, &t.LastSeq,
+		if err := rows.Scan(&t.RootID, &t.Count, &t.Held, &t.SinceReset, &t.WindowCount, &t.FirstAt, &t.LastAt, &t.LastSeq,
 			&senders, &recips, &t.LastSender, &t.LastKind, &t.LastPreview); err != nil {
 			return nil, 0, err
 		}

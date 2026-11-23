@@ -100,6 +100,7 @@ function createCommandState() {
     // dissolved-rooms group in the session list is expanded.
     ackOpen: null,
     showArchived: false,
+    showStatusInDM: false,
 
     // Long-message reading state, keyed by message seq/id. Collapsed by
     // default (see needsCollapse) so one giant report does not push the rest
@@ -427,8 +428,19 @@ function createCommandState() {
     },
 
     threadURL() {
+      if (this.activeTarget.type === 'peer') {
+        return '/admin/messages?dm_peer=' + encodeURIComponent(this.activeTarget.id) +
+          (this.showStatusInDM ? '' : '&hide_status=1');
+      }
       const root = this.threadRoot();
       return root ? '/admin/messages?thread=' + encodeURIComponent(root) : '';
+    },
+
+    toggleStatusInDM() {
+      this.showStatusInDM = !this.showStatusInDM;
+      if (this.activeTarget.type === 'peer') {
+        this.loadActiveMessages(false);
+      }
     },
 
     // Server thread item -> stream row. Room and DM share the same shape.
@@ -439,6 +451,8 @@ function createCommandState() {
         from: m.sender,
         to: m.recipient,
         kind: m.kind,
+        status: m.status || '',
+        thread: m.thread || '',
         payload: m.payload,
         time: m.created_at,
         acked_by: m.acked_by || [],

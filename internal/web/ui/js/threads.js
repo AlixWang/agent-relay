@@ -34,6 +34,8 @@ export async function refreshThreads() {
     const r = await api('/admin/messages?' + params.toString());
     const threads = r.threads || [];
     const fuseLimit = r.fuse_max_messages || 200;
+    const roomFuseLimit = r.room_fuse_max_messages || 60;
+    const roomWinMins = Math.max(1, Math.round((r.room_fuse_window_secs || 3600) / 60));
 
     if (!threads.length) {
       tbody.innerHTML = `<tr><td colspan="6" class="empty-td"><div class="empty">${icon('message')}<p>暂无匹配的消息线程</p></div></td></tr>`;
@@ -43,8 +45,25 @@ export async function refreshThreads() {
 
     tbody.innerHTML = threads.map((t) => {
       const parts = t.participants || [];
-      const pct = Math.min(100, Math.round(((t.since_reset || t.count) / fuseLimit) * 100));
-      const tone = t.fused ? 'bad' : (pct >= 80 ? 'warn' : 'brand');
+      const mode = t.fuse_mode || (String(t.root_id || '').startsWith('op/') ? 'operator' : (String(t.root_id || '').startsWith('grp_') ? 'window' : 'count'));
+      let pct = 0;
+      let tone = 'brand';
+      let meterText = '';
+      if (mode === 'operator') {
+        pct = 0;
+        tone = 'brand';
+        meterText = `${t.count} 条 <small class="muted">(系统会话·免熔断)</small>`;
+      } else if (mode === 'window') {
+        const wcnt = t.window_count ?? 0;
+        pct = Math.min(100, Math.round((wcnt / roomFuseLimit) * 100));
+        tone = t.fused ? 'bad' : (pct >= 80 ? 'warn' : 'brand');
+        meterText = `${t.count} 条 <small class="muted">(近${roomWinMins}m ${wcnt}/${roomFuseLimit})</small>`;
+      } else {
+        const sr = t.since_reset ?? t.count;
+        pct = Math.min(100, Math.round((sr / fuseLimit) * 100));
+        tone = t.fused ? 'bad' : (pct >= 80 ? 'warn' : 'brand');
+        meterText = `${t.count} 条 <small class="muted">(${sr}/${fuseLimit})</small>`;
+      }
 
       return `<tr class="clickable" data-root="${esc(t.root_id)}">
         <td>
@@ -61,7 +80,7 @@ export async function refreshThreads() {
         </td>
         <td>
           <div class="meter ${tone}">
-            <b>${t.count} 条 <small class="muted">(${t.since_reset ?? t.count}/${fuseLimit})</small></b>
+            <b>${meterText}</b>
             <i style="--p: ${pct}%; --tone: var(--${tone})"></i>
           </div>
         </td>

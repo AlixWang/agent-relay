@@ -102,7 +102,7 @@ func Render(agentType string, d Data) (string, error) {
 // do about it. /prompts/current serves only the entries newer than the
 // peer's reported version, so assistants upgrade incrementally instead of
 // re-reading the full text. Keep entries short: section numbers + actions.
-const PromptVersion = 21
+const PromptVersion = 22
 
 // RoomAwarePromptVersion is the revision that first documents rooms and the
 // operator identity (§7.8 muse/claw/generic, §6.7 hermes), and that requires the
@@ -220,6 +220,11 @@ var ChangeLog = []ChangeEntry{
 		Version: 21,
 		Summary: "Muse 脚本 1.1.0 改为稳定 core：RELAY_URL 等配置写 $BASE/relay-watch.env（一行即用），Hatch 自动探测 HATCH_HOOK_RUNTIME（wake/silent 子 shell 包装，修 wake 后 offset 不推进的重复唤醒），非 Hatch 才写 relay-watch.local.sh；自更新只换脚本；服务端新增防降级守卫（已上报更高 semver 的节点不再收到旧脚本下发）。",
 		Actions: "1) Muse 节点：先等服务端 /health 的 script_version 变为 1.1.0，再写 $BASE/relay-watch.env（至少 RELAY_URL=...），下载新 relay-watch.sh 覆盖并保留 .rollback；2) 删除旧脚本顶部 CONFIG 改动和手写 source HATCH_HOOK_RUNTIME（1.1.0 自动探测）；3) 迁移期间 SCRIPT_AUTO_UPDATE=0，验证 wake 后 .spool_offset 推进、第二次运行 silent，再设 1；4) 只有非 Hatch runtime 才在 $BASE/relay-watch.local.sh 定义 watch_wake/watch_silent；5) 发布顺序：服务端先上 1.1.0，节点再更新。",
+	},
+	{
+		Version: 22,
+		Summary: "上下文卫生与分层唤醒对齐（§6 / §6.8）：接手任务先记 .worker_active（防看门狗误重试）；result 保持结构化简明摘要，只按当前 task_ids 读 spool/wake.jsonl；广播任务不发 status 握手；脚本 1.2.0 新增本地 3m 补唤醒与 spool 自动轮转。",
+		Actions: "1) 按 §7.5 整份替换 prompt-current.md；2) 接手 1:1 任务后把任务 id 写入 ~/workspace/task-relay/.worker_active，完成后随 .done_ids 清理；3) 不翻读历史旧 spool 行，不往 memory 堆逐条任务流水，result 只写结论与关键路径/产物；4) 广播（to=*）任务不发 status/started 或 cancelled。",
 	},
 }
 

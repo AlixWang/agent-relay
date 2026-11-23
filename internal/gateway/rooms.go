@@ -96,6 +96,11 @@ func (s *Server) operatorSend(send *queue.SendRequest) (int64, bool, string, err
 	}
 	if !held {
 		s.notifyStream()
+		if send.Kind == "" || send.Kind == "task" {
+			if s.muse != nil && send.To != "*" && send.To != auth.OperatorID && send.To != auth.SystemID && !strings.HasPrefix(send.To, "grp_") {
+				s.muse.MaybeWakeForTask(send.To)
+			}
+		}
 	}
 	return seq, held, rootID, nil
 }

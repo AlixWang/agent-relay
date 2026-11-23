@@ -445,6 +445,9 @@
                 <p class="muted xs" x-text="activeTarget.subtitle"></p>
               </div>
               <div class="cmd-chat-actions">
+                <button type="button" class="btn btn-outline btn-sm" x-show="activeTarget.type === 'peer'" @click="toggleStatusInDM()">
+                  <span x-text="showStatusInDM ? '隐藏状态' : '显示状态'"></span>
+                </button>
                 <button type="button" class="btn btn-outline btn-sm" x-show="activeTarget.type === 'inbox' && inboxUnread > 0" @click="markAllInboxRead()">
                   <svg class="icon xs"><use href="#i-check"/></svg> 全部已读
                 </button>

@@ -123,6 +123,13 @@ type Config struct {
 	MuseChatPerPeerPerMinute  int  `toml:"muse_chat_per_peer_per_minute"`
 	MuseChatPerPeerPerHour    int  `toml:"muse_chat_per_peer_per_hour"`
 	MuseChatGlobalPerMinute   int  `toml:"muse_chat_global_per_minute"`
+
+	// Tiered Muse task nudge (warm-wake via direct-chat when a 1:1 task sits
+	// un-started/un-acked past muse_task_nudge_after_secs). Still gated by
+	// muse_direct_chat_enabled, runtime switch, and per-account chat_enabled.
+	MuseTaskNudgeEnabled      bool `toml:"muse_task_nudge_enabled"`
+	MuseTaskNudgeAfterSecs    int  `toml:"muse_task_nudge_after_secs"`
+	MuseTaskNudgeCooldownSecs int  `toml:"muse_task_nudge_cooldown_secs"`
 }
 
 // Default returns the documented defaults (DESIGN §6.1, §10.2).
@@ -177,6 +184,9 @@ func Default() *Config {
 		MuseChatPerPeerPerMinute:     6,
 		MuseChatPerPeerPerHour:       30,
 		MuseChatGlobalPerMinute:      30,
+		MuseTaskNudgeEnabled:         true,
+		MuseTaskNudgeAfterSecs:       180,
+		MuseTaskNudgeCooldownSecs:    600,
 	}
 }
 
@@ -223,6 +233,8 @@ func Load(path string) (*Config, error) {
 		"muse_chat_default_budget_secs": true, "muse_chat_max_budget_secs": true,
 		"muse_chat_poll_secs": true, "muse_chat_per_peer_per_minute": true,
 		"muse_chat_per_peer_per_hour": true, "muse_chat_global_per_minute": true,
+		"muse_task_nudge_enabled": true, "muse_task_nudge_after_secs": true,
+		"muse_task_nudge_cooldown_secs": true,
 	}
 	for k := range raw {
 		if !known[k] {
@@ -359,6 +371,12 @@ func (c *Config) Validate() error {
 	}
 	if c.MuseChatGlobalPerMinute < 1 || c.MuseChatGlobalPerMinute > 30 {
 		return fmt.Errorf("muse_chat_global_per_minute must be 1-30")
+	}
+	if c.MuseTaskNudgeAfterSecs < 0 {
+		return fmt.Errorf("muse_task_nudge_after_secs must be >= 0")
+	}
+	if c.MuseTaskNudgeCooldownSecs < 0 {
+		return fmt.Errorf("muse_task_nudge_cooldown_secs must be >= 0")
 	}
 	return nil
 }

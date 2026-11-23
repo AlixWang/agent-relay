@@ -2066,6 +2066,112 @@ func TestAdminThreadCursorPagination(t *testing.T) {
 	}
 }
 
+func TestAdminThreadsFuseModeForOperatorAndRoom(t *testing.T) {
+	f := newFixtureWithConfig(t, func(c *config.Config) {
+		c.FuseMaxMessages = 3
+		c.RoomFuseMaxMessages = 2
+		c.RoomFuseWindowSecs = 3600
+		c.RatePerMinute = 1000
+	})
+	f.registerPeer(t, "lisa", "muse")
+	cookie := f.adminLogin(t)
+
+	// Legacy op/lisa with 10 messages must report fuse_mode=operator and fused=false.
+	for i := 0; i < 10; i++ {
+		if _, err := f.srv.st.InsertMessage(&store.Message{
+			ID: "ol-" + itoa(int64(i)), Sender: "lisa", Recipient: "operator",
+			Kind: "status", Status: "started", RootID: "op/lisa", Payload: "started",
+			CreatedAt: time.Now().Unix(), ApprovalState: "n/a",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A peer thread with 3 non-status messages is fused under count mode.
+	for i := 0; i < 3; i++ {
+		if _, err := f.srv.st.InsertMessage(&store.Message{
+			ID: "pt-" + itoa(int64(i)), Sender: "lisa", Recipient: "bob",
+			Kind: "task", RootID: "lisa/pt", Payload: "work " + itoa(int64(i)),
+			CreatedAt: time.Now().Unix(), ApprovalState: "n/a",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	code, out := f.doCookie(t, "GET", "/admin/messages?state=fused", nil, cookie)
+	if code != 200 {
+		t.Fatalf("fused list: %d %+v", code, out)
+	}
+	threads, _ := out["threads"].([]any)
+	if len(threads) != 1 || threads[0].(map[string]any)["root_id"] != "lisa/pt" {
+		t.Fatalf("state=fused must exclude op/*, got %+v", threads)
+	}
+
+	_, allOut := f.doCookie(t, "GET", "/admin/messages", nil, cookie)
+	for _, item := range allOut["threads"].([]any) {
+		row := item.(map[string]any)
+		if row["root_id"] == "op/lisa" {
+			if row["fuse_mode"] != "operator" || row["fused"] != false {
+				t.Fatalf("op/lisa fuse view wrong: %+v", row)
+			}
+		}
+	}
+}
+
+func TestAdminMessagesPeerDMPageAndRoomHistoryFilter(t *testing.T) {
+	f := newFixture(t)
+	f.registerPeer(t, "alice", "muse")
+	cookie := f.adminLogin(t)
+
+	// Legacy op/alice chat + new per-round op/alice/<id> task + status + result.
+	_, _ = f.doCookie(t, "POST", "/admin/messages", map[string]any{"to": "alice", "kind": "chat", "payload": "hi alice"}, cookie)
+	_, taskOut := f.doCookie(t, "POST", "/admin/messages", map[string]any{"to": "alice", "kind": "task", "payload": "check status"}, cookie)
+	taskID := taskOut["id"].(string)
+	_, _ = f.do(t, "POST", "/messages", map[string]any{
+		"id": "st-1", "to": "operator", "kind": "status", "status": "started", "in_reply_to": taskID, "payload": "started",
+	}, f.tok["alice"])
+	_, _ = f.do(t, "POST", "/messages", map[string]any{
+		"id": "res-1", "to": "operator", "kind": "result", "in_reply_to": taskID, "payload": "all good",
+	}, f.tok["alice"])
+
+	// dm_peer=alice&hide_status=1 combines both threads and hides status.
+	code, dm := f.doCookie(t, "GET", "/admin/messages?dm_peer=alice&hide_status=1", nil, cookie)
+	if code != 200 {
+		t.Fatalf("dm_peer: %d %+v", code, dm)
+	}
+	items := dm["items"].([]any)
+	if len(items) != 3 {
+		t.Fatalf("dm_peer hide_status=1 items = %d, want 3: %+v", len(items), items)
+	}
+	// Without hide_status=1, all 4 rows appear.
+	_, dmAll := f.doCookie(t, "GET", "/admin/messages?dm_peer=alice", nil, cookie)
+	if len(dmAll["items"].([]any)) != 4 {
+		t.Fatalf("dm_peer full items = %d, want 4", len(dmAll["items"].([]any)))
+	}
+
+	// Room history excludes status by default.
+	_, _ = f.doCookie(t, "POST", "/admin/rooms", map[string]any{"id": "grp_hist", "members": []string{"alice"}}, cookie)
+	_, _ = f.srv.st.InsertMessage(&store.Message{
+		ID: "room-st", Sender: "alice", Recipient: "grp_hist", Kind: "status", Status: "progress",
+		RootID: "grp_hist", Payload: "noisy status", CreatedAt: time.Now().Unix(), ApprovalState: "n/a",
+	})
+	_, roomDef := f.do(t, "GET", "/messages/room?room=grp_hist&limit=20", nil, f.tok["alice"])
+	for _, it := range roomDef["items"].([]any) {
+		if it.(map[string]any)["kind"] == "status" {
+			t.Fatalf("room history leaked status by default: %+v", it)
+		}
+	}
+	_, roomWithSt := f.do(t, "GET", "/messages/room?room=grp_hist&limit=20&include_status=1", nil, f.tok["alice"])
+	foundStatus := false
+	for _, it := range roomWithSt["items"].([]any) {
+		if it.(map[string]any)["kind"] == "status" {
+			foundStatus = true
+		}
+	}
+	if !foundStatus {
+		t.Fatal("include_status=1 should include status row")
+	}
+}
+
 // seqRange formats "lo,lo+1,...,hi" for page assertions.
 func seqRange(lo, hi int64) string {
 	var b strings.Builder

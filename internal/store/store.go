@@ -253,10 +253,19 @@ type Store interface {
 	// LastNVisibleInThread is the room read-back (GET /messages/room): the
 	// newest messages of a thread the peer may read, own messages included.
 	LastNVisibleInThread(rootID, peerID string, n int) ([]*Message, error)
+	LastNVisibleInThreadFiltered(rootID, peerID string, n int, includeStatus bool) ([]*Message, error)
+	// PeerDMPage returns one cursor page across all operator DM threads for
+	// peerID (legacy op/<peer> and per-round op/<peer>/<task_id>), oldest-first.
+	PeerDMPage(peerID string, beforeSeq, afterSeq int64, limit int, hideStatus bool) (*ThreadPage, error)
 	// LastHandshakeTs returns MAX(created_at) for a handshake slice of a
 	// thread (kind='status' + status value, one sender). Zero when absent.
 	// Used for the progress per-thread throttle (§6.5).
 	LastHandshakeTs(rootID, sender, status string) (int64, error)
+	// LastTaskHandshakeTs returns MAX(created_at) for a status on one task.
+	LastTaskHandshakeTs(sender, inReplyTo, status string) (int64, error)
+	CountTaskStatus(rootID, sender, inReplyTo, status string) (int, error)
+	HasTaskTerminal(sender, inReplyTo string) (bool, error)
+	ListStalledDirectTasks(olderThan, newerThan int64, limit int) ([]*Message, error)
 	CountThreadSince(rootID string, sinceSeq int64) (int, error)
 	ThreadOldestTs(rootID string) (int64, error)
 	MaxSeq() (int64, error)
@@ -426,6 +435,9 @@ type Store interface {
 	// thread.fuse_tripped storms, 502 dial noise, peer.offline,
 	// retention.skipped, and info watchdog.daemon_started rows.
 	PurgeLogNoiseV2(now int64) (*LogNoisePurge, error)
+	// PurgeStatusSpamV1 is a one-time, settings-guarded cleanup of historical
+	// repeated kind='status' storms (keeping the first and last row per group).
+	PurgeStatusSpamV1(now int64) (*StatusSpamPurge, error)
 	// agent runtime logs (DESIGN §4.11): uploaded diagnostics, not audit.
 	InsertAgentLogs(events []*AgentLog) (accepted, duplicates int, err error)
 	ListAgentLogsPage(f AgentLogFilter, limit, offset int) ([]*AgentLog, int, error)
@@ -1633,11 +1645,19 @@ func (s *sqliteStore) ThreadPage(rootID string, beforeSeq, afterSeq int64, limit
 // member cannot see what the others just said before it speaks. Private replies
 // that live in the same thread stay hidden from everyone but their addressee.
 func (s *sqliteStore) LastNVisibleInThread(rootID, peerID string, n int) ([]*Message, error) {
+	return s.LastNVisibleInThreadFiltered(rootID, peerID, n, true)
+}
+
+func (s *sqliteStore) LastNVisibleInThreadFiltered(rootID, peerID string, n int, includeStatus bool) ([]*Message, error) {
 	if n <= 0 || n > 200 {
 		n = 20
 	}
+	statusFilter := ""
+	if !includeStatus {
+		statusFilter = " AND m.kind != 'status'"
+	}
 	rows, err := s.db.Query(visibleSelect+`
-		WHERE m.root_id = ?
+		WHERE m.root_id = ?`+statusFilter+`
 		  AND m.approval_state NOT IN ('pending','rejected')
 		  AND (m.sender = ? OR `+visibilityExpr+`)
 		ORDER BY m.seq DESC LIMIT ?`,
@@ -1663,10 +1683,143 @@ func (s *sqliteStore) LastNVisibleInThread(rootID, peerID string, n int) ([]*Mes
 	return out, rows.Err()
 }
 
+func (s *sqliteStore) PeerDMPage(peerID string, beforeSeq, afterSeq int64, limit int, hideStatus bool) (*ThreadPage, error) {
+	if limit <= 0 {
+		limit = defaultThreadPageSize
+	}
+	if limit > maxThreadPageSize {
+		limit = maxThreadPageSize
+	}
+	exact := "op/" + peerID
+	prefix := "op/" + likeEscape(peerID) + "/%"
+	where := `(root_id = ? OR root_id LIKE ? ESCAPE '\')`
+	if hideStatus {
+		where += ` AND kind != 'status'`
+	}
+	cols := `SELECT seq,id,sender,recipient,kind,in_reply_to,root_id,requires_approval,approval_state,payload,created_at,
+		status,op,target,detail,decision,expires_at
+		FROM messages WHERE ` + where
+	var (
+		rows       *sql.Rows
+		err        error
+		descending bool
+	)
+	switch {
+	case afterSeq > 0:
+		rows, err = s.db.Query(cols+` AND seq>? ORDER BY seq ASC LIMIT ?`, exact, prefix, afterSeq, limit+1)
+	case beforeSeq > 0:
+		rows, err = s.db.Query(cols+` AND seq<? ORDER BY seq DESC LIMIT ?`, exact, prefix, beforeSeq, limit+1)
+		descending = true
+	default:
+		rows, err = s.db.Query(cols+` ORDER BY seq DESC LIMIT ?`, exact, prefix, limit+1)
+		descending = true
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	msgs := make([]*Message, 0, limit+1)
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	page := &ThreadPage{HasMore: len(msgs) > limit}
+	if page.HasMore {
+		msgs = msgs[:limit]
+	}
+	if descending {
+		out := make([]*Message, len(msgs))
+		for i, m := range msgs {
+			out[len(msgs)-1-i] = m
+		}
+		msgs = out
+	}
+	page.Messages = msgs
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE `+where, exact, prefix).Scan(&page.Total); err != nil {
+		return nil, err
+	}
+	return page, nil
+}
+
 func (s *sqliteStore) CountThreadSince(rootID string, sinceSeq int64) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE root_id=? AND seq>?`, rootID, sinceSeq).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE root_id=? AND seq>? AND kind!='status'`, rootID, sinceSeq).Scan(&n)
 	return n, err
+}
+
+func (s *sqliteStore) LastTaskHandshakeTs(sender, inReplyTo, status string) (int64, error) {
+	var v sql.NullInt64
+	err := s.db.QueryRow(`SELECT MAX(created_at) FROM messages
+		WHERE sender=? AND in_reply_to=? AND kind='status' AND status=?`, sender, inReplyTo, status).Scan(&v)
+	if err != nil {
+		return 0, err
+	}
+	if !v.Valid {
+		return 0, nil
+	}
+	return v.Int64, nil
+}
+
+func (s *sqliteStore) CountTaskStatus(rootID, sender, inReplyTo, status string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages
+		WHERE root_id=? AND sender=? AND in_reply_to=? AND kind='status' AND status=?`,
+		rootID, sender, inReplyTo, status).Scan(&n)
+	return n, err
+}
+
+func (s *sqliteStore) HasTaskTerminal(sender, inReplyTo string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages
+		WHERE sender=? AND in_reply_to=? AND (kind='result' OR (kind='status' AND status IN ('cancelled','dropped')))`,
+		sender, inReplyTo).Scan(&n)
+	return n > 0, err
+}
+
+func (s *sqliteStore) ListStalledDirectTasks(olderThan, newerThan int64, limit int) ([]*Message, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := s.db.Query(visibleSelect+`
+		WHERE m.kind = 'task'
+		  AND m.recipient NOT IN ('*', 'operator', 'system', '')
+		  AND m.recipient NOT LIKE 'grp\_%' ESCAPE '\'
+		  AND m.approval_state NOT IN ('pending', 'rejected')
+		  AND m.created_at <= ? AND m.created_at >= ?
+		  AND NOT EXISTS (
+		    SELECT 1 FROM acks a
+		    WHERE a.message_seq = m.seq AND a.peer_id = m.recipient
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM messages r
+		    WHERE r.in_reply_to = m.id
+		      AND r.sender = m.recipient
+		      AND (r.kind = 'result' OR (r.kind = 'status' AND r.status IN ('cancelled','dropped','progress','blocked','ready')))
+		  )
+		ORDER BY m.seq ASC LIMIT ?`, olderThan, newerThan, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 func (s *sqliteStore) ThreadOldestTs(rootID string) (int64, error) {

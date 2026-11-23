@@ -294,3 +294,139 @@ func (s *sqliteStore) PurgeLogNoiseV2(now int64) (*LogNoisePurge, error) {
 	}
 	return out, nil
 }
+
+// StatusSpamPurge counts one one-time status-storm cleanup pass.
+type StatusSpamPurge struct {
+	Deleted     int64
+	Groups      int64
+	AlreadyDone bool
+}
+
+const statusSpamPurgeV1Marker = "migrated.status_spam_purge_v1"
+
+// PurgeStatusSpamV1 removes historical repeated kind='status' storms in one
+// transaction and records a settings marker so subsequent runs are no-ops.
+// For every (root_id, sender, in_reply_to, status) group with > 2 rows, it
+// keeps the first (MIN(seq)) and last (MAX(seq)) row as lifecycle evidence and
+// deletes the redundant intermediate rows.
+func (s *sqliteStore) PurgeStatusSpamV1(now int64) (*StatusSpamPurge, error) {
+	out := &StatusSpamPurge{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var done int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM settings WHERE key=?`, statusSpamPurgeV1Marker).Scan(&done); err != nil {
+		return nil, err
+	}
+	if done > 0 {
+		out.AlreadyDone = true
+		return out, nil
+	}
+
+	type spamGroup struct {
+		rootID    string
+		sender    string
+		inReplyTo string
+		status    string
+		minSeq    int64
+		maxSeq    int64
+	}
+	grows, err := tx.Query(`SELECT root_id, sender, in_reply_to, status, MIN(seq), MAX(seq)
+		FROM messages
+		WHERE kind='status' AND in_reply_to!=''
+		GROUP BY root_id, sender, in_reply_to, status
+		HAVING COUNT(*) > 2`)
+	if err != nil {
+		return nil, err
+	}
+	var groups []spamGroup
+	for grows.Next() {
+		var g spamGroup
+		if err := grows.Scan(&g.rootID, &g.sender, &g.inReplyTo, &g.status, &g.minSeq, &g.maxSeq); err != nil {
+			grows.Close()
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	if err := grows.Err(); err != nil {
+		grows.Close()
+		return nil, err
+	}
+	grows.Close()
+
+	var seqs []int64
+	for _, g := range groups {
+		srows, err := tx.Query(`SELECT seq FROM messages
+			WHERE root_id=? AND sender=? AND in_reply_to=? AND kind='status' AND status=?
+			  AND seq > ? AND seq < ?
+			ORDER BY seq`, g.rootID, g.sender, g.inReplyTo, g.status, g.minSeq, g.maxSeq)
+		if err != nil {
+			return nil, err
+		}
+		for srows.Next() {
+			var seq int64
+			if err := srows.Scan(&seq); err != nil {
+				srows.Close()
+				return nil, err
+			}
+			seqs = append(seqs, seq)
+		}
+		if err := srows.Err(); err != nil {
+			srows.Close()
+			return nil, err
+		}
+		srows.Close()
+	}
+	out.Groups = int64(len(groups))
+
+	const deleteBatch = 400
+	for start := 0; start < len(seqs); start += deleteBatch {
+		end := start + deleteBatch
+		if end > len(seqs) {
+			end = len(seqs)
+		}
+		batch := seqs[start:end]
+		args := make([]any, len(batch))
+		for i, seq := range batch {
+			args[i] = seq
+		}
+		placeholders := strings.Repeat("?,", len(batch)-1) + "?"
+		if _, err := tx.Exec(`DELETE FROM acks WHERE message_seq IN (`+placeholders+`)`, args...); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(`DELETE FROM message_tickets WHERE message_seq IN (`+placeholders+`)`, args...); err != nil {
+			return nil, err
+		}
+		res, err := tx.Exec(`DELETE FROM messages WHERE seq IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		out.Deleted += n
+	}
+
+	if out.Deleted > 0 {
+		detail := fmt.Sprintf("status_spam_messages=%d status_spam_groups=%d", out.Deleted, out.Groups)
+		if _, err := tx.Exec(`INSERT INTO audit_log(ts,actor,action,detail) VALUES(?,?,?,?)`,
+			now, "system", "retention.purged", detail); err != nil {
+			return nil, err
+		}
+	}
+
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?, '1', ?)`,
+		statusSpamPurgeV1Marker, now); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

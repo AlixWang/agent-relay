@@ -131,3 +131,10 @@ muse_chat_poll_secs = 2               # 1-2; 2s +-200ms jitter in v1
 muse_chat_per_peer_per_minute = 6     # 1-6
 muse_chat_per_peer_per_hour = 30      # 1-30
 muse_chat_global_per_minute = 30      # 1-30
+
+# Tiered Muse task warm-wake nudge: when muse_direct_chat_enabled=true and a
+# 1:1 task sits un-started/un-acked past muse_task_nudge_after_secs, send a
+# single short nudge into the member's Muse main chat (only when non-busy).
+muse_task_nudge_enabled = true
+muse_task_nudge_after_secs = 180
+muse_task_nudge_cooldown_secs = 600

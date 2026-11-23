@@ -38,8 +38,9 @@ func TestAdminSendWakesSSEAndSpeaksAsOperator(t *testing.T) {
 	if code != 200 || out["ok"] != true {
 		t.Fatalf("admin send: %d %+v", code, out)
 	}
-	if out["thread"] != "op/alice" {
-		t.Fatalf("operator DM thread must be canonical: %v", out["thread"])
+	wantThread := "op/alice/" + out["id"].(string)
+	if out["thread"] != wantThread {
+		t.Fatalf("operator task thread = %v, want %s", out["thread"], wantThread)
 	}
 
 	deadline := time.Now().Add(5 * time.Second)

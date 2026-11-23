@@ -76,8 +76,9 @@ func TestRoomTargetValidation(t *testing.T) {
 
 func mustErr(_ *Verdict, err error) error { return err }
 
-// Console-routed targets have canonical thread keys: one DM thread per peer
-// with the operator, one thread per room — never a new thread per message.
+// Console-routed targets have canonical thread keys: one room thread per room,
+// op/<peer> for general DM chats, and per-round op/<peer>/<task_id> for new
+// operator tasks (with explicit replies inheriting that round).
 func TestConsoleThreadKeysAreCanonical(t *testing.T) {
 	st := openTestStore(t)
 	g := New(st, roomLimits())
@@ -97,10 +98,15 @@ func TestConsoleThreadKeysAreCanonical(t *testing.T) {
 	if err != nil || v2.RootID != "op/alice" {
 		t.Fatalf("reply root: %+v err=%v", v2, err)
 	}
-	// The operator's own send to that peer lands in the same thread.
-	v3, err := g.Check(&Envelope{ID: "d3", To: "alice", From: "operator", Payload: "确认收到，我这就开始处理部署"}, now)
+	// The operator's own chat to that peer lands in the same op/<peer> thread.
+	v3, err := g.Check(&Envelope{ID: "d3", To: "alice", From: "operator", Kind: "chat", Payload: "确认收到，我这就开始处理部署"}, now)
 	if err != nil || v3.RootID != "op/alice" {
-		t.Fatalf("operator → peer root: %+v err=%v", v3, err)
+		t.Fatalf("operator chat → peer root: %+v err=%v", v3, err)
+	}
+	// A fresh operator task starts an isolated round thread op/<peer>/<task_id>.
+	v4, err := g.Check(&Envelope{ID: "d4", To: "alice", From: "operator", Kind: "task", Payload: "执行一次巡检"}, now)
+	if err != nil || v4.RootID != "op/alice/d4" {
+		t.Fatalf("operator task → peer root: %+v err=%v", v4, err)
 	}
 }
 
@@ -163,9 +169,8 @@ func TestRoomIgnoresThreadAgeFuse(t *testing.T) {
 	}
 }
 
-// An operator DM is one thread for the life of the peer, so the 24h age fuse
-// would lock the console out of it permanently. It takes the room's rolling
-// window instead, and both directions count toward it.
+// An operator DM ignores the 24h age fuse and never blocks the human operator,
+// while peer-initiated non-status bursts still obey the rolling window guard.
 func TestOperatorDMUsesRollingWindow(t *testing.T) {
 	st := openTestStore(t)
 	l := roomLimits() // 3 messages / 3600s
@@ -177,23 +182,27 @@ func TestOperatorDMUsesRollingWindow(t *testing.T) {
 		Kind: "result", RootID: "op/Mmei", Payload: "昨天的汇报：巡检做完了", CreatedAt: now - 100000, ApprovalState: "n/a"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.Check(&Envelope{ID: "fresh", To: "Mmei", From: "operator", Payload: "隔了一天继续说一句"}, now); err != nil {
+	if _, err := g.Check(&Envelope{ID: "fresh", To: "Mmei", From: "operator", Kind: "chat", Payload: "隔了一天继续说一句"}, now); err != nil {
 		t.Fatalf("operator DM wrongly hit the age fuse: %v", err)
 	}
 	for _, env := range []struct {
 		env *Envelope
 		at  int64
 	}{
-		{&Envelope{ID: "a", To: "operator", From: "Mmei", Payload: "第一条：证书还有 30 天到期"}, now},
-		{&Envelope{ID: "b", To: "Mmei", From: "operator", Payload: "第二条：先出续期步骤"}, now + 1},
-		{&Envelope{ID: "c", To: "operator", From: "Mmei", Payload: "第三条：步骤写完了，等你确认"}, now + 2},
+		{&Envelope{ID: "a", To: "operator", From: "Mmei", Kind: "chat", Payload: "第一条：证书还有 30 天到期"}, now},
+		{&Envelope{ID: "b", To: "Mmei", From: "operator", Kind: "chat", Payload: "第二条：先出续期步骤"}, now + 1},
+		{&Envelope{ID: "c", To: "operator", From: "Mmei", Kind: "chat", Payload: "第三条：步骤写完了，等你确认"}, now + 2},
 	} {
 		sendOK(t, g, st, env.env, env.at)
 	}
-	if code := rejectCode(t, mustErr(g.Check(&Envelope{ID: "d", To: "Mmei", From: "operator", Payload: "第四条：窗口里的第四句，应该被挡住"}, now+3))); code != "loop_fuse_tripped" {
-		t.Fatalf("window cap: %s", code)
+	// Peer's 4th message in the rolling window is blocked, while the operator is never blocked.
+	if code := rejectCode(t, mustErr(g.Check(&Envelope{ID: "d-peer", To: "operator", From: "Mmei", Kind: "chat", Payload: "第四条：peer 窗口里的第四句，应该被挡住"}, now+3))); code != "loop_fuse_tripped" {
+		t.Fatalf("peer window cap: %s", code)
 	}
-	if _, err := g.Check(&Envelope{ID: "e", To: "Mmei", From: "operator", Payload: "新的一小时到了，先把测试环境的证书续上，生产环境等你确认后再动"}, now+3602); err != nil {
+	if _, err := g.Check(&Envelope{ID: "d-op", To: "Mmei", From: "operator", Kind: "chat", Payload: "操作者任何时候都能继续发消息"}, now+4); err != nil {
+		t.Fatalf("operator must never be blocked by thread fuse: %v", err)
+	}
+	if _, err := g.Check(&Envelope{ID: "e", To: "operator", From: "Mmei", Kind: "chat", Payload: "新的一小时到了，继续汇报"}, now+3602); err != nil {
 		t.Fatalf("DM should accept after the window: %v", err)
 	}
 }

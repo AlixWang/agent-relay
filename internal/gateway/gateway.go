@@ -550,6 +550,11 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	// A newly visible message wakes held SSE subscribers (DESIGN §4.4b).
 	// Held (202) messages are invisible until admin approve wakes them.
 	s.notifyStream()
+	if req.Kind == "" || req.Kind == "task" {
+		if s.muse != nil && req.To != "*" && req.To != auth.OperatorID && req.To != auth.SystemID && !strings.HasPrefix(req.To, "grp_") {
+			s.muse.MaybeWakeForTask(req.To)
+		}
+	}
 	// Opportunistic verify completion: a result/ack may complete smoke.
 	if done, _ := s.verify.CheckCompletion(peer.ID, now); done {
 		log.Printf("peer verified: %s", peer.ID)
@@ -579,6 +584,7 @@ func (s *Server) sendRejection(w http.ResponseWriter, err error) {
 		case "duplicate_id", "loop_fuse_tripped", "loop_guard",
 			"permission_already_decided", "permission_expired",
 			"bad_permission_ref", "permission_rate_limited", "progress_throttled",
+			"status_throttled", "status_already_terminal",
 			"ambiguous_recipient":
 			code = 409
 		}
@@ -595,6 +601,8 @@ func (s *Server) sendRejection(w http.ResponseWriter, err error) {
 		strings.HasPrefix(msg, "bad_permission_ref"),
 		strings.HasPrefix(msg, "permission_rate_limited"),
 		strings.HasPrefix(msg, "progress_throttled"),
+		strings.HasPrefix(msg, "status_throttled"),
+		strings.HasPrefix(msg, "status_already_terminal"),
 		strings.HasPrefix(msg, "ambiguous_recipient"):
 		writeJSON(w, 409, map[string]any{"ok": false, "error": msg})
 	case strings.HasPrefix(msg, "rate_limited"):
@@ -697,7 +705,8 @@ func (s *Server) handleRoomHistory(w http.ResponseWriter, r *http.Request) {
 	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 {
 		limit = v
 	}
-	msgs, err := s.st.LastNVisibleInThread(room, peer.ID, limit)
+	includeStatus := r.URL.Query().Get("include_status") == "1"
+	msgs, err := s.st.LastNVisibleInThreadFiltered(room, peer.ID, limit, includeStatus)
 	if err != nil {
 		log.Printf("room history error: %v", err)
 		writeErr(w, 500, "room history failed")
@@ -1473,17 +1482,22 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, withMeta(map[string]any{"ok": true, "items": items}, p, total))
 		return
 	}
+	dmPeer := strings.TrimSpace(r.URL.Query().Get("dm_peer"))
 	thread := r.URL.Query().Get("thread")
-	if thread == "" {
+	if thread == "" && dmPeer == "" {
 		if !p.Paged {
 			p.Size = 100 // legacy: latest 100 threads
 		}
 		f := store.ThreadFilter{Q: r.URL.Query().Get("filter")}
+		if s.cfg.RoomFuseWindowSecs > 0 {
+			f.WindowSinceTs = time.Now().Unix() - int64(s.cfg.RoomFuseWindowSecs)
+		}
 		switch r.URL.Query().Get("state") {
 		case "held":
 			f.Held = true
 		case "fused":
 			f.FusedMin = s.cfg.FuseMaxMessages
+			f.RoomFuseMin = s.cfg.RoomFuseMaxMessages
 		}
 		sums, total, err := s.st.ThreadSummaries(f, p.Size, p.offset())
 		if err != nil {
@@ -1492,17 +1506,32 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		out := make([]map[string]any, 0, len(sums))
 		for _, t := range sums {
+			fuseMode := "count"
+			fused := s.cfg.FuseMaxMessages > 0 && t.SinceReset >= s.cfg.FuseMaxMessages
+			switch {
+			case strings.HasPrefix(t.RootID, "op/"):
+				fuseMode = "operator"
+				fused = false
+			case strings.HasPrefix(t.RootID, "grp_"):
+				fuseMode = "window"
+				fused = s.cfg.RoomFuseMaxMessages > 0 && t.WindowCount >= s.cfg.RoomFuseMaxMessages
+			}
 			out = append(out, map[string]any{
 				"root_id": t.RootID, "count": t.Count,
 				"participants": t.Participants, "held": t.Held,
-				"fused":       s.cfg.FuseMaxMessages > 0 && t.SinceReset >= s.cfg.FuseMaxMessages,
-				"since_reset": t.SinceReset, "first_at": t.FirstAt, "last_at": t.LastAt,
+				"fused":        fused,
+				"fuse_mode":    fuseMode,
+				"window_count": t.WindowCount,
+				"since_reset":  t.SinceReset, "first_at": t.FirstAt, "last_at": t.LastAt,
 				"last_seq": t.LastSeq, "last_sender": t.LastSender, "last_kind": t.LastKind,
 				"last_preview": t.LastPreview,
 			})
 		}
 		writeJSON(w, 200, withMeta(map[string]any{
-			"ok": true, "threads": out, "fuse_max_messages": s.cfg.FuseMaxMessages,
+			"ok": true, "threads": out,
+			"fuse_max_messages":      s.cfg.FuseMaxMessages,
+			"room_fuse_max_messages": s.cfg.RoomFuseMaxMessages,
+			"room_fuse_window_secs":  s.cfg.RoomFuseWindowSecs,
 		}, p, total))
 		return
 	}
@@ -1511,7 +1540,16 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 	// the thread, which made every message past #1000 invisible. before_seq
 	// walks into history, after_seq is the 3s poll cursor.
 	pageSize, beforeSeq, afterSeq := parseThreadPage(r)
-	page, err := s.st.ThreadPage(thread, beforeSeq, afterSeq, pageSize)
+	var (
+		page *store.ThreadPage
+		err  error
+	)
+	if dmPeer != "" {
+		hideStatus := r.URL.Query().Get("hide_status") == "1"
+		page, err = s.st.PeerDMPage(dmPeer, beforeSeq, afterSeq, pageSize, hideStatus)
+	} else {
+		page, err = s.st.ThreadPage(thread, beforeSeq, afterSeq, pageSize)
+	}
 	if err != nil {
 		writeErr(w, 500, "thread failed")
 		return
@@ -1560,7 +1598,7 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 		st := stats[m.Seq]
 		item := map[string]any{
 			"seq": m.Seq, "id": m.ID, "sender": m.Sender, "recipient": m.Recipient,
-			"kind": m.Kind, "in_reply_to": m.InReplyTo, "payload": m.Payload,
+			"kind": m.Kind, "in_reply_to": m.InReplyTo, "thread": m.RootID, "payload": m.Payload,
 			"approval_state": m.ApprovalState, "created_at": m.CreatedAt,
 			// read/total are authoritative; acked_count stays for older
 			// console bundles and now means the same number as read.

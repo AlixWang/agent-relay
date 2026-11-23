@@ -176,16 +176,18 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 	}
 
 	// Hard fuse: count and age (minus the admin-cleared watermark).
+	// - Operator threads (op/*) never hit whole-thread count/age limits, and
+	//   the human operator is never blocked by a thread fuse; non-status peer
+	//   traffic in op/* keeps a rolling-window guard against runaway loops.
+	// - Rooms (grp_*) use a rolling window on non-status traffic.
+	// - Peer-to-peer threads use whole-thread count/age on non-status traffic.
 	wm, err := g.st.FuseWatermark(rootID)
 	if err != nil {
 		return nil, err
 	}
-	if isRoomThread(rootID) || isOperatorThread(rootID) {
-		// Rooms and operator DMs are long-lived by design: a rolling window
-		// bounds chatter without ever fusing the conversation itself. The age
-		// rule is skipped on purpose — applying it would wedge every such
-		// thread a day after its first message.
-		if g.limits.RoomFuseMaxMessages > 0 && g.limits.RoomFuseWindowSecs > 0 {
+	if isOperatorThread(rootID) {
+		if env.From != auth.OperatorID && env.Kind != "status" &&
+			g.limits.RoomFuseMaxMessages > 0 && g.limits.RoomFuseWindowSecs > 0 {
 			count, err := g.st.CountThreadWindow(rootID, wm, now-g.limits.RoomFuseWindowSecs)
 			if err != nil {
 				return nil, err
@@ -200,7 +202,23 @@ func (g *Guard) Check(env *Envelope, now int64) (*Verdict, error) {
 						rootID, g.limits.RoomFuseMaxMessages, g.limits.RoomFuseWindowSecs/60)}
 			}
 		}
-	} else {
+	} else if isRoomThread(rootID) {
+		if env.Kind != "status" && g.limits.RoomFuseMaxMessages > 0 && g.limits.RoomFuseWindowSecs > 0 {
+			count, err := g.st.CountThreadWindow(rootID, wm, now-g.limits.RoomFuseWindowSecs)
+			if err != nil {
+				return nil, err
+			}
+			if count >= g.limits.RoomFuseMaxMessages {
+				if g.allowFuseAudit(env.From, rootID, now) {
+					_ = g.st.AppendAudit(env.From, "thread.fuse_tripped",
+						fmt.Sprintf("thread=%s count=%d window=%ds", rootID, count, g.limits.RoomFuseWindowSecs), now)
+				}
+				return nil, &Rejection{Code: "loop_fuse_tripped",
+					Reason: fmt.Sprintf("thread %s exceeded %d messages in %d minutes; wait before posting again",
+						rootID, g.limits.RoomFuseMaxMessages, g.limits.RoomFuseWindowSecs/60)}
+			}
+		}
+	} else if env.Kind != "status" {
 		count, err := g.st.CountThreadSince(rootID, wm)
 		if err != nil {
 			return nil, err
@@ -252,42 +270,63 @@ func (g *Guard) RecordHit(sender string, now int64) {
 	g.hits[sender] = append(g.hits[sender], now)
 }
 
+func (g *Guard) findReplyParent(env *Envelope) (*store.Message, error) {
+	parents, err := g.st.GetByIDAnySender(env.InReplyTo)
+	if err != nil || len(parents) == 0 {
+		return nil, err
+	}
+	for _, p := range parents {
+		if p.Sender == env.To || env.To == "*" || p.Recipient == env.From || p.Recipient == "*" {
+			return p, nil
+		}
+	}
+	return parents[0], nil
+}
+
 func (g *Guard) resolveRoot(env *Envelope) (string, error) {
-	// Both console-routed targets have a canonical thread key, independent of
-	// in_reply_to: a room is one long conversation, and every message between
-	// a peer and the operator belongs to their single DM thread (§6.8). This
-	// keeps the console timeline stable and the fuse per room/DM rather than
-	// forking a new thread per message.
+	// Rooms are one long conversation keyed by their alias (§6.8).
 	if isRoomThread(env.To) {
 		return env.To, nil
+	}
+	// Explicit replies on an operator DM keep the parent's operator round
+	// thread (op/<peer>/<task_id> or legacy op/<peer>). Replies to a broadcast
+	// task land in a per-peer round op/<peer>/<task_id> so broadcast handoffs
+	// stay isolated from the legacy op/<peer> thread.
+	if env.InReplyTo != "" && (env.From == auth.OperatorID || env.To == auth.OperatorID) {
+		parent, err := g.findReplyParent(env)
+		if err != nil {
+			return "", err
+		}
+		if parent != nil {
+			if parent.Recipient != "*" && isOperatorThread(parent.RootID) {
+				return parent.RootID, nil
+			}
+			if parent.Recipient == "*" && env.To == auth.OperatorID {
+				return "op/" + env.From + "/" + parent.ID, nil
+			}
+		}
+	}
+	// Each fresh operator task starts its own round thread & FIFO scope so a
+	// single stalled task never blocks subsequent tasks or bloats one thread.
+	if env.From == auth.OperatorID {
+		if env.Kind == "task" {
+			return "op/" + env.To + "/" + env.ID, nil
+		}
+		return "op/" + env.To, nil
 	}
 	if env.To == auth.OperatorID {
 		return "op/" + env.From, nil
 	}
-	if env.From == auth.OperatorID && !isRoomThread(env.To) {
-		// The operator's side of a DM shares the peer's thread, so the console
-		// timeline is one conversation per peer instead of a thread per reply.
-		return "op/" + env.To, nil
-	}
 	if env.InReplyTo != "" {
-		parents, err := g.st.GetByIDAnySender(env.InReplyTo)
+		parent, err := g.findReplyParent(env)
 		if err != nil {
 			return "", err
 		}
-		for _, p := range parents {
-			// Prefer a parent in the same conversation; otherwise first match.
-			if p.Sender == env.To || env.To == "*" || p.Recipient == env.From || p.Recipient == "*" {
-				if p.RootID != "" {
-					return p.RootID, nil
-				}
-				return threadRootOf(p), nil
+		if parent != nil {
+			if parent.RootID != "" {
+				return parent.RootID, nil
 			}
-		}
-		if len(parents) > 0 {
-			if parents[0].RootID != "" {
-				return parents[0].RootID, nil
-			}
-			return threadRootOf(parents[0]), nil
+			return threadRootOf(parent), nil
 		}
 		// Unknown parent: start a thread keyed by the reply target so the
 		// fuse still bounds it instead of silently forking.
@@ -500,6 +539,10 @@ func (g *Guard) checkHandshake(env *Envelope, rootID string, now int64) error {
 		return &Rejection{Code: "bad_permission_ref",
 			Reason: "tasks addressed to a room have no 1:1 handshake; DM the operator (to=" + auth.OperatorID + ") instead"}
 	}
+	if task.Recipient == "*" {
+		return &Rejection{Code: "bad_permission_ref",
+			Reason: "broadcast tasks have no 1:1 handshake; reply with kind=result to the sender instead"}
+	}
 	if task.RootID != "" && rootID != task.RootID {
 		return &Rejection{Code: "bad_permission_ref", Reason: "handshake is in a different thread than its task"}
 	}
@@ -514,12 +557,44 @@ func (g *Guard) checkHandshake(env *Envelope, rootID string, now int64) error {
 				return &Rejection{Code: "permission_not_authorized",
 					Reason: "only the task sender or recipient may cancel"}
 			}
+			if done, err := g.st.HasTaskTerminal(env.From, env.InReplyTo); err != nil {
+				return err
+			} else if done {
+				return &Rejection{Code: "status_already_terminal",
+					Reason: "task already has a terminal result or cancellation from this sender"}
+			}
 			return nil
 		}
 		// Lifecycle signals come from the task recipient (B) only.
 		if env.From != task.Recipient || env.To != task.Sender {
 			return &Rejection{Code: "permission_not_authorized",
 				Reason: "lifecycle status must flow from the task recipient back to its sender"}
+		}
+		if env.Status == "started" {
+			if done, err := g.st.HasTaskTerminal(env.From, env.InReplyTo); err != nil {
+				return err
+			} else if done {
+				return &Rejection{Code: "status_already_terminal",
+					Reason: "task already has a terminal result or cancellation from this sender"}
+			}
+			cnt, err := g.st.CountTaskStatus(rootID, env.From, env.InReplyTo, "started")
+			if err != nil {
+				return err
+			}
+			if cnt >= 3 {
+				return &Rejection{Code: "status_throttled",
+					Reason: "started status limit reached for this task"}
+			}
+			if cnt >= 1 {
+				last, err := g.st.LastTaskHandshakeTs(env.From, env.InReplyTo, "started")
+				if err != nil {
+					return err
+				}
+				if last != 0 && now-last < 600 {
+					return &Rejection{Code: "status_throttled",
+						Reason: "duplicate started status within 10 minutes"}
+				}
+			}
 		}
 		if env.Status == "progress" && g.limits.ProgressThrottleSecs > 0 {
 			last, err := g.st.LastHandshakeTs(rootID, env.From, "progress")

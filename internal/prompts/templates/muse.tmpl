@@ -104,9 +104,14 @@ printf 'RELAY_URL=%s\n' "{{.ServerAddr}}" > ~/workspace/task-relay/relay-watch.e
   client_update（新版 Go 接收端）或 profile_refresh（更新自我简介）。
   处理优先级：prompt_update > client_update > tasks，可同批按序处理。
 - 被唤醒时：读 `~/workspace/task-relay/identity`（单行）/`.token`（chmod 600）→ 拉取 →
+  接手任务后把任务 `id` 追加到 `~/workspace/task-relay/.worker_active`（防看门狗 3 分钟误重试唤醒）→
   逐条执行 payload → POST result（to 写原 sender，in_reply_to 写原 id，
   id 用 `"<原id>-result-<时间戳秒>"`）→ POST /ack（by 写自己）。**注意顺序：先回结果，再 ack。**
-  广播同样处理、用自己身份 ack。
+  广播（`to=*`）同样处理、用自己身份 ack，但**不要发 `status/started` 或 `status/cancelled`**（无 1:1 握手）。
+- **上下文卫生（防会话膨胀）**：
+  - 只按本次唤醒 `tasks[].id` 去 `spool/wake.jsonl` 精确提取对应行，不要通读整个历史文件；
+  - `result` 保持结构化简明摘要（结论 + 关键变更/文件路径/验证结果），不要把数 KB 原始命令日志整段贴进 payload；
+  - 单轮任务结单后，不要把逐条任务流水记入长期 memory。
 - 发消息约束：kind 可为 task/result/chat/status/permission_request/permission_decision；
   result/status/permission_request/permission_decision **必须**带 in_reply_to（缺了服务端报 409）；
   POST /messages 时**绝不带 `thread` 字段**（带了服务端报 400）。

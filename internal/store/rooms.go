@@ -179,12 +179,12 @@ func (s *sqliteStore) IsRoomMember(roomID, peerID string) (bool, error) {
 	return n > 0, err
 }
 
-// CountThreadWindow counts one thread's messages after the fuse watermark and
-// inside the time window — the rolling fuse for long-lived threads (§6.8).
+// CountThreadWindow counts one thread's non-status messages after the fuse
+// watermark and inside the time window — the rolling fuse for long-lived threads (§6.8).
 func (s *sqliteStore) CountThreadWindow(rootID string, sinceSeq, sinceTs int64) (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages
-		WHERE root_id=? AND seq>? AND created_at>?`, rootID, sinceSeq, sinceTs).Scan(&n)
+		WHERE root_id=? AND seq>? AND created_at>? AND kind!='status'`, rootID, sinceSeq, sinceTs).Scan(&n)
 	return n, err
 }
 

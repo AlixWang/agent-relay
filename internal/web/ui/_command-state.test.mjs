@@ -99,7 +99,11 @@ const BIG_LISA_ITEMS = Array.from({ length: 120 }, (_, i) => ({
 const THREADS = { 'op/alice': OP_ALICE_ITEMS, 'op/lisa': BIG_LISA_ITEMS };
 const threadPage = (raw) => {
   const u = new URL(raw, 'https://relay.test');
-  const list = THREADS[u.searchParams.get('thread')] || [];
+  const dmPeer = u.searchParams.get('dm_peer');
+  const hideStatus = u.searchParams.get('hide_status') === '1';
+  const key = dmPeer ? ('op/' + dmPeer) : u.searchParams.get('thread');
+  let list = THREADS[key] || [];
+  if (hideStatus) list = list.filter((m) => m.kind !== 'status');
   const size = Number(u.searchParams.get('page_size') || 50);
   let items = list;
   let hasMore = false;
@@ -135,7 +139,7 @@ globalThis.fetch = async (url, opts = {}) => {
   let body;
   if (url === '/admin/inbox/read') body = { ok: true, unread: 0, unread_by_peer: {} };
   else if (url.startsWith('/admin/rooms')) body = { ok: true, rooms: [ROOM] };
-  else if (url.startsWith('/admin/messages?thread=')) body = threadPage(url);
+  else if (url.startsWith('/admin/messages?thread=') || url.startsWith('/admin/messages?dm_peer=')) body = threadPage(url);
   else if (url.startsWith('/admin/inbox')) body = { ok: true, unread: 2, unread_by_peer: { alice: 2 }, items: INBOX_ITEMS };
   else if (url.startsWith('/admin/peers')) body = { ok: true, peers: PEERS };
   else body = { ok: true };
@@ -281,12 +285,11 @@ page.activeTarget = { type: 'room', id: 'grp_chat', name: '聊天群', subtitle:
 page.activeRoomData = { id: 'grp_chat', members: ['alice'], archived: false };
 assert(page.roomDissolved() === false, 'a live room must not look dissolved');
 
-// 7. Peer DM shows both directions. Regression: the view used to filter
-// /admin/inbox by from==peer, so operator sends only lived until the next
-// refresh (optimistic append wiped). It must load the op/<id> thread instead.
+// 7. Peer DM shows both directions via dm_peer (covering legacy op/<id> and
+// per-round op/<id>/<task_id>, hiding status spam by default).
 page.selectPeer({ id: 'alice', display_name: 'alice' });
 await page.loadActiveMessages(false);
-assert(calls.some((u) => u.includes('thread=op') && u.includes('alice')), 'peer DM must load the op/<id> thread, got ' + calls.filter((u) => u.includes('/admin/messages')).join(','));
+assert(calls.some((u) => u.includes('dm_peer=alice') && u.includes('hide_status=1')), 'peer DM must load dm_peer=<id>&hide_status=1, got ' + calls.filter((u) => u.includes('/admin/messages')).join(','));
 assert(page.messages.length === 2, 'DM thread must hold both directions, got ' + page.messages.length);
 assert(page.messages[0].from === 'operator' && page.messages[0].to === 'alice', 'operator send must render: ' + JSON.stringify(page.messages[0]));
 assert(page.messages[1].from === 'alice' && page.messages[1].to === 'operator', 'peer reply must render: ' + JSON.stringify(page.messages[1]));
@@ -391,6 +394,7 @@ assert(!posts.some((p) => p.url === '/admin/inbox/read'), 'nothing unread: polli
 // 13. Virtual stream + cursor paging. A 120-row DM must mount only ~50 rows,
 // open on the NEWEST page, walk older with before_seq, and poll forward with
 // after_seq instead of re-fetching the thread.
+page.showStatusInDM = true;
 page.activeTarget = { type: 'peer', id: 'lisa', name: '@ lisa', subtitle: '' };
 page.activeRoomData = null;
 calls.length = 0;
@@ -400,14 +404,14 @@ assert(page.visibleMessages.length <= 50, 'only the render window may be mounted
 assert(page.visibleMessages[0].seq === 1071 && page.visibleMessages[49].seq === 1120, 'the window must sit on the newest page, got ' + page.visibleMessages.map((m) => m.seq).slice(0, 3));
 assert(page.hasOlder === true && page.totalMessages === 120, 'page meta must report older rows and the full total');
 assert(page.oldestSeq === 1071 && page.newestSeq === 1120, 'page cursors: ' + page.oldestSeq + '..' + page.newestSeq);
-const initialLoad = calls.find((u) => u.includes('thread=op%2Flisa'));
+const initialLoad = calls.find((u) => u.includes('dm_peer=lisa'));
 assert(initialLoad && initialLoad.includes('page_size=50') && !initialLoad.includes('after_seq') && !initialLoad.includes('before_seq'), 'opening a thread must ask for the newest page only, got ' + initialLoad);
 
 // "加载更早消息" walks backwards, 50 rows at a time, and stops at #1001.
 await page.loadOlderMessages();
 assert(page.messages.length === 100 && page.oldestSeq === 1021 && page.hasOlder === true, 'first older page: ' + page.messages.length + '/' + page.oldestSeq + '/' + page.hasOlder);
 assert(page.visibleMessages.length <= 50, 'loading history must not grow the DOM window, got ' + page.visibleMessages.length);
-assert(calls.some((u) => u.includes('thread=op%2Flisa') && u.includes('before_seq=1071')), 'load earlier must use before_seq, got ' + calls.filter((u) => u.includes('op%2Flisa')).join(','));
+assert(calls.some((u) => u.includes('dm_peer=lisa') && u.includes('before_seq=1071')), 'load earlier must use before_seq, got ' + calls.filter((u) => u.includes('dm_peer=lisa')).join(','));
 
 // Window bookkeeping: spacer heights follow the offset of the rendered slice.
 // With 100 loaded rows, rendering [0,50) leaves height below, [25,75) leaves
@@ -435,7 +439,7 @@ await page.pollThreadMessages();
 assert(page.messages.length === 122 && page.messages[121].seq === 1122, 'poll must append only rows after the cursor, got ' + page.messages.length);
 assert(page.newestSeq === 1122 && page.totalMessages === 122, 'poll must advance the cursor/total');
 assert(page.newBelow === false, 'a reader at the bottom follows new rows');
-assert(calls.some((u) => u.includes('thread=op%2Flisa') && u.includes('after_seq=1120') && u.includes('page_size=200')), 'poll must use after_seq=maxSeq, got ' + calls.filter((u) => u.includes('op%2Flisa')).join(','));
+assert(calls.some((u) => u.includes('dm_peer=lisa') && u.includes('after_seq=1120') && u.includes('page_size=200')), 'poll must use after_seq=maxSeq, got ' + calls.filter((u) => u.includes('dm_peer=lisa')).join(','));
 assert(page.visibleMessages.length <= 50, 'poll must not add mounted rows beyond the window, got ' + page.visibleMessages.length);
 
 // A reader in history keeps their place and gets the jump chip instead.
