@@ -22,6 +22,7 @@ import (
 	"github.com/AlixWang/agent-relay/internal/config"
 	"github.com/AlixWang/agent-relay/internal/effects"
 	"github.com/AlixWang/agent-relay/internal/guard"
+	"github.com/AlixWang/agent-relay/internal/mcpgateway"
 	"github.com/AlixWang/agent-relay/internal/muse"
 	"github.com/AlixWang/agent-relay/internal/presence"
 	"github.com/AlixWang/agent-relay/internal/prompts"
@@ -59,6 +60,7 @@ type Server struct {
 	effects   *effects.Worker
 	agentLogs *agentlog.Ingestor
 	resources *resources.Service
+	mcp       *mcpgateway.Server
 
 	adminHash []byte
 	mu        sync.Mutex
@@ -113,6 +115,15 @@ func (s *Server) SetGuard(g *guard.Guard) { s.guard = g }
 // AgentLogs exposes the log ingestor so main can wire secret redaction
 // (DESIGN §4.12, P4).
 func (s *Server) AgentLogs() *agentlog.Ingestor { return s.agentLogs }
+
+// SetMCP wires the relay MCP gateway (design v5). Nil leaves the /mcp routes
+// answering 503; /admin/mcp routes still require an admin session.
+func (s *Server) SetMCP(m *mcpgateway.Server) {
+	s.mcp = m
+	if m != nil {
+		m.SetClientIP(s.clientIP)
+	}
+}
 
 func (s *Server) SetAdminHash(hash []byte) { s.adminHash = hash }
 
@@ -248,6 +259,14 @@ func (s *Server) Handler(web http.Handler) http.Handler {
 	mux.HandleFunc("GET /admin/update/status", s.requireAdmin(s.handleAdminUpdateStatus))
 	mux.HandleFunc("POST /admin/update/check", s.requireAdmin(s.handleAdminUpdateCheck))
 	mux.HandleFunc("POST /admin/update/apply", s.requireAdmin(s.handleAdminUpdateApply))
+
+	// Relay MCP gateway v5: one handler family for /mcp, /mcp/<service>, and
+	// the public /mcp/health. Admin routes are wrapped in the same session
+	// auth as every other /admin API.
+	mux.Handle("/mcp", http.HandlerFunc(s.handleMCP))
+	mux.Handle("/mcp/", http.HandlerFunc(s.handleMCP))
+	mux.Handle("/admin/mcp", s.requireAdminHandler(http.HandlerFunc(s.handleMCPAdmin)))
+	mux.Handle("/admin/mcp/", s.requireAdminHandler(http.HandlerFunc(s.handleMCPAdmin)))
 
 	if web != nil {
 		// Catch-all for the embedded console (longest-match wins over "/";
@@ -1187,6 +1206,32 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (s *Server) requireAdminHandler(next http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.isAdmin(r) {
+			writeErr(w, 401, "admin login required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	if s.mcp == nil {
+		writeErr(w, http.StatusServiceUnavailable, "MCP gateway unavailable")
+		return
+	}
+	s.mcp.MCPHandler().ServeHTTP(w, r)
+}
+
+func (s *Server) handleMCPAdmin(w http.ResponseWriter, r *http.Request) {
+	if s.mcp == nil {
+		writeErr(w, http.StatusServiceUnavailable, "MCP gateway unavailable")
+		return
+	}
+	s.mcp.AdminHandler().ServeHTTP(w, r)
+}
+
 // ---- admin APIs ----
 
 func (s *Server) handleAdminCreateInvite(w http.ResponseWriter, r *http.Request) {
@@ -1313,6 +1358,12 @@ func (s *Server) handleAdminDeletePeer(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.st.AppendAudit("admin", "peer.deleted",
 		fmt.Sprintf("peer=%s tokens_revoked=%d delete_resources=%t", id, n, deleteResources), now)
+	if s.mcp != nil {
+		// Keep the materialized peer grant from outliving the peer.
+		if _, err := s.mcp.RevokePeerGrant(id); err != nil {
+			log.Printf("mcp: revoke deleted peer grant %s: %v", id, err)
+		}
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "tokens_revoked": n})
 }
 
@@ -1377,6 +1428,14 @@ func (s *Server) handleAdminPatchPeer(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = s.st.AppendAudit("admin", "peer.status",
 			fmt.Sprintf("peer=%s status=%s", id, req.Status), time.Now().Unix())
+		// MCP peer grants are materialized in mcp_keys; a non-active peer must
+		// lose its grant immediately (it cannot authenticate anyway, but the
+		// admin console should show the true authorization state).
+		if req.Status != "active" && s.mcp != nil {
+			if _, err := s.mcp.RevokePeerGrant(id); err != nil {
+				log.Printf("mcp: revoke peer grant %s: %v", id, err)
+			}
+		}
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
@@ -1905,6 +1964,11 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			body["resource_submissions_pending"] = subs
 			body["resource_takedowns_pending"] = tds
 		}
+	}
+	if s.mcp != nil {
+		body["mcp_enabled"] = s.mcp.Enabled()
+		body["mcp_write_enabled"] = s.mcp.WriteEnabled()
+		body["mcp_pending_approvals"] = s.mcp.PendingApprovals()
 	}
 	if s.work != nil {
 		body["work_ready"] = s.work.Ready()

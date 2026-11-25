@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/AlixWang/agent-relay/internal/mcpgateway"
 )
 
 // Config mirrors configs/config.toml.example. All durations are seconds
@@ -130,6 +132,10 @@ type Config struct {
 	MuseTaskNudgeEnabled      bool `toml:"muse_task_nudge_enabled"`
 	MuseTaskNudgeAfterSecs    int  `toml:"muse_task_nudge_after_secs"`
 	MuseTaskNudgeCooldownSecs int  `toml:"muse_task_nudge_cooldown_secs"`
+	// Relay MCP gateway v5. Service segments live under
+	// [mcp_gateway.services.<id>]; writes are off by default and credentials
+	// are secret:<name> references only.
+	MCPGateway mcpgateway.Config `toml:"mcp_gateway"`
 }
 
 // Default returns the documented defaults (DESIGN §6.1, §10.2).
@@ -187,6 +193,7 @@ func Default() *Config {
 		MuseTaskNudgeEnabled:         true,
 		MuseTaskNudgeAfterSecs:       180,
 		MuseTaskNudgeCooldownSecs:    600,
+		MCPGateway:                   mcpgateway.DefaultConfig(),
 	}
 }
 
@@ -235,6 +242,7 @@ func Load(path string) (*Config, error) {
 		"muse_chat_per_peer_per_hour": true, "muse_chat_global_per_minute": true,
 		"muse_task_nudge_enabled": true, "muse_task_nudge_after_secs": true,
 		"muse_task_nudge_cooldown_secs": true,
+		"mcp_gateway":                   true,
 	}
 	for k := range raw {
 		if !known[k] {
@@ -377,6 +385,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MuseTaskNudgeCooldownSecs < 0 {
 		return fmt.Errorf("muse_task_nudge_cooldown_secs must be >= 0")
+	}
+	if err := c.MCPGateway.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

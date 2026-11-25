@@ -269,3 +269,18 @@ func TestManifestSchemaStability(t *testing.T) {
 		t.Fatalf("empty manifest JSON: %s", b)
 	}
 }
+
+func TestRevealServerSecretNeedsNoGrant(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	if _, err := svc.PutSecret("SVC_KEY", "server integration", "value-123"); err != nil {
+		t.Fatal(err)
+	}
+	// No grant exists, but the in-process gateway can still resolve it.
+	got, err := svc.RevealServerSecret("SVC_KEY")
+	if err != nil || got != "value-123" {
+		t.Fatalf("server secret: %q %v", got, err)
+	}
+	if _, err := svc.RevealServerSecret("MISSING"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing server secret: %v", err)
+	}
+}
