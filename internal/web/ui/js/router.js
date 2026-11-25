@@ -10,7 +10,7 @@ export const routeMeta = {
   'muse-chat': { title: '直接对话', desc: '与已开通成员的 Muse agent 对话（消息对成员可见）' },
   prompts: { title: '邀请 & Prompt', desc: '助手入驻凭据签发与版本指令生成' },
   resources: { title: '资源中心', desc: '密钥、MCP、Skill 与 Prompt 的登记、授权与下发' },
-  mcp:     { title: 'MCP 网关', desc: 'AdSense / Bing 工具、外部 Key、Peer 授权、二次批准与审计' },
+  mcp:     { title: 'MCP 网关', desc: 'AdSense / Bing / GA 工具、外部 Key、Peer 授权、二次批准与审计' },
   audit:   { title: '审计日志', desc: '管理事件、状态流转与安全审计追踪' },
   logs:    { title: 'Agent 日志', desc: '接收端、看门狗与唤醒链运行日志' },
   tokens:  { title: 'Token 管理', desc: '凭证轮换、前缀核验与实时吊销' },

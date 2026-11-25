@@ -1268,15 +1268,17 @@
   <form method="dialog" id="mcpKeyForm">
     <div class="modal-head">
       <svg class="icon" style="color: var(--muted)"><use href="#i-key"/></svg>
-      <div><h2 id="mcpKeyTitle">新建 MCP Key</h2><p class="muted xs">默认只给读 scope；原文只在创建成功后显示一次。</p></div>
+      <div><h2 id="mcpKeyTitle">新建 MCP Key</h2><p class="muted xs" id="mcpKeySub">默认只给读 scope；原文只在创建成功后显示一次。</p></div>
     </div>
-    <label class="field">名称<input id="mcpKeyName" placeholder="例如 cursor-readonly-01" required autocomplete="off"></label>
-    <label class="field">Scope（逗号或换行分隔）
-      <textarea id="mcpKeyScopes" rows="4" placeholder="mcp:adsense:read:*&#10;mcp:bing-webmaster:read:*" required></textarea>
-    </label>
-    <div class="grid-2">
-      <label class="field">有效期（天，0=按默认）<input id="mcpKeyDays" type="number" min="0" max="3650" value="0"></label>
-      <label class="field">备注<input id="mcpKeyNote" placeholder="可选" autocomplete="off"></label>
+    <div id="mcpKeyFields">
+      <label class="field">名称<input id="mcpKeyName" placeholder="例如 cursor-readonly-01" required autocomplete="off"></label>
+      <label class="field">Scope（逗号或换行分隔）
+        <textarea id="mcpKeyScopes" rows="4" placeholder="mcp:adsense:read:*&#10;mcp:bing-webmaster:read:*&#10;mcp:ga:read:*" required></textarea>
+      </label>
+      <div class="grid-2">
+        <label class="field">有效期（天，0=按默认）<input id="mcpKeyDays" type="number" min="0" max="3650" value="0"></label>
+        <label class="field">备注<input id="mcpKeyNote" placeholder="可选" autocomplete="off"></label>
+      </div>
     </div>
     <div id="mcpKeyResult" hidden>
       <div class="alert alert-warn"><svg class="icon"><use href="#i-alert"/></svg>这是唯一一次显示原文；关闭后服务端无法再取回。</div>

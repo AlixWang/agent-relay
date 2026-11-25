@@ -25,10 +25,11 @@ var ErrCredentialMissing = errors.New("credential not available")
 type Credentials struct {
 	resolver SecretResolver
 	ttl      time.Duration
-	now      func() time.Time
 
 	mu    sync.Mutex
+	now   func() time.Time
 	cache map[string]cachedSecret
+	gen   map[string]uint64
 }
 
 type cachedSecret struct {
@@ -40,10 +41,13 @@ func NewCredentials(resolver SecretResolver) *Credentials {
 	return &Credentials{
 		resolver: resolver, ttl: 30 * time.Second, now: time.Now,
 		cache: map[string]cachedSecret{},
+		gen:   map[string]uint64{},
 	}
 }
 
 func (c *Credentials) SetClock(now func() time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if now != nil {
 		c.now = now
 	}
@@ -55,12 +59,13 @@ func (c *Credentials) Resolve(ref string) (string, error) {
 	if err != nil {
 		return "", ErrCredentialMissing
 	}
-	now := c.now()
 	c.mu.Lock()
+	now := c.now()
 	if ent, ok := c.cache[name]; ok && now.Before(ent.expires) {
 		c.mu.Unlock()
 		return ent.value, nil
 	}
+	gen := c.gen[name]
 	c.mu.Unlock()
 	if c.resolver == nil {
 		return "", ErrCredentialMissing
@@ -70,7 +75,11 @@ func (c *Credentials) Resolve(ref string) (string, error) {
 		return "", ErrCredentialMissing
 	}
 	c.mu.Lock()
-	c.cache[name] = cachedSecret{value: v, expires: now.Add(c.ttl)}
+	// Only populate the cache if Invalidate did not bump the generation while
+	// RevealServerSecret was in flight.
+	if c.gen[name] == gen {
+		c.cache[name] = cachedSecret{value: v, expires: c.now().Add(c.ttl)}
+	}
 	c.mu.Unlock()
 	return v, nil
 }
@@ -83,6 +92,7 @@ func (c *Credentials) Invalidate(ref string) {
 	}
 	c.mu.Lock()
 	delete(c.cache, name)
+	c.gen[name]++
 	c.mu.Unlock()
 }
 

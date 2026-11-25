@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
 	"time"
@@ -32,14 +33,14 @@ func (m *ApprovalManager) SetClock(now func() time.Time) {
 	}
 }
 
-// FreezeParams canonicalizes tool+params into the stored frozen form:
+// FreezeParams canonicalizes service_id+tool+params into the stored frozen form:
 //
 //	params_json = canonical JSON object without control fields
-//	params_hash = SHA-256 hex of {"tool":<tool>,"params":<canonical>}
+//	params_hash = SHA-256 hex of {"service_id":<svc>,"tool":<tool>,"params":<canonical>}
 //
 // Control fields (dry_run, approval_id) are excluded because the execute call
 // must be able to add approval_id without changing the frozen request.
-func FreezeParams(tool string, raw json.RawMessage) (canonical []byte, hash string, err error) {
+func FreezeParams(serviceID, tool string, raw json.RawMessage) (canonical []byte, hash string, err error) {
 	params, err := stripControlFields(raw)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid params: %w", err)
@@ -49,8 +50,9 @@ func FreezeParams(tool string, raw json.RawMessage) (canonical []byte, hash stri
 		return nil, "", fmt.Errorf("invalid params: %w", err)
 	}
 	wrapper, err := json.Marshal(map[string]any{
-		"tool":   tool,
-		"params": json.RawMessage(canonical),
+		"service_id": serviceID,
+		"tool":       tool,
+		"params":     json.RawMessage(canonical),
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("freeze params: %w", err)
@@ -63,6 +65,9 @@ func stripControlFields(raw json.RawMessage) (any, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return map[string]any{}, nil
 	}
+	if err := checkStrictJSONObject(raw); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
@@ -70,7 +75,7 @@ func stripControlFields(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	var trailing any
-	if err := dec.Decode(&trailing); err == nil {
+	if err := dec.Decode(&trailing); err != io.EOF {
 		return nil, fmt.Errorf("trailing data")
 	}
 	obj, ok := v.(map[string]any)
@@ -85,45 +90,64 @@ func stripControlFields(raw json.RawMessage) (any, error) {
 // canonicalJSON sorts keys (encoding/json does this for map[string]any) and
 // normalizes numeric forms so 1, 1.0 and 1e0 all freeze identically.
 func canonicalJSON(v any) ([]byte, error) {
-	return json.Marshal(normalizeNumbers(v))
+	norm, err := normalizeNumbers(v)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(norm)
 }
 
-func normalizeNumbers(v any) any {
+func normalizeNumbers(v any) (any, error) {
 	switch x := v.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, val := range x {
-			out[k] = normalizeNumbers(val)
+			n, err := normalizeNumbers(val)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = n
 		}
-		return out
+		return out, nil
 	case []any:
 		out := make([]any, len(x))
 		for i, val := range x {
-			out[i] = normalizeNumbers(val)
+			n, err := normalizeNumbers(val)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = n
 		}
-		return out
+		return out, nil
 	case json.Number:
 		if i, err := x.Int64(); err == nil {
-			return i
+			return i, nil
 		}
-		if f, err := x.Float64(); err == nil && !math.IsInf(f, 0) && !math.IsNaN(f) {
-			return json.Number(strconv.FormatFloat(f, 'g', -1, 64))
+		f, err := x.Float64()
+		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+			return nil, fmt.Errorf("invalid numeric value %q", x.String())
 		}
-		return x.String()
+		if f == 0 {
+			return int64(0), nil
+		}
+		if math.Trunc(f) == f && f >= -9007199254740992 && f <= 9007199254740992 {
+			return int64(f), nil
+		}
+		return json.Number(strconv.FormatFloat(f, 'g', -1, 64)), nil
 	default:
-		return v
+		return v, nil
 	}
 }
 
 // Request freezes a high-risk write and returns an existing open approval for
-// the same principal+tool+hash instead of stacking a duplicate.
+// the same principal+service_id+tool+hash instead of stacking a duplicate.
 func (m *ApprovalManager) Request(a Actor, endpoint, serviceID, tool string, raw json.RawMessage, requestID string) (*store.MCPApproval, *Error) {
-	canonical, hash, err := FreezeParams(tool, raw)
+	canonical, hash, err := FreezeParams(serviceID, tool, raw)
 	if err != nil {
 		return nil, InvalidParams("%s", err.Error())
 	}
 	now := m.now().Unix()
-	existing, err := m.st.GetOpenMCPApproval(a.Principal(), tool, hash)
+	existing, err := m.st.GetOpenMCPApproval(a.Principal(), serviceID, tool, hash)
 	if err != nil {
 		return nil, NewError(CodeInternal, "could not create approval", 500)
 	}
@@ -149,7 +173,7 @@ func (m *ApprovalManager) Request(a Actor, endpoint, serviceID, tool string, raw
 	}
 	if err := m.st.CreateMCPApproval(a2); err != nil {
 		// Lost a race against the partial unique index: return the winner.
-		if other, gerr := m.st.GetOpenMCPApproval(a.Principal(), tool, hash); gerr == nil && other != nil {
+		if other, gerr := m.st.GetOpenMCPApproval(a.Principal(), serviceID, tool, hash); gerr == nil && other != nil {
 			return other, nil
 		}
 		return nil, NewError(CodeInternal, "could not create approval", 500)
@@ -235,7 +259,7 @@ func (m *ApprovalManager) ClaimForExecution(id string, a Actor, endpoint, servic
 	if row.Endpoint != "" && endpoint != "" && row.Endpoint != endpoint {
 		return nil, NewError(CodeParamsMismatch, "approval was frozen for a different endpoint", 200)
 	}
-	_, hash, ferr := FreezeParams(tool, raw)
+	_, hash, ferr := FreezeParams(serviceID, tool, raw)
 	if ferr != nil {
 		return nil, InvalidParams("%s", ferr.Error())
 	}
@@ -275,7 +299,11 @@ func (m *ApprovalManager) ClaimForExecution(id string, a Actor, endpoint, servic
 			}
 			return nil, NewError(CodeApprovalConflict, "approval was decided concurrently", 409)
 		}
-		row, _ = m.st.GetMCPApproval(id)
+		row.Status = "executed"
+		row.ExecutedAt = now
+		if latest, gerr := m.st.GetMCPApproval(id); gerr == nil && latest != nil {
+			row = latest
+		}
 		return row, nil
 	default:
 		return nil, NewError(CodeApprovalConflict, "approval is in an unknown state", 409)

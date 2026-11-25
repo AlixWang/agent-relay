@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AlixWang/agent-relay/internal/mcpgateway"
 	"github.com/AlixWang/agent-relay/internal/web"
 )
 
@@ -88,6 +89,15 @@ func TestConsolePagesRenderWithResolvableAssets(t *testing.T) {
 // Every admin route the console's assets call must exist.
 func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
 	f := newFixture(t)
+	mcpCfg := mcpgateway.DefaultConfig()
+	mcpCfg.Services = map[string]mcpgateway.ServiceConfig{}
+	mcpSrv, err := mcpgateway.New(mcpgateway.Options{
+		Config: mcpCfg, Store: f.srv.st, Auth: f.srv.auth, MinProtocol: 1,
+	})
+	if err != nil {
+		t.Fatalf("mcp new: %v", err)
+	}
+	f.srv.SetMCP(mcpSrv)
 	f.mux = f.srv.Handler(web.Handler())
 	f.registerPeer(t, "probe", "muse")
 	cookie := f.adminLogin(t)
@@ -118,6 +128,7 @@ func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
 		"/js/logs.js",
 		"/js/tokens.js",
 		"/js/resources.js",
+		"/js/mcp.js",
 		"/js/system.js",
 		"/js/command.js",
 		"/js/message.js",
@@ -145,7 +156,7 @@ func TestConsoleAssetsDoNotCallMissingAdminRoutes(t *testing.T) {
 			}
 			ok := false
 			for _, probe := range variants {
-				for _, method := range []string{"GET", "POST", "PATCH", "DELETE"} {
+				for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
 					if probeRoute(t, f, method, probe, cookie) != 404 {
 						ok = true
 						break

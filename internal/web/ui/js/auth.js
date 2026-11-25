@@ -115,11 +115,13 @@ export async function refreshStats() {
       const totalAttention =
         (s.attention_tickets || 0) +
         (s.pending_approvals || 0) +
+        (s.mcp_pending_approvals || 0) +
         (s.muse_needs_reauth || 0) +
         pendingResources;
       if (totalAttention > 0) {
         const target = s.attention_tickets > 0 ? 'work'
           : s.pending_approvals > 0 ? 'threads'
+          : s.mcp_pending_approvals > 0 ? 'mcp'
           : s.muse_needs_reauth > 0 ? 'muse'
           : 'resources';
         attentionText.textContent = `${totalAttention} 项待处理`;

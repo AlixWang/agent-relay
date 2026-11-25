@@ -6,6 +6,7 @@ const state = {
   view: 'services',
   page: 1,
   pageSize: 20,
+  refreshSeq: 0,
   audit: { actor: '', service: '', tool: '', outcome: '' },
 };
 
@@ -32,12 +33,20 @@ let remTimer = null;
 function startRemTimers() {
   if (remTimer) clearInterval(remTimer);
   remTimer = setInterval(() => {
+    let hitZero = false;
     document.querySelectorAll('[data-mcp-rem]').forEach((el) => {
       let left = Number(el.dataset.mcpRem) || 0;
-      if (left > 0) left -= 1;
+      if (left > 0) {
+        left -= 1;
+        if (left === 0) hitZero = true;
+      }
       el.dataset.mcpRem = String(left);
       el.textContent = `${left}s`;
     });
+    if (hitZero) {
+      stopMCP();
+      refreshMCP();
+    }
   }, 1000);
 }
 
@@ -74,6 +83,7 @@ async function refreshHealth() {
 export async function refreshMCP() {
   const table = $('mcpTable');
   if (!table) return;
+  const seq = ++state.refreshSeq;
   const seg = $('mcpSeg');
   if (seg) {
     seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === state.view));
@@ -81,29 +91,28 @@ export async function refreshMCP() {
   $('mcpNewKey').hidden = state.view !== 'keys';
   $('mcpExport').hidden = state.view !== 'audit';
   $('mcpAuditFilters').hidden = state.view !== 'audit';
-  if (state.view !== 'approvals' && remTimer) {
-    clearInterval(remTimer);
-    remTimer = null;
-  }
+  if (state.view !== 'approvals') stopMCP();
   await refreshHealth();
+  if (seq !== state.refreshSeq) return;
   try {
-    if (state.view === 'services') await renderServices(table);
-    else if (state.view === 'keys') await renderKeys(table);
-    else if (state.view === 'peers') await renderPeers(table);
-    else if (state.view === 'approvals') await renderApprovals(table);
-    else await renderAudit(table);
+    if (state.view === 'services') await renderServices(table, seq);
+    else if (state.view === 'keys') await renderKeys(table, seq);
+    else if (state.view === 'peers') await renderPeers(table, seq);
+    else if (state.view === 'approvals') await renderApprovals(table, seq);
+    else await renderAudit(table, seq);
   } catch (err) {
-    if (err.status === 401) return;
+    if (seq !== state.refreshSeq || err.status === 401) return;
     const cols = table.querySelectorAll('thead th').length || 1;
     table.querySelector('tbody').innerHTML = `<tr><td colspan="${cols}" class="empty-td"><div class="empty bad">${icon('err')}<p>加载失败：${esc(err.message)}</p></div></td></tr>`;
     $('mcpNote').textContent = '加载失败：' + err.message;
   }
 }
 
-async function renderServices(table) {
+async function renderServices(table, seq) {
   setHeaders(table, ['服务', '网关状态', '工具', '写权限', '凭证引用', '最近调用', '最近错误']);
   skeleton(table, 7);
   const r = await api('/admin/mcp/services');
+  if (seq !== state.refreshSeq) return;
   const rows = r.services || [];
   if (!rows.length) {
     table.querySelector('tbody').innerHTML = `<tr><td colspan="7" class="empty-td"><div class="empty">${icon('server')}<p>尚未注册 MCP 服务</p></div></td></tr>`;
@@ -123,10 +132,11 @@ async function renderServices(table) {
   renderPager($('mcpPager'), { total: 0 });
 }
 
-async function renderKeys(table) {
+async function renderKeys(table, seq) {
   setHeaders(table, ['名称', 'Scope', '前缀', '有效期', '最后使用', '状态', '操作']);
   skeleton(table, 7);
   const r = await api('/admin/mcp/keys');
+  if (seq !== state.refreshSeq) return;
   const rows = r.keys || [];
   if (!rows.length) {
     table.querySelector('tbody').innerHTML = `<tr><td colspan="7" class="empty-td"><div class="empty">${icon('key')}<p>还没有外部 MCP Key；点右上角「新建 Key」</p></div></td></tr>`;
@@ -144,7 +154,7 @@ async function renderKeys(table) {
       <td>${k.last_used_at ? shortTime(k.last_used_at) + `<br><small class="muted">${esc(k.last_used_ip || '')} · ${esc(k.use_count)} 次</small>` : '<span class="muted">从未</span>'}</td>
       <td>${dead ? badge(k.revoked ? '已吊销' : '已过期', 'bad') : scheduled ? badge('待失效', 'warn') : badge('有效', 'ok')}</td>
       <td class="td-actions">${dead ? '<span class="muted xs">—</span>' : `
-        <button class="btn-icon" data-rotate="${esc(k.id)}" data-tip="轮换" aria-label="轮换">${icon('rotate')}</button>
+        ${scheduled ? '' : `<button class="btn-icon" data-rotate="${esc(k.id)}" data-tip="轮换" aria-label="轮换">${icon('rotate')}</button>`}
         <button class="btn-icon danger" data-revoke="${esc(k.id)}" data-name="${esc(k.name)}" data-tip="吊销" aria-label="吊销">${icon('ban')}</button>`}
       </td>
     </tr>`;
@@ -158,8 +168,8 @@ async function renderKeys(table) {
       });
       if (!ok) return;
       try {
-        const res = await api(`/admin/mcp/keys/${b.dataset.rotate}/rotate`, { method: 'POST' });
-        showKeyResult(res);
+        const res = await api(`/admin/mcp/keys/${encodeURIComponent(b.dataset.rotate)}/rotate`, { method: 'POST' });
+        showKeyResult(res, { rotated: true });
         refreshMCP();
       } catch (err) { toast('轮换失败：' + err.message, 'bad'); }
     };
@@ -173,7 +183,7 @@ async function renderKeys(table) {
       });
       if (!ok) return;
       try {
-        await api(`/admin/mcp/keys/${b.dataset.revoke}/revoke`, { method: 'POST' });
+        await api(`/admin/mcp/keys/${encodeURIComponent(b.dataset.revoke)}/revoke`, { method: 'POST' });
         toast('Key 已吊销', 'ok');
         refreshMCP();
       } catch (err) { toast('吊销失败：' + err.message, 'bad'); }
@@ -183,10 +193,11 @@ async function renderKeys(table) {
   renderPager($('mcpPager'), { total: 0 });
 }
 
-async function renderPeers(table) {
+async function renderPeers(table, seq) {
   setHeaders(table, ['Peer', '成员状态', 'MCP 授权', 'Scope', '备注', '操作']);
   skeleton(table, 6);
   const r = await api('/admin/mcp/peers');
+  if (seq !== state.refreshSeq) return;
   const rows = r.peers || [];
   if (!rows.length) {
     table.querySelector('tbody').innerHTML = `<tr><td colspan="6" class="empty-td"><div class="empty">${icon('users')}<p>还没有注册助手</p></div></td></tr>`;
@@ -200,22 +211,22 @@ async function renderPeers(table) {
     <td>${(p.scopes || []).map((s) => `<code>${esc(s)}</code>`).join('<br>') || '<span class="muted">—</span>'}</td>
     <td>${esc(p.note || '')}</td>
     <td class="td-actions">
-      <button class="btn btn-ghost btn-xs" data-grant="${esc(p.peer_id)}" data-scopes="${esc((p.scopes || []).join(','))}">${p.authorized ? '编辑' : '授权'}</button>
+      <button class="btn btn-ghost btn-xs" data-grant="${esc(p.peer_id)}" data-scopes="${esc((p.scopes || []).join(','))}" data-note="${esc(p.note || '')}">${p.authorized ? '编辑' : '授权'}</button>
       ${p.authorized ? `<button class="btn btn-ghost btn-xs danger" data-revoke="${esc(p.peer_id)}">撤销</button>` : ''}
     </td>
   </tr>`).join('');
   table.querySelectorAll('button[data-grant]').forEach((b) => {
     b.onclick = async () => {
       const scopes = window.prompt(
-        '填写 scope，逗号分隔（例如 mcp:adsense:read:*,mcp:bing-webmaster:read:*）',
-        b.dataset.scopes || 'mcp:adsense:read:*,mcp:bing-webmaster:read:*',
+        '填写 scope，逗号分隔（例如 mcp:adsense:read:*,mcp:bing-webmaster:read:*,mcp:ga:read:*）',
+        b.dataset.scopes || 'mcp:adsense:read:*,mcp:bing-webmaster:read:*,mcp:ga:read:*',
       );
       if (scopes === null) return;
       const list = scopes.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
       if (!list.length) { toast('至少一个 scope', 'warn'); return; }
       try {
         await api(`/admin/mcp/peers/${encodeURIComponent(b.dataset.grant)}`, {
-          method: 'PUT', body: JSON.stringify({ scopes: list, enabled: true }),
+          method: 'PUT', body: JSON.stringify({ scopes: list, enabled: true, note: b.dataset.note || '' }),
         });
         toast('Peer 授权已保存', 'ok');
         refreshMCP();
@@ -241,12 +252,14 @@ async function renderPeers(table) {
   renderPager($('mcpPager'), { total: 0 });
 }
 
-async function renderApprovals(table) {
+async function renderApprovals(table, seq) {
   setHeaders(table, ['发起方', '工具', '状态', '冻结参数', '请求时间', '剩余', '操作']);
   skeleton(table, 7);
   const r = await api(`/admin/mcp/approvals?page=${state.page}&page_size=${state.pageSize}`);
+  if (seq !== state.refreshSeq) return;
   const rows = r.approvals || [];
   if (!rows.length) {
+    stopMCP();
     table.querySelector('tbody').innerHTML = `<tr><td colspan="7" class="empty-td"><div class="empty">${icon('shield')}<p>没有待批准或历史审批记录</p></div></td></tr>`;
     renderPager($('mcpPager'), { total: 0 });
     return;
@@ -272,7 +285,7 @@ async function renderApprovals(table) {
       });
       if (!ok) return;
       try {
-        await api(`/admin/mcp/approvals/${b.dataset.approve}/approve`, { method: 'POST' });
+        await api(`/admin/mcp/approvals/${encodeURIComponent(b.dataset.approve)}/approve`, { method: 'POST' });
         toast('已批准', 'ok');
         refreshMCP();
       } catch (err) { toast('批准失败：' + err.message, 'bad'); }
@@ -283,7 +296,7 @@ async function renderApprovals(table) {
       const note = window.prompt('拒绝原因（可选）', '');
       if (note === null) return;
       try {
-        await api(`/admin/mcp/approvals/${b.dataset.reject}/reject`, { method: 'POST', body: JSON.stringify({ note }) });
+        await api(`/admin/mcp/approvals/${encodeURIComponent(b.dataset.reject)}/reject`, { method: 'POST', body: JSON.stringify({ note }) });
         toast('已拒绝', 'ok');
         refreshMCP();
       } catch (err) { toast('拒绝失败：' + err.message, 'bad'); }
@@ -298,11 +311,14 @@ async function renderApprovals(table) {
   });
 }
 
-async function renderAudit(table) {
+async function renderAudit(table, seq) {
   setHeaders(table, ['时间', 'Actor', '服务 / 工具', '结果', '错误', '耗时', 'IP', '参数摘要']);
   skeleton(table, 8);
   const params = auditQuery();
+  const exp = $('mcpExport');
+  if (exp) exp.onclick = () => { window.location.href = '/admin/mcp/audit/export?' + params.toString(); };
   const r = await api('/admin/mcp/audit?' + params.toString());
+  if (seq !== state.refreshSeq) return;
   const rows = r.entries || [];
   if (!rows.length) {
     table.querySelector('tbody').innerHTML = `<tr><td colspan="8" class="empty-td"><div class="empty">${icon('scroll')}<p>暂无 MCP 审计记录</p></div></td></tr>`;
@@ -319,8 +335,6 @@ async function renderAudit(table) {
     <td><code>${esc(a.client_ip || '')}</code></td>
     <td><small>${esc(a.params_summary || '')}</small>${a.detail ? `<br><small class="muted">${esc(a.detail)}</small>` : ''}</td>
   </tr>`).join('');
-  const exp = $('mcpExport');
-  if (exp) exp.onclick = () => { window.location.href = '/admin/mcp/audit/export?' + params.toString(); };
   $('mcpNote').textContent = '审计写 180 天 / 读 90 天，行数上限 200 万；每条同时镜像到现有 audit_log。导出最多 1 万行。';
   renderPager($('mcpPager'), {
     total: r.total || 0, page: state.page, pageSize: state.pageSize,
@@ -329,8 +343,43 @@ async function renderAudit(table) {
   });
 }
 
-function showKeyResult(res) {
+function showKeyResult(res, { rotated = false } = {}) {
   const k = res.key || {};
+  const dlg = $('mcpKeyDlg');
+  if (!dlg) return;
+  const title = $('mcpKeyTitle');
+  if (title) title.textContent = rotated ? '轮换后的新 Key' : 'Key 已签发';
+  const fields = $('mcpKeyFields');
+  if (fields) fields.hidden = true;
+  const btn = $('mcpKeyBtn');
+  if (btn) { btn.hidden = true; btn.disabled = true; }
+  $('mcpKeyPlain').textContent = res.plaintext || '';
+  $('mcpKeyResult').hidden = false;
+  $('mcpKeyMeta').textContent = `${k.name || ''} · ${(k.scopes || []).join(', ')} · 到期 ${k.expires_at ? fmtTime(k.expires_at) : '不过期'}`;
+  if (!dlg.open) dlg.showModal();
+}
+
+export function stopMCP() {
+  if (remTimer) {
+    clearInterval(remTimer);
+    remTimer = null;
+  }
+}
+
+export function initMCP() {
+  const seg = $('mcpSeg');
+  if (seg) {
+    seg.querySelectorAll('button').forEach((b) => {
+      b.onclick = () => {
+        state.view = b.dataset.v;
+        state.page = 1;
+        refreshMCP();
+      };
+    });
+  }
+  const refresh = $('mcpRefresh');
+  if (refresh) refresh.onclick = refreshMCP;
+
   const dryDlg = $('mcpDryDlg');
   if (dryDlg) {
     setupDialog(dryDlg);
@@ -339,7 +388,7 @@ function showKeyResult(res) {
       openDry.onclick = () => {
         $('mcpDryService').value = 'bing-webmaster';
         $('mcpDryTool').value = 'submit_url';
-        $('mcpDryParams').value = '{\n  "site": "https://oneimage.co/",\n  "url": "https://oneimage.co/test"\n}';
+        $('mcpDryParams').value = '{\n  "site": "https://example.com/",\n  "url": "https://example.com/test"\n}';
         $('mcpDryResult').hidden = true;
         $('mcpDryBtn').disabled = false;
         dryDlg.showModal();
@@ -403,35 +452,6 @@ function showKeyResult(res) {
   }
 
   const dlg = $('mcpKeyDlg');
-  if (!dlg) return;
-  $('mcpKeyPlain').textContent = res.plaintext || '';
-  $('mcpKeyResult').hidden = false;
-  $('mcpKeyMeta').textContent = `${k.name || ''} · ${(k.scopes || []).join(', ')} · 到期 ${k.expires_at ? fmtTime(k.expires_at) : '不过期'}`;
-  if (!dlg.open) dlg.showModal();
-}
-
-export function stopMCP() {
-  if (remTimer) {
-    clearInterval(remTimer);
-    remTimer = null;
-  }
-}
-
-export function initMCP() {
-  const seg = $('mcpSeg');
-  if (seg) {
-    seg.querySelectorAll('button').forEach((b) => {
-      b.onclick = () => {
-        state.view = b.dataset.v;
-        state.page = 1;
-        refreshMCP();
-      };
-    });
-  }
-  const refresh = $('mcpRefresh');
-  if (refresh) refresh.onclick = refreshMCP;
-
-  const dlg = $('mcpKeyDlg');
   if (dlg) {
     setupDialog(dlg);
     dlg.addEventListener('close', () => {
@@ -443,12 +463,17 @@ export function initMCP() {
     const open = $('mcpNewKey');
     if (open) {
       open.onclick = () => {
+        const title = $('mcpKeyTitle');
+        if (title) title.textContent = '新建 MCP Key';
+        const fields = $('mcpKeyFields');
+        if (fields) fields.hidden = false;
         $('mcpKeyName').value = '';
-        $('mcpKeyScopes').value = 'mcp:adsense:read:*\nmcp:bing-webmaster:read:*';
+        $('mcpKeyScopes').value = 'mcp:adsense:read:*\nmcp:bing-webmaster:read:*\nmcp:ga:read:*';
         $('mcpKeyDays').value = '0';
         $('mcpKeyNote').value = '';
         $('mcpKeyResult').hidden = true;
-        $('mcpKeyBtn').disabled = false;
+        const btn = $('mcpKeyBtn');
+        if (btn) { btn.hidden = false; btn.disabled = false; }
         dlg.showModal();
       };
     }

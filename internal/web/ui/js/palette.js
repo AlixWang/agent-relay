@@ -12,6 +12,7 @@ const ROUTE_KEYWORDS = {
   command: 'command chat room broadcast inbox 指挥台 群聊 广播 收件箱',
   prompts: 'prompts invite onboarding reconfigure 邀请 入驻 重配',
   resources: 'resources secrets mcp skill prompt 资源 密钥',
+  mcp: 'mcp gateway adsense bing ga key scope approval 网关 授权 批准',
   audit: 'audit security events 审计 安全 日志',
   logs: 'logs agent watchdog receiver 日志 排障',
   tokens: 'tokens rotate revoke key 令牌 凭证 吊销',
@@ -26,6 +27,7 @@ const ROUTE_ICONS = {
   command: 'send',
   prompts: 'user-plus',
   resources: 'package',
+  mcp: 'shield',
   audit: 'scroll',
   logs: 'terminal',
   tokens: 'key',
@@ -51,6 +53,8 @@ function routeBadge(route, stats) {
       const n = (stats.resource_submissions_pending || 0) + (stats.resource_takedowns_pending || 0);
       return n > 0 ? { text: `${n} 待审核`, tone: 'warn' } : '';
     }
+    case 'mcp':
+      return stats.mcp_pending_approvals > 0 ? { text: `${stats.mcp_pending_approvals} 待批准`, tone: 'warn' } : '';
     case 'logs':
       return stats.agent_log_errors_24h > 0 ? { text: `${stats.agent_log_errors_24h} error`, tone: 'bad' } : '';
     default:

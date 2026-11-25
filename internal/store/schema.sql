@@ -494,7 +494,7 @@ CREATE TABLE IF NOT EXISTS mcp_approvals (
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_approvals_status ON mcp_approvals(status, expires_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_approvals_open
-    ON mcp_approvals(principal, tool, params_hash) WHERE status IN ('pending','approved');
+    ON mcp_approvals(principal, service_id, tool, params_hash) WHERE status IN ('pending','approved');
 
 -- Gateway audit. Written for every tool call and every approval transition;
 -- mirrored into audit_log (best effort) by internal/mcpgateway.
@@ -524,3 +524,5 @@ CREATE TABLE IF NOT EXISTS mcp_audit (
 CREATE INDEX IF NOT EXISTS idx_mcp_audit_actor ON mcp_audit(actor, ts);
 CREATE INDEX IF NOT EXISTS idx_mcp_audit_service ON mcp_audit(service_id, tool, ts);
 CREATE INDEX IF NOT EXISTS idx_mcp_audit_approval ON mcp_audit(approval_id, ts);
+CREATE INDEX IF NOT EXISTS idx_mcp_audit_risk_ts ON mcp_audit(risk, ts);
+CREATE INDEX IF NOT EXISTS idx_mcp_audit_service_seq ON mcp_audit(service_id, seq DESC);

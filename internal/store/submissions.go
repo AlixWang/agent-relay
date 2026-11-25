@@ -451,6 +451,9 @@ func (s *sqliteStore) DeletePeerWithResourcePolicy(id string, ts int64, deleteRe
 	if _, err := tx.Exec(`DELETE FROM muse_accounts WHERE peer_id=?`, id); err != nil {
 		return 0, err
 	}
+	if _, err := tx.Exec(`UPDATE mcp_keys SET status='revoked', revoked_at=? WHERE principal_type='peer' AND peer_id=? AND status='active'`, ts, id); err != nil {
+		return 0, err
+	}
 	if deleteResources {
 		if _, err := tx.Exec(`DELETE FROM resource_grants WHERE EXISTS
 			(SELECT 1 FROM resources WHERE resources.kind=resource_grants.kind AND resources.name=resource_grants.name AND resources.owner_peer=?)`, id); err != nil {

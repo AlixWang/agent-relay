@@ -51,7 +51,7 @@ var (
 // callable still depends on [mcp_gateway.write.*] and key scope.
 func (s *Service) Tools() []mcpgateway.Tool {
 	siteSchema := func(extra map[string]any, required ...string) json.RawMessage {
-		props := map[string]any{"site": mcpgateway.Prop("string", "Verified site URL exactly as returned by list_sites, e.g. https://oneimage.co/.")}
+		props := map[string]any{"site": mcpgateway.Prop("string", "Verified site URL exactly as returned by list_sites, e.g. https://example.com/.")}
 		for k, v := range extra {
 			props[k] = v
 		}
@@ -96,7 +96,7 @@ func (s *Service) Tools() []mcpgateway.Tool {
 
 		writeTool(ToolSubmitURL, "Submit one URL for indexing. Low risk; direct execution with a write scope.",
 			writeSchema(map[string]any{"url": mcpgateway.Prop("string", "URL belonging to the site.")}, "site", "url"),
-			false, false, true, s.validateSubmitURL),
+			false, false, false, s.validateSubmitURL),
 		writeTool(ToolSubmitURLBatch, "Submit up to the configured batch cap (default 100; upstream 500) URLs. Duplicates are removed.",
 			writeSchema(map[string]any{"urls": mcpgateway.ArrayProp("string", "URLs belonging to the site; deduplicated.")}, "site", "urls"),
 			false, false, false, s.validateSubmitURLBatch),
@@ -106,8 +106,11 @@ func (s *Service) Tools() []mcpgateway.Tool {
 		writeTool(ToolRemoveFeed, "Remove a previously submitted feed. Reversible by submitting it again.",
 			writeSchema(map[string]any{"feedUrl": mcpgateway.Prop("string", "Feed URL currently in the submitted feed list.")}, "site", "feedUrl"),
 			true, false, false, s.validateRemoveFeed),
-		writeTool(ToolAddBlockedURL, "Block a page/directory from Bing results. High risk: requires an approval_id after operator approval.",
-			writeSchema(map[string]any{"blockedUrl": mcpgateway.Prop("string", "Page or directory URL belonging to the site.")}, "site", "blockedUrl"),
+		writeTool(ToolAddBlockedURL, "Block a page or directory from Bing results. High risk: requires an approval_id after operator approval.",
+			writeSchema(map[string]any{
+				"blockedUrl":  mcpgateway.Prop("string", "Page or directory URL belonging to the site (cannot be the site root)."),
+				"entity_type": mcpgateway.EnumProp("Block scope: page (default) or directory.", "page", "directory"),
+			}, "site", "blockedUrl"),
 			true, true, true, s.validateAddBlockedURL),
 	}
 }
@@ -252,8 +255,9 @@ func (s *Service) validateKeywordStats(raw json.RawMessage) error {
 	if err := mcpgateway.DecodeStrict(raw, &p); err != nil {
 		return err
 	}
-	if strings.TrimSpace(p.Q) == "" {
-		return mcpgateway.InvalidParams("q is required")
+	p.Q = strings.TrimSpace(p.Q)
+	if p.Q == "" || len(p.Q) > 200 {
+		return mcpgateway.InvalidParams("q is required (max 200 bytes)")
 	}
 	return validateCountryLang(p.Country, p.Language)
 }
@@ -344,6 +348,7 @@ func (s *Service) validateRemoveFeed(raw json.RawMessage) error { return s.valid
 type blockedArgs struct {
 	Site       string `json:"site"`
 	BlockedURL string `json:"blockedUrl"`
+	EntityType string `json:"entity_type"`
 	DryRun     bool   `json:"dry_run"`
 	ApprovalID string `json:"approval_id"`
 }
@@ -356,7 +361,26 @@ func (s *Service) validateAddBlockedURL(raw json.RawMessage) error {
 	if !mcpgateway.URLBelongsToSite(p.Site, p.BlockedURL) {
 		return mcpgateway.InvalidParams("blockedUrl must belong to the site")
 	}
+	if isSiteRoot(p.Site, p.BlockedURL) {
+		return mcpgateway.InvalidParams("blockedUrl cannot be the site root")
+	}
+	switch p.EntityType {
+	case "", "page", "directory":
+	default:
+		return mcpgateway.InvalidParams("entity_type must be page or directory")
+	}
 	return nil
+}
+
+func isSiteRoot(site, target string) bool {
+	su, err1 := mcpgateway.NormalizeURL(site)
+	tu, err2 := mcpgateway.NormalizeURL(target)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	sp := strings.TrimSuffix(su.EscapedPath(), "/")
+	tp := strings.TrimSuffix(tu.EscapedPath(), "/")
+	return sp == tp && tu.RawQuery == ""
 }
 
 // helper used by read/write paths to build query params.

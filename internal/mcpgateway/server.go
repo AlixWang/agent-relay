@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -22,26 +23,32 @@ import (
 // Server.Registry().Register(...) so this package never imports service
 // packages (avoids init/registration cycles).
 type Options struct {
-	Config      Config
-	Store       store.Store
-	Auth        *auth.Service
-	MinProtocol int
-	ClientIP    func(*http.Request) string
+	Config       Config
+	Store        store.Store
+	Auth         *auth.Service
+	MinProtocol  int
+	MaxBodyBytes int
+	Credentials  *Credentials
+	ClientIP     func(*http.Request) string
 }
 
 // Server owns routing, auth, policy, approvals, limits, and audit for the MCP
 // endpoint family.
 type Server struct {
-	cfg      Config
-	st       store.Store
-	registry *Registry
-	authn    *Authenticator
-	approval *ApprovalManager
-	auditor  *Auditor
-	limiter  *Limiter
-	upstream *Upstream
-	clientIP func(*http.Request) string
-	now      func() time.Time
+	cfg          Config
+	st           store.Store
+	registry     *Registry
+	authn        *Authenticator
+	approval     *ApprovalManager
+	auditor      *Auditor
+	limiter      *Limiter
+	upstream     *Upstream
+	creds        *Credentials
+	maxBodyBytes int64
+	clientIP     func(*http.Request) string
+	now          func() time.Time
+	mcpHandler   http.Handler
+	adminHandler http.Handler
 }
 
 func New(opts Options) (*Server, error) {
@@ -57,14 +64,20 @@ func New(opts Options) (*Server, error) {
 	if minProto < 1 {
 		minProto = 1
 	}
+	maxBody := int64(opts.MaxBodyBytes)
+	if maxBody <= 0 {
+		maxBody = 1 << 20
+	}
 	s := &Server{
 		cfg: cfg, st: opts.Store, registry: reg,
-		authn:    NewAuthenticator(opts.Store, opts.Auth, minProto),
-		approval: NewApprovalManager(opts.Store, cfg),
-		auditor:  NewAuditor(opts.Store, cfg),
-		limiter:  NewLimiter(cfg),
-		upstream: NewUpstream(time.Duration(cfg.UpstreamTimeoutSecs) * time.Second),
-		clientIP: opts.ClientIP, now: time.Now,
+		authn:        NewAuthenticator(opts.Store, opts.Auth, minProto),
+		approval:     NewApprovalManager(opts.Store, cfg),
+		auditor:      NewAuditor(opts.Store, cfg),
+		limiter:      NewLimiter(cfg),
+		upstream:     NewUpstream(time.Duration(cfg.UpstreamTimeoutSecs) * time.Second),
+		creds:        opts.Credentials,
+		maxBodyBytes: maxBody,
+		clientIP:     opts.ClientIP, now: time.Now,
 	}
 	if s.clientIP == nil {
 		s.clientIP = func(r *http.Request) string {
@@ -75,7 +88,17 @@ func New(opts Options) (*Server, error) {
 			return host
 		}
 	}
+	s.mcpHandler = s.buildMCPHandler()
+	s.adminHandler = s.buildAdminHandler()
 	return s, nil
+}
+
+// InvalidateSecret drops any cached secret value when the Resource Hub rotates
+// or deletes a server secret.
+func (s *Server) InvalidateSecret(name string) {
+	if s.creds != nil {
+		s.creds.Invalidate("secret:" + name)
+	}
 }
 
 // fillConfigDefaults makes New usable with a zero Config in tests while still
@@ -148,7 +171,7 @@ func (s *Server) RevokePeerGrant(peerID string) (bool, error) {
 
 // PendingApprovals is the console badge count (#35: no system messages).
 func (s *Server) PendingApprovals() int {
-	n, err := s.st.CountMCPApprovals("pending")
+	n, err := s.st.CountPendingMCPApprovals(s.now().Unix())
 	if err != nil {
 		return 0
 	}
@@ -197,6 +220,10 @@ func (s *Server) RunMaintenance(now time.Time) (MaintenanceResult, error) {
 // handler rather than per-method ServeMux patterns so GET/DELETE can answer
 // the mandated 405 instead of falling through to the console catch-all.
 func (s *Server) MCPHandler() http.Handler {
+	return s.mcpHandler
+}
+
+func (s *Server) buildMCPHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		path := strings.TrimSuffix(r.URL.Path, "/")
@@ -284,21 +311,29 @@ type rpcError struct {
 
 func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request, serviceID string) {
 	start := time.Now()
+	if !s.cfg.Enabled {
+		e := NewError(CodeServiceDisabled, "MCP gateway is disabled", http.StatusServiceUnavailable)
+		writeRPCError(w, http.StatusServiceUnavailable, nil, -32003, e.Code, e.Message, nil)
+		return
+	}
+	if !allowedOrigin(r) {
+		e := NewError(CodeUnauthorized, "origin not allowed", http.StatusForbidden)
+		writeRPCError(w, http.StatusForbidden, nil, -32002, e.Code, e.Message, nil)
+		return
+	}
 	if !jsonContentType(r.Header.Get("Content-Type")) {
 		writeRPCError(w, http.StatusUnsupportedMediaType, nil, -32600, CodeInvalidParams, "Content-Type must be application/json", nil)
 		return
 	}
 	if onlySSEAccept(r.Header.Get("Accept")) {
-		w.Header().Set("Accept", "application/json")
 		writeRPCError(w, http.StatusNotAcceptable, nil, -32600, CodeInvalidParams, "this server is stateless JSON-only; Accept text/event-stream is not supported", nil)
 		return
 	}
-	const maxBody = 1 << 20
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxBodyBytes))
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			writeRPCError(w, http.StatusRequestEntityTooLarge, nil, -32600, CodeRequestTooLarge, "request body exceeds 1MB", nil)
+			writeRPCError(w, http.StatusRequestEntityTooLarge, nil, -32600, CodeRequestTooLarge, fmt.Sprintf("request body exceeds %d bytes", s.maxBodyBytes), nil)
 			return
 		}
 		writeRPCError(w, http.StatusBadRequest, nil, -32600, CodeInvalidParams, "could not read request body", nil)
@@ -315,7 +350,11 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request, serviceID str
 	}
 	var req rpcRequest
 	if err := json.Unmarshal(trimmed, &req); err != nil {
-		writeRPCError(w, http.StatusBadRequest, nil, -32600, CodeInvalidParams, "invalid JSON-RPC request", nil)
+		writeRPCError(w, http.StatusBadRequest, nil, -32700, CodeInvalidParams, "invalid JSON-RPC request", nil)
+		return
+	}
+	if req.ID != nil && !validRPCID(req.ID) {
+		writeRPCError(w, http.StatusBadRequest, nil, -32600, CodeInvalidParams, "jsonrpc id must be a string or number", nil)
 		return
 	}
 	if req.JSONRPC != "" && req.JSONRPC != "2.0" {
@@ -330,32 +369,16 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request, serviceID str
 	requestID := s.newRequestID()
 	// Authenticate every MCP request, including notifications: a stray
 	// notification must not be a way to bypass identity logs.
-	actor, aerr := s.authn.Authenticate(bearerToken(r), s.clientIP(r))
+	ip := s.clientIP(r)
+	actor, aerr := s.authn.Authenticate(bearerToken(r), ip)
 	if aerr != nil {
-		s.recordDenied(r, actor, endpointLabel(serviceID), "", "", "", "", "", requestID, aerr)
+		if actor.Kind != "" || s.limiter.AllowUnauthAudit(ip) {
+			s.recordDenied(r, actor, endpointLabel(serviceID), "", "", "", "", "", requestID, aerr)
+		}
 		if aerr.HTTPStatus == http.StatusUnauthorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="relay-mcp"`)
 		}
 		writeRPCError(w, aerr.HTTPStatus, req.ID, rpcCodeFor(aerr), aerr.Code, aerr.Message, nil)
-		return
-	}
-	if !s.cfg.Enabled {
-		e := NewError(CodeServiceDisabled, "MCP gateway is disabled", http.StatusServiceUnavailable)
-		s.recordDenied(r, actor, endpointLabel(serviceID), serviceID, "", "", "", "", requestID, e)
-		writeRPCError(w, http.StatusServiceUnavailable, req.ID, -32003, e.Code, e.Message, nil)
-		return
-	}
-	if req.Method == "initialize" {
-		s.handleInitialize(w, req)
-		return
-	}
-	if req.ID == nil {
-		// Notifications are fire-and-forget (also notifications/* with an id).
-		w.WriteHeader(http.StatusAccepted)
-		return
-	}
-	if strings.HasPrefix(req.Method, "notifications/") {
-		writeRPCResult(w, req.ID, map[string]any{})
 		return
 	}
 	if hdr := r.Header.Get("MCP-Protocol-Version"); hdr != "" && !versionSupported(hdr) {
@@ -363,11 +386,24 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request, serviceID str
 			"unsupported MCP protocol version", map[string]any{"supported": supportedVersions})
 		return
 	}
+	if req.ID == nil {
+		// Notifications are fire-and-forget.
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	if req.Method == "initialize" {
+		s.handleInitialize(w, req)
+		return
+	}
+	if strings.HasPrefix(req.Method, "notifications/") {
+		writeRPCResult(w, req.ID, map[string]any{})
+		return
+	}
 	switch req.Method {
 	case "ping":
 		writeRPCResult(w, req.ID, map[string]any{})
 	case "tools/list":
-		s.handleToolsList(w, req, serviceID, actor, requestID, start)
+		s.handleToolsList(w, req, serviceID, actor, requestID, start, r)
 	case "tools/call":
 		s.handleToolsCall(w, req, serviceID, actor, requestID, start, r)
 	default:
@@ -391,11 +427,11 @@ func (s *Server) handleInitialize(w http.ResponseWriter, req rpcRequest) {
 	})
 }
 
-func (s *Server) handleToolsList(w http.ResponseWriter, req rpcRequest, serviceID string, actor Actor, requestID string, start time.Time) {
+func (s *Server) handleToolsList(w http.ResponseWriter, req rpcRequest, serviceID string, actor Actor, requestID string, start time.Time, r *http.Request) {
 	tools := s.visibleTools(serviceID, actor)
 	if serviceID != "" && !s.cfg.serviceEnabled(serviceID) {
 		e := NewError(CodeServiceDisabled, "service is disabled", http.StatusForbidden)
-		s.recordDenied(nil, actor, "/mcp/"+serviceID, serviceID, "", "", "", "", requestID, e)
+		s.recordDenied(r, actor, "/mcp/"+serviceID, serviceID, "", "", "", "", requestID, e)
 		writeRPCError(w, http.StatusForbidden, req.ID, -32003, e.Code, e.Message, nil)
 		return
 	}
@@ -415,12 +451,20 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, req rpcRequest, serviceI
 		writeToolError(w, req.ID, InvalidParams("tools/call requires name and arguments"), nil)
 		return
 	}
+	if allowed, retry, reason := s.limiter.AllowGeneral(actor.Principal()); !allowed {
+		e := &Error{Code: CodeRateLimited, Message: "rate limit exceeded", HTTPStatus: http.StatusTooManyRequests,
+			Details: map[string]any{"retry_after_seconds": retry, "limit": reason}}
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
+		s.recordCall(r, actor, endpointLabel(serviceID), serviceID, truncateUTF8(p.Name, 128), "", "", "", "", requestID, start, "denied", e, http.StatusTooManyRequests, nil)
+		writeRPCError(w, http.StatusTooManyRequests, req.ID, -32007, e.Code, e.Message, e.Details)
+		return
+	}
 	aggregate := serviceID == ""
 	rt, ok := s.registry.ResolveTool(serviceID, p.Name, aggregate)
 	if !ok {
 		hint := "unknown tool; /mcp expects prefixed names and /mcp/<service> expects short names"
 		e := NewError(CodeUnknownTool, hint, http.StatusOK)
-		s.recordCall(r, actor, endpointLabel(serviceID), serviceID, p.Name, "", "", "", "", requestID, start, "denied", e, http.StatusOK, nil)
+		s.recordCall(r, actor, endpointLabel(serviceID), serviceID, truncateUTF8(p.Name, 128), "", "", "", "", requestID, start, "denied", e, http.StatusOK, nil)
 		writeToolError(w, req.ID, e, nil)
 		return
 	}
@@ -468,18 +512,10 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, req rpcRequest, serviceI
 		writeToolError(w, req.ID, e, nil)
 		return
 	}
-	allowed, retry, reason := s.limiter.Allow(actor.Principal(), rt.ServiceID, WriteTool(rt.Tool), rt.Tool.Risk)
-	if !allowed {
-		e := &Error{Code: CodeRateLimited, Message: "rate limit exceeded", HTTPStatus: http.StatusTooManyRequests,
-			Details: map[string]any{"retry_after_seconds": retry, "limit": reason}}
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
-		s.recordCall(r, actor, endpointLabel(serviceID), rt.ServiceID, rt.Name, rt.Tool.Risk, "", ParamsSummary(raw), "", requestID, start, "denied", e, http.StatusTooManyRequests, nil)
-		writeRPCError(w, http.StatusTooManyRequests, req.ID, -32007, e.Code, e.Message, e.Details)
-		return
-	}
-	canonical, hash, ferr := FreezeParams(rt.Name, raw)
+	canonical, hash, ferr := FreezeParams(rt.ServiceID, rt.Name, raw)
 	if ferr != nil {
 		e := InvalidParams("%s", ferr.Error())
+		s.recordCall(r, actor, endpointLabel(serviceID), rt.ServiceID, rt.Name, rt.Tool.Risk, "", ParamsSummary(raw), "", requestID, start, "denied", e, http.StatusOK, nil)
 		writeToolError(w, req.ID, e, nil)
 		return
 	}
@@ -514,20 +550,31 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, req rpcRequest, serviceI
 				writeToolResult(w, req.ID, s.envelope(res, rt, time.Since(start)))
 				return
 			}
+			if allowed, retry, reason := s.limiter.AllowWrite(actor.Principal(), rt.ServiceID, rt.Tool.Risk); !allowed {
+				e := &Error{Code: CodeRateLimited, Message: "rate limit exceeded", HTTPStatus: http.StatusTooManyRequests,
+					Details: map[string]any{"retry_after_seconds": retry, "limit": reason}}
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
+				s.recordCall(r, actor, call.Endpoint, rt.ServiceID, rt.Name, rt.Tool.Risk, hash, ParamsSummary(canonical), control.ApprovalID, requestID, start, "denied", e, http.StatusTooManyRequests, nil)
+				writeRPCError(w, http.StatusTooManyRequests, req.ID, -32007, e.Code, e.Message, e.Details)
+				return
+			}
 			claimed, aerr := s.approval.ClaimForExecution(control.ApprovalID, actor, call.Endpoint, rt.ServiceID, rt.Name, raw)
 			if aerr != nil {
 				if aerr.Code == CodeApprovalExpired {
-					s.recordApprovalExpired(control.ApprovalID)
+					s.recordApprovalExpired(control.ApprovalID, actor)
 				}
 				s.recordCall(r, actor, call.Endpoint, rt.ServiceID, rt.Name, rt.Tool.Risk, hash, ParamsSummary(canonical), control.ApprovalID, requestID, start, "denied", aerr, http.StatusOK, nil)
 				writeToolError(w, req.ID, aerr, nil)
 				return
 			}
+			// Execute strictly against the frozen JSON from approval creation,
+			// never the raw request bytes.
+			call.Params = json.RawMessage(claimed.ParamsJSON)
 			res, herr := s.execute(r.Context(), rt, call)
 			if herr != nil {
 				s.approval.Complete(claimed.ID, approvalOutcome(herr), herr.Code, upstreamStatus(herr))
-				s.recordCall(r, actor, call.Endpoint, rt.ServiceID, rt.Name, rt.Tool.Risk, claimed.ParamsHash, ParamsSummary(canonical), claimed.ID, requestID, start, "executed", herr, http.StatusOK, &res)
-				writeToolError(w, req.ID, herr, failedMeta(rt, time.Since(start), res))
+				s.recordCall(r, actor, call.Endpoint, rt.ServiceID, rt.Name, rt.Tool.Risk, claimed.ParamsHash, ParamsSummary(canonical), claimed.ID, requestID, start, approvalOutcome(herr), herr, http.StatusOK, &res)
+				writeToolError(w, req.ID, herr, failedMeta(rt, time.Since(start), res, herr))
 				return
 			}
 			s.approval.Complete(claimed.ID, "ok", "", res.UpstreamStatus)
@@ -535,14 +582,22 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, req rpcRequest, serviceI
 			writeToolResult(w, req.ID, s.envelope(res, rt, time.Since(start)))
 			return
 		}
+		if allowed, retry, reason := s.limiter.AllowWrite(actor.Principal(), rt.ServiceID, rt.Tool.Risk); !allowed {
+			e := &Error{Code: CodeRateLimited, Message: "rate limit exceeded", HTTPStatus: http.StatusTooManyRequests,
+				Details: map[string]any{"retry_after_seconds": retry, "limit": reason}}
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
+			s.recordCall(r, actor, call.Endpoint, rt.ServiceID, rt.Name, rt.Tool.Risk, hash, ParamsSummary(canonical), "", requestID, start, "denied", e, http.StatusTooManyRequests, nil)
+			writeRPCError(w, http.StatusTooManyRequests, req.ID, -32007, e.Code, e.Message, e.Details)
+			return
+		}
 	}
 	res, herr := s.execute(r.Context(), rt, call)
 	if herr != nil {
-		s.recordCall(r, actor, call.Endpoint, rt.ServiceID, rt.Name, rt.Tool.Risk, hash, ParamsSummary(canonical), control.ApprovalID, requestID, start, "error", herr, http.StatusOK, &res)
-		writeToolError(w, req.ID, herr, failedMeta(rt, time.Since(start), res))
+		s.recordCall(r, actor, call.Endpoint, rt.ServiceID, rt.Name, rt.Tool.Risk, hash, ParamsSummary(canonical), "", requestID, start, "error", herr, http.StatusOK, &res)
+		writeToolError(w, req.ID, herr, failedMeta(rt, time.Since(start), res, herr))
 		return
 	}
-	s.recordCall(r, actor, call.Endpoint, rt.ServiceID, rt.Name, rt.Tool.Risk, hash, ParamsSummary(canonical), control.ApprovalID, requestID, start, "ok", nil, http.StatusOK, &res)
+	s.recordCall(r, actor, call.Endpoint, rt.ServiceID, rt.Name, rt.Tool.Risk, hash, ParamsSummary(canonical), "", requestID, start, "ok", nil, http.StatusOK, &res)
 	writeToolResult(w, req.ID, s.envelope(res, rt, time.Since(start)))
 }
 
@@ -589,10 +644,14 @@ func upstreamStatus(e *Error) int {
 	return 0
 }
 
-func failedMeta(rt *ResolvedTool, latency time.Duration, res Result) map[string]any {
+func failedMeta(rt *ResolvedTool, latency time.Duration, res Result, herr *Error) map[string]any {
+	st := res.UpstreamStatus
+	if st == 0 {
+		st = upstreamStatus(herr)
+	}
 	return map[string]any{
 		"service": rt.ServiceID, "tool": rt.Name, "duration_ms": latency.Milliseconds(),
-		"truncated": false, "upstream_status": res.UpstreamStatus,
+		"truncated": false, "upstream_status": st,
 	}
 }
 
@@ -789,11 +848,35 @@ func (s *Server) newRequestID() string {
 }
 
 func bearerToken(r *http.Request) string {
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, "Bearer ") {
+	h := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(h) < 7 || !strings.EqualFold(h[:7], "Bearer ") {
 		return ""
 	}
-	return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+	return strings.TrimSpace(h[7:])
+}
+
+func validRPCID(id json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(id)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	return trimmed[0] == '"' || (trimmed[0] >= '0' && trimmed[0] <= '9') || trimmed[0] == '-'
+}
+
+func allowedOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func endpointLabel(serviceID string) string {
@@ -841,23 +924,23 @@ func versionSupported(v string) bool {
 
 // recordApprovalExpired records the on-demand expiry transition once, even
 // if the client retries the same dead approval_id.
-func (s *Server) recordApprovalExpired(id string) {
+func (s *Server) recordApprovalExpired(id string, actor Actor) {
 	if id == "" {
 		return
 	}
-	if rows, _, err := s.st.ListMCPAudit(store.MCPAuditFilter{ApprovalID: id}, 20, 0); err == nil {
-		for _, a := range rows {
-			if a.Outcome == "expired" {
-				return
-			}
-		}
+	if rows, _, err := s.st.ListMCPAudit(store.MCPAuditFilter{ApprovalID: id, Outcome: "expired"}, 1, 0); err == nil && len(rows) > 0 {
+		return
 	}
 	row, err := s.st.GetMCPApproval(id)
 	if err != nil || row == nil || row.Status != "expired" {
 		return
 	}
+	auditActor, authKind := "admin", AuthAdmin
+	if actor.Kind != "" {
+		auditActor, authKind = actor.AuditActor(), actor.AuthKind
+	}
 	s.auditor.Record(&store.MCPAuditEntry{
-		Ts: s.now().Unix(), RequestID: row.RequestID, Actor: "admin", AuthKind: AuthAdmin,
+		Ts: s.now().Unix(), RequestID: row.RequestID, Actor: auditActor, AuthKind: authKind,
 		KeyID: row.KeyID, KeyName: row.KeyName, Endpoint: row.Endpoint, ServiceID: row.ServiceID,
 		Tool: row.Tool, Risk: row.Risk, ParamsHash: row.ParamsHash, ApprovalID: row.ID,
 		Outcome: "expired", ErrorCode: CodeApprovalExpired, HTTPStatus: http.StatusOK,
@@ -900,7 +983,7 @@ func (s *Server) recordCall(r *http.Request, actor Actor, endpoint, serviceID, t
 		entry.Detail = e.Message
 		entry.UpstreamStatus = upstreamStatus(e)
 	}
-	if res != nil {
+	if res != nil && res.UpstreamStatus != 0 {
 		entry.UpstreamStatus = res.UpstreamStatus
 	}
 	s.auditor.Record(entry)

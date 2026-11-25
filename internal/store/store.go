@@ -452,11 +452,13 @@ type Store interface {
 	UpdateMCPKeyUsage(id string, ts int64, ip string) error
 	RevokeMCPKey(id string, ts int64) (bool, error)
 	SetMCPKeyRevokedAt(id string, at int64) (bool, error)
+	RotateMCPKey(oldID string, newKey *MCPKey, now, graceRevokeAt int64) (bool, error)
 	CreateMCPApproval(a *MCPApproval) error
 	GetMCPApproval(id string) (*MCPApproval, error)
-	GetOpenMCPApproval(principal, tool, paramsHash string) (*MCPApproval, error)
+	GetOpenMCPApproval(principal, serviceID, tool, paramsHash string) (*MCPApproval, error)
 	ListMCPApprovals(f MCPApprovalFilter, limit, offset int) ([]*MCPApproval, int, error)
 	CountMCPApprovals(status string) (int, error)
+	CountPendingMCPApprovals(now int64) (int, error)
 	ApproveMCPApproval(id string, now, executeBefore int64, by, note string) (bool, error)
 	RejectMCPApproval(id string, now int64, by, note string) (bool, error)
 	ClaimMCPApprovalExecution(id string, now int64) (bool, error)
@@ -523,6 +525,7 @@ func (s *sqliteStore) migrate() error {
 		return err
 	}
 	s.dropConversationsV12()
+	s.upgradeMCPIndexes()
 	// Strip full-line comments so each semicolon chunk is one statement.
 	var b strings.Builder
 	for _, line := range strings.Split(schemaSQL, "\n") {
@@ -921,6 +924,11 @@ func (s *sqliteStore) PrunePeers(olderThan int64) (int64, error) {
 	}
 	// A pruned peer's Muse authorization (cookie ciphertext) must not linger.
 	if _, err := tx.Exec(`DELETE FROM muse_accounts WHERE peer_id IN
+		(SELECT id FROM peers WHERE last_seen>0 AND last_seen<?)`, olderThan); err != nil {
+		return 0, err
+	}
+	// A pruned peer's MCP grant must not be inherited if the peer_id re-registers.
+	if _, err := tx.Exec(`DELETE FROM mcp_keys WHERE principal_type='peer' AND peer_id IN
 		(SELECT id FROM peers WHERE last_seen>0 AND last_seen<?)`, olderThan); err != nil {
 		return 0, err
 	}

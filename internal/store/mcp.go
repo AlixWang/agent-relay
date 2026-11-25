@@ -290,6 +290,56 @@ func (s *sqliteStore) SetMCPKeyRevokedAt(id string, at int64) (bool, error) {
 	return n > 0, nil
 }
 
+// RotateMCPKey atomically retires/schedules-expiry on oldID and inserts newKey.
+// Returns (false, nil) if oldID is missing, not an external key, already
+// revoked/in-grace, or expired.
+func (s *sqliteStore) RotateMCPKey(oldID string, newKey *MCPKey, now, graceRevokeAt int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var res sql.Result
+	if graceRevokeAt > now {
+		res, err = tx.Exec(`UPDATE mcp_keys SET revoked_at=?
+			WHERE id=? AND principal_type='key' AND status='active' AND revoked_at=0 AND (expires_at=0 OR expires_at>?)`,
+			graceRevokeAt, oldID, now)
+	} else {
+		res, err = tx.Exec(`UPDATE mcp_keys SET status='revoked',revoked_at=?
+			WHERE id=? AND principal_type='key' AND status='active' AND revoked_at=0 AND (expires_at=0 OR expires_at>?)`,
+			now, oldID, now)
+	}
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(`INSERT INTO mcp_keys(`+mcpKeyColumns+`)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		newKey.ID, newKey.PrincipalType, newKey.PeerID, newKey.Name, newKey.KeyPrefix, newKey.KeyHash,
+		marshalScopes(newKey.Scopes), newKey.Status, newKey.Note, newKey.CreatedBy, newKey.CreatedAt,
+		newKey.ExpiresAt, newKey.RevokedAt, newKey.RotatedFrom, newKey.LastUsedAt, newKey.LastUsedIP,
+		newKey.UseCount); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *sqliteStore) upgradeMCPIndexes() {
+	var sqlText string
+	err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_mcp_approvals_open'`).Scan(&sqlText)
+	if err == nil && !strings.Contains(sqlText, "service_id") {
+		_, _ = s.db.Exec(`DROP INDEX IF EXISTS idx_mcp_approvals_open`)
+	}
+}
+
 const mcpApprovalColumns = `id,key_id,key_name,principal,auth_kind,endpoint,service_id,tool,risk,
 	params_json,params_hash,status,requested_at,expires_at,decided_at,decided_by,decision_note,
 	execute_before,executed_at,outcome,error_code,upstream_status,request_id`
@@ -326,13 +376,13 @@ func (s *sqliteStore) GetMCPApproval(id string) (*MCPApproval, error) {
 }
 
 // GetOpenMCPApproval returns the existing pending/approved row for the same
-// principal+tool+frozen params, so a re-issued request reuses the approval
-// instead of stacking duplicates.
-func (s *sqliteStore) GetOpenMCPApproval(principal, tool, paramsHash string) (*MCPApproval, error) {
+// principal+service_id+tool+frozen params, so a re-issued request reuses the
+// approval instead of stacking duplicates.
+func (s *sqliteStore) GetOpenMCPApproval(principal, serviceID, tool, paramsHash string) (*MCPApproval, error) {
 	a, err := scanMCPApproval(s.db.QueryRow(`SELECT `+mcpApprovalColumns+`
-		FROM mcp_approvals WHERE principal=? AND tool=? AND params_hash=?
+		FROM mcp_approvals WHERE principal=? AND service_id=? AND tool=? AND params_hash=?
 		AND status IN ('pending','approved') ORDER BY requested_at DESC LIMIT 1`,
-		principal, tool, paramsHash))
+		principal, serviceID, tool, paramsHash))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -388,6 +438,12 @@ func (s *sqliteStore) CountMCPApprovals(status string) (int, error) {
 	return n, err
 }
 
+func (s *sqliteStore) CountPendingMCPApprovals(now int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM mcp_approvals WHERE status='pending' AND expires_at>?`, now).Scan(&n)
+	return n, err
+}
+
 // ApproveMCPApproval CASes pending -> approved inside the request TTL.
 func (s *sqliteStore) ApproveMCPApproval(id string, now, executeBefore int64, by, note string) (bool, error) {
 	s.mu.Lock()
@@ -406,7 +462,7 @@ func (s *sqliteStore) RejectMCPApproval(id string, now int64, by, note string) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	res, err := s.db.Exec(`UPDATE mcp_approvals SET status='rejected',decided_at=?,decided_by=?,
-		decision_note=? WHERE id=? AND status='pending'`, now, by, note, id)
+		decision_note=? WHERE id=? AND status='pending' AND expires_at>?`, now, by, note, id, now)
 	if err != nil {
 		return false, err
 	}
@@ -598,8 +654,8 @@ func (s *sqliteStore) TrimMCPAudit(maxRows int64) (int64, error) {
 	if maxRows <= 0 {
 		return 0, nil
 	}
-	res, err := s.db.Exec(`DELETE FROM mcp_audit WHERE seq IN (
-		SELECT seq FROM mcp_audit ORDER BY seq DESC LIMIT -1 OFFSET ?)`, maxRows)
+	res, err := s.db.Exec(`DELETE FROM mcp_audit WHERE seq <= COALESCE(
+		(SELECT seq FROM mcp_audit ORDER BY seq DESC LIMIT 1 OFFSET ?), 0)`, maxRows)
 	if err != nil {
 		return 0, err
 	}

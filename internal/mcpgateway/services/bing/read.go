@@ -2,6 +2,7 @@ package bing
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -39,9 +40,11 @@ type Service struct {
 	batchCap int
 	now      func() time.Time
 
-	mu      sync.Mutex
-	sites   map[string]bool
-	sitesAt time.Time
+	refreshMu sync.Mutex
+	mu        sync.Mutex
+	sites     map[string]bool
+	sitesAt   time.Time
+	sitesHash [32]byte
 }
 
 const defaultBaseURL = "https://ssl.bing.com/webmaster/api.svc/json"
@@ -172,31 +175,60 @@ type bingSite struct {
 }
 
 // verifiedSite enforces the v5 contract: the site must be verified under the
-// same API key. A 60s cache avoids one GetUserSites call per row.
+// same API key. A 60s cache avoids one GetUserSites call per row, without
+// holding s.mu across upstream HTTP I/O.
 func (s *Service) verifiedSite(ctx context.Context, site string) *mcpgateway.Error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	key, kerr := s.apiKey()
+	if kerr != nil {
+		return kerr
+	}
+	keyHash := sha256.Sum256([]byte(key))
 	now := s.now()
-	if s.sites != nil && now.Sub(s.sitesAt) < 60*time.Second {
-		if s.sites[site] {
+
+	s.mu.Lock()
+	if s.sites != nil && s.sitesHash == keyHash && now.Sub(s.sitesAt) < 60*time.Second {
+		verified := s.sites[site]
+		s.mu.Unlock()
+		if verified {
 			return nil
 		}
-		if len(s.sites) > 0 {
-			return mcpgateway.InvalidParams("site is not verified under this API key")
-		}
+		return mcpgateway.InvalidParams("site is not verified under this API key")
 	}
+	s.mu.Unlock()
+
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+
+	now = s.now()
+	s.mu.Lock()
+	if s.sites != nil && s.sitesHash == keyHash && now.Sub(s.sitesAt) < 60*time.Second {
+		verified := s.sites[site]
+		s.mu.Unlock()
+		if verified {
+			return nil
+		}
+		return mcpgateway.InvalidParams("site is not verified under this API key")
+	}
+	s.mu.Unlock()
+
 	var sites []bingSite
 	if err := s.call(ctx, http.MethodGet, "GetUserSites", nil, nil, &sites); err != nil {
 		return err
 	}
-	s.sites = map[string]bool{}
+	nextSites := map[string]bool{}
 	for _, st := range sites {
 		if st.URL != "" {
-			s.sites[st.URL] = st.IsVerified
+			nextSites[st.URL] = st.IsVerified
 		}
 	}
-	s.sitesAt = now
-	if !s.sites[site] {
+	s.mu.Lock()
+	s.sites = nextSites
+	s.sitesAt = s.now()
+	s.sitesHash = keyHash
+	verified := s.sites[site]
+	s.mu.Unlock()
+
+	if !verified {
 		return mcpgateway.InvalidParams("site is not verified under this API key")
 	}
 	return nil
@@ -208,6 +240,9 @@ func (s *Service) listSites(ctx context.Context) (mcpgateway.Result, error) {
 	var sites []map[string]any
 	if err := s.call(ctx, http.MethodGet, "GetUserSites", nil, nil, &sites); err != nil {
 		return mcpgateway.Result{}, err
+	}
+	if sites == nil {
+		sites = []map[string]any{}
 	}
 	items, truncated := trimRows(sites, s.maxRows)
 	return mcpgateway.Result{Data: map[string]any{"sites": items}, Truncated: truncated, RowCount: len(items), UpstreamStatus: 200}, nil
@@ -225,6 +260,9 @@ func (s *Service) siteRead(ctx context.Context, call mcpgateway.Call) (mcpgatewa
 	case ToolPageQueries:
 		if !mcpgateway.URLBelongsToSite(site, page) {
 			return mcpgateway.Result{}, mcpgateway.InvalidParams("page must belong to the site")
+		}
+		if u, uerr := mcpgateway.NormalizeURL(page); uerr == nil {
+			page = u.String()
 		}
 	case ToolQueryPages:
 		if strings.TrimSpace(query) == "" {
@@ -250,8 +288,11 @@ func (s *Service) siteRead(ctx context.Context, call mcpgateway.Call) (mcpgatewa
 	rows = normalizeRows(rows)
 	max := s.rowLimit(limit)
 	items, truncated := trimRows(rows, max)
-	data := map[string]any{"site": site, "rows": items, "totals": totalsOf(items)}
-	if call.Tool == ToolListFeeds {
+	data := map[string]any{"site": site, "rows": items}
+	switch call.Tool {
+	case ToolQueryStats, ToolPageStats, ToolRankTraffic, ToolPageQueries, ToolQueryPages:
+		data["totals"] = totalsOf(rows)
+	case ToolListFeeds:
 		data["feeds"] = items
 	}
 	if call.Tool == ToolPageQueries || call.Tool == ToolQueryPages {
@@ -324,7 +365,10 @@ func (s *Service) keywordRead(ctx context.Context, call mcpgateway.Call) (mcpgat
 			language = "en"
 		}
 		params := url.Values{"q": {p.Q}, "country": {country}, "language": {language}}
-		if p.StartDate != "" {
+		if p.StartDate != "" || p.EndDate != "" {
+			if p.StartDate == "" || p.EndDate == "" {
+				return mcpgateway.Result{}, mcpgateway.InvalidParams("startDate and endDate must be supplied together")
+			}
 			start, end, err := mcpgateway.ValidateDateRange(p.StartDate, p.EndDate)
 			if err != nil {
 				return mcpgateway.Result{}, mcpgateway.InvalidParams("%s", err.Error())
@@ -351,8 +395,9 @@ func (s *Service) keywordRead(ctx context.Context, call mcpgateway.Call) (mcpgat
 		if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
 			return mcpgateway.Result{}, err
 		}
-		if strings.TrimSpace(p.Q) == "" {
-			return mcpgateway.Result{}, mcpgateway.InvalidParams("q is required")
+		p.Q = strings.TrimSpace(p.Q)
+		if p.Q == "" || len(p.Q) > 200 {
+			return mcpgateway.Result{}, mcpgateway.InvalidParams("q is required (max 200 bytes)")
 		}
 		if err := validateCountryLang(p.Country, p.Language); err != nil {
 			return mcpgateway.Result{}, err

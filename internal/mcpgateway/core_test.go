@@ -117,24 +117,28 @@ func TestRegistryConflicts(t *testing.T) {
 }
 
 func TestFreezeParamsNormalization(t *testing.T) {
-	a, h1, err := FreezeParams("submit_url", json.RawMessage(`{"b":2,"a":{"y":1.0,"x":" q "}}`))
+	a, h1, err := FreezeParams("bing-webmaster", "submit_url", json.RawMessage(`{"b":2,"a":{"y":1.0,"x":" q "}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, h2, err := FreezeParams("submit_url", json.RawMessage(`{"a":{"x":" q ","y":1},"b":2.0,"approval_id":"ignored","dry_run":true}`))
+	b, h2, err := FreezeParams("bing-webmaster", "submit_url", json.RawMessage(`{"a":{"x":" q ","y":1},"b":2.0,"approval_id":"ignored","dry_run":true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(a) != string(b) || h1 != h2 {
 		t.Fatalf("normalization mismatch:\n%s\n%s\n%s %s", a, b, h1, h2)
 	}
-	_, h3, _ := FreezeParams("submit_url", json.RawMessage(`{"a":{"x":"q","y":1},"b":2}`))
+	_, h3, _ := FreezeParams("bing-webmaster", "submit_url", json.RawMessage(`{"a":{"x":"q","y":1},"b":2}`))
 	if h1 == h3 {
 		t.Fatal("whitespace/string change must change the hash")
 	}
-	_, h4, _ := FreezeParams("remove_feed", json.RawMessage(`{"a":1,"b":2}`))
+	_, h4, _ := FreezeParams("bing-webmaster", "remove_feed", json.RawMessage(`{"a":1,"b":2}`))
 	if h1 == h4 {
 		t.Fatal("tool name must be part of the frozen hash")
+	}
+	_, h5, _ := FreezeParams("other-svc", "submit_url", json.RawMessage(`{"a":{"x":" q ","y":1},"b":2}`))
+	if h1 == h5 {
+		t.Fatal("service id must be part of the frozen hash")
 	}
 }
 
@@ -149,5 +153,68 @@ func TestParamsSummaryRedactsSecrets(t *testing.T) {
 	got = ParamsSummary(json.RawMessage(`{"url":"https://x.test/a?token=very-secret"}`))
 	if strings.Contains(got, "very-secret") || strings.Contains(got, "token=") {
 		t.Fatalf("URL query leaked into summary: %s", got)
+	}
+	got = ParamsSummary(json.RawMessage(`{"private_key":"pk-1","x-api-key":"xk-2","note":"leak rmk_abcdef123456"}`))
+	if strings.Contains(got, "pk-1") || strings.Contains(got, "xk-2") || strings.Contains(got, "rmk_abcdef123456") {
+		t.Fatalf("extended secret patterns leaked: %s", got)
+	}
+	// Multi-byte UTF-8 truncation must produce valid UTF-8.
+	longCN := json.RawMessage(`{"q":"` + strings.Repeat("中", 100) + `"}`)
+	got = ParamsSummary(longCN)
+	if !strings.Contains(got, "…") || strings.ContainsRune(got, '\uFFFD') {
+		t.Fatalf("UTF-8 truncation corrupted rune: %q", got)
+	}
+}
+
+func TestStrictJSONAndURLBelongsToSiteSecurity(t *testing.T) {
+	// Case-colliding / duplicate keys rejected by both DecodeStrict and FreezeParams.
+	type args struct {
+		Site string `json:"site"`
+		URL  string `json:"url"`
+	}
+	for _, raw := range []string{
+		`{"site":"https://x.test/","URL":"https://x.test/","url":"https://x.test/a"}`,
+		`{"site":"https://x.test/","site":"https://y.test/"}`,
+	} {
+		var a args
+		if err := DecodeStrict(json.RawMessage(raw), &a); err == nil {
+			t.Fatalf("DecodeStrict accepted %s", raw)
+		}
+		if _, _, err := FreezeParams("bing-webmaster", "add_blocked_url", json.RawMessage(raw)); err == nil {
+			t.Fatalf("FreezeParams accepted %s", raw)
+		}
+	}
+	// Integral floats >= 1e6 and -0.0 normalize cleanly; Inf fails.
+	_, h1, err := FreezeParams("svc", "tool", json.RawMessage(`{"n":1000000,"z":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, h2, err := FreezeParams("svc", "tool", json.RawMessage(`{"n":1000000.0,"z":-0.0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 != h2 {
+		t.Fatalf("large int / -0.0 normalization mismatch")
+	}
+	if _, _, err := FreezeParams("svc", "tool", json.RawMessage(`{"n":1e999}`)); err == nil {
+		t.Fatal("overflow float must be rejected")
+	}
+
+	// URLBelongsToSite rejects traversal and scheme mismatch.
+	if URLBelongsToSite("https://example.com/blog/", "https://example.com/blog/../admin") {
+		t.Fatal("dot-dot traversal accepted")
+	}
+	if URLBelongsToSite("https://example.com/blog/", "https://example.com/blog/%2e%2e/admin") {
+		t.Fatal("encoded dot-dot traversal accepted")
+	}
+	if URLBelongsToSite("https://example.com/", "http://example.com/page") {
+		t.Fatal("scheme downgrade accepted")
+	}
+	if !URLBelongsToSite("https://example.com/blog/", "https://EXAMPLE.COM/blog/post") {
+		t.Fatal("valid subpath with uppercase host rejected")
+	}
+	batch, err := ValidateBatchURLs("https://example.com/", []string{"https://EXAMPLE.COM/a", "https://example.com/a"}, 10)
+	if err != nil || len(batch) != 1 {
+		t.Fatalf("batch host normalization dedup failed: %+v err=%v", batch, err)
 	}
 }

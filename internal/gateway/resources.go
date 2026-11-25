@@ -329,6 +329,9 @@ func (s *Server) handleAdminResourcePut(w http.ResponseWriter, r *http.Request) 
 	detail := fmt.Sprintf("kind=%s name=%s revision=%s", kind, name, v.RevisionID)
 	if kind == resources.KindSecret && req.Value != "" {
 		detail += " value=rotated"
+		if s.mcp != nil {
+			s.mcp.InvalidateSecret(name)
+		}
 	}
 	s.auditResource("resource.put", detail)
 	writeJSON(w, 200, map[string]any{"ok": true, "resource": v})
@@ -342,6 +345,9 @@ func (s *Server) handleAdminResourceDelete(w http.ResponseWriter, r *http.Reques
 	if err := s.resources.Delete(kind, name); err != nil {
 		resourceError(w, err)
 		return
+	}
+	if kind == resources.KindSecret && s.mcp != nil {
+		s.mcp.InvalidateSecret(name)
 	}
 	s.auditResource("resource.deleted", fmt.Sprintf("kind=%s name=%s", kind, name))
 	writeJSON(w, 200, map[string]any{"ok": true})

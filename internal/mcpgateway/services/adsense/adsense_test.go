@@ -216,3 +216,94 @@ func TestAdSenseValidationAndCredentialFailure(t *testing.T) {
 		t.Fatalf("write placeholder: %v", err)
 	}
 }
+
+func TestAdSenseFixesEnumsDatesPagingAndToken(t *testing.T) {
+	var tokenCalls int32
+	var force403 atomic.Bool
+	var force401Once atomic.Bool
+	var lastReport atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			atomic.AddInt32(&tokenCalls, 1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "tok-" + string(rune('0'+atomic.LoadInt32(&tokenCalls))), "expires_in": 3600})
+			return
+		}
+		if force403.Load() {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if force401Once.CompareAndSwap(true, false) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/v2/accounts":
+			if r.URL.Query().Get("pageToken") == "" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"accounts":      []any{map[string]any{"name": "accounts/pub-1"}},
+					"nextPageToken": "p2",
+				})
+			} else {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"accounts": []any{map[string]any{"name": "accounts/pub-2"}},
+				})
+			}
+		default:
+			lastReport.Store(r.URL.Query())
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"headers": []any{map[string]any{"name": "ESTIMATED_EARNINGS"}},
+				"totals":  map[string]any{"cells": []any{map[string]any{"value": "2.0"}}},
+			})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	svc := New(Options{
+		CredentialRef: "secret:TEST", Credentials: fakeSecrets{value: testADC},
+		Upstream: mcpgateway.NewUpstream(5 * time.Second), BaseURL: srv.URL + "/v2", TokenURL: srv.URL + "/token", MaxRows: 10,
+	})
+	ctx := context.Background()
+
+	// Paging follows nextPageToken.
+	res, err := svc.Handle(ctx, mcpgateway.Call{Tool: ToolListAccounts})
+	if err != nil || res.RowCount != 2 {
+		t.Fatalf("paged accounts: %+v err=%v", res, err)
+	}
+	// compare_periods canonicalizes RFC3339 dates instead of sending year=1.
+	_, err = svc.Handle(ctx, mcpgateway.Call{Tool: ToolComparePeriods, Params: json.RawMessage(`{
+		"account":"pub-1","period1Start":"2026-11-01T00:00:00Z","period1End":"2026-11-02T00:00:00Z",
+		"period2Start":"2026-11-03T00:00:00Z","period2End":"2026-11-04T00:00:00Z"
+	}`)})
+	if err != nil {
+		t.Fatalf("compare_periods rfc3339: %v", err)
+	}
+	q := lastReport.Load().(url.Values)
+	if q.Get("startDate.year") != "2026" || q.Get("startDate.month") != "11" {
+		t.Fatalf("compare_periods sent bad date: %+v", q)
+	}
+	// 403 must not evict cached token; 401 refreshes and retries once.
+	force403.Store(true)
+	_, _ = svc.Handle(ctx, mcpgateway.Call{Tool: ToolListAccounts})
+	force403.Store(false)
+	if atomic.LoadInt32(&tokenCalls) != 1 {
+		t.Fatalf("403 evicted token: calls=%d", atomic.LoadInt32(&tokenCalls))
+	}
+	force401Once.Store(true)
+	if _, err := svc.Handle(ctx, mcpgateway.Call{Tool: ToolListAccounts}); err != nil {
+		t.Fatalf("401 retry failed: %v", err)
+	}
+	if atomic.LoadInt32(&tokenCalls) != 2 {
+		t.Fatalf("401 did not refresh once: calls=%d", atomic.LoadInt32(&tokenCalls))
+	}
+	// Invalid v2 enums and mixed date params are rejected.
+	for _, bad := range []string{
+		`{"dateRange":"LAST_14_DAYS"}`,
+		`{"dateRange":"TODAY","startDate":"2026-11-01","endDate":"2026-11-01"}`,
+		`{"dateRange":"TODAY","metrics":["CTR"]}`,
+		`{"dateRange":"TODAY","filters":["DROP_TABLE==1"]}`,
+		`{"dateRange":"TODAY","filters":["COUNTRY_CODE!=US"]}`,
+	} {
+		if err := validateReportArg(json.RawMessage(bad)); err == nil {
+			t.Fatalf("accepted invalid report arg: %s", bad)
+		}
+	}
+}

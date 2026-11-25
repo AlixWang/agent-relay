@@ -3,13 +3,10 @@ package ga
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -28,6 +25,7 @@ type Options struct {
 	CredentialRef    string
 	Credentials      CredentialSource
 	Upstream         *mcpgateway.Upstream
+	UpstreamTimeout  time.Duration
 	HTTPClient       *http.Client
 	AdminBaseURL     string
 	DataBaseURL      string
@@ -40,34 +38,25 @@ type Options struct {
 // Service implements mcpgateway.MCPService for the nine GA read tools.
 type Service struct {
 	credRef  string
-	creds    CredentialSource
 	upstream *mcpgateway.Upstream
-	client   *http.Client
+	adc      *mcpgateway.GoogleADC
 
 	adminBase     string
 	dataBase      string
 	dataAlphaBase string
-	tokenURL      string
 	maxRows       int
-	now           func() time.Time
-
-	mu      sync.Mutex
-	token   string
-	expires time.Time
 }
 
 const (
 	defaultAdminBaseURL     = "https://analyticsadmin.googleapis.com/v1alpha"
 	defaultDataBaseURL      = "https://analyticsdata.googleapis.com/v1beta"
 	defaultDataAlphaBaseURL = "https://analyticsdata.googleapis.com/v1alpha"
-	defaultTokenURL         = "https://oauth2.googleapis.com/token"
 )
 
 func New(opts Options) *Service {
-	timeout := 15 * time.Second
-	client := opts.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: timeout}
+	timeout := opts.UpstreamTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
 	}
 	up := opts.Upstream
 	if up == nil {
@@ -85,10 +74,6 @@ func New(opts Options) *Service {
 	if dataAlphaBase == "" {
 		dataAlphaBase = defaultDataAlphaBaseURL
 	}
-	tokenURL := opts.TokenURL
-	if tokenURL == "" {
-		tokenURL = defaultTokenURL
-	}
 	maxRows := opts.MaxRows
 	if maxRows <= 0 {
 		maxRows = 1000
@@ -98,9 +83,19 @@ func New(opts Options) *Service {
 		now = time.Now
 	}
 	return &Service{
-		credRef: opts.CredentialRef, creds: opts.Credentials, upstream: up, client: client,
+		credRef:  opts.CredentialRef,
+		upstream: up,
+		adc: mcpgateway.NewGoogleADC(mcpgateway.GoogleADCOptions{
+			ServiceName:   DisplayName,
+			CredentialRef: opts.CredentialRef,
+			Credentials:   opts.Credentials,
+			HTTPClient:    opts.HTTPClient,
+			Timeout:       timeout,
+			TokenURL:      opts.TokenURL,
+			Now:           now,
+		}),
 		adminBase: adminBase, dataBase: dataBase, dataAlphaBase: dataAlphaBase,
-		tokenURL: tokenURL, maxRows: maxRows, now: now,
+		maxRows: maxRows,
 	}
 }
 
@@ -150,101 +145,6 @@ func (s *Service) handle(ctx context.Context, call mcpgateway.Call) (mcpgateway.
 	}
 }
 
-// ---- auth ----
-
-type adcFile struct {
-	Type         string `json:"type"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	RefreshToken string `json:"refresh_token"`
-}
-
-// accessToken mirrors the AdSense service: an authorized_user ADC is exchanged
-// at oauth2.googleapis.com/token and the access token is cached until shortly
-// before expiry. The raw ADC and the token are never logged or returned.
-func (s *Service) accessToken(ctx context.Context) (string, *mcpgateway.Error) {
-	s.mu.Lock()
-	if s.token != "" && s.now().Before(s.expires) {
-		tok := s.token
-		s.mu.Unlock()
-		return tok, nil
-	}
-	s.mu.Unlock()
-	if s.creds == nil || s.credRef == "" {
-		return "", credentialError()
-	}
-	raw, err := s.creds.Resolve(s.credRef)
-	if err != nil {
-		return "", credentialError()
-	}
-	var adc adcFile
-	if err := json.Unmarshal([]byte(raw), &adc); err != nil || adc.Type != "authorized_user" ||
-		adc.ClientID == "" || adc.ClientSecret == "" || adc.RefreshToken == "" {
-		return "", credentialError()
-	}
-	form := url.Values{
-		"client_id":     {adc.ClientID},
-		"client_secret": {adc.ClientSecret},
-		"refresh_token": {adc.RefreshToken},
-		"grant_type":    {"refresh_token"},
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.tokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", mcpgateway.UpstreamFailure(err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "relay-mcp/1.0")
-	resp, err := s.client.Do(req)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return "", mcpgateway.UpstreamFailure(mcpgateway.ErrUpstreamTimeout)
-		}
-		return "", mcpgateway.UpstreamFailure(mcpgateway.ErrUpstreamNetwork)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", mcpgateway.UpstreamFailure(mcpgateway.ErrUpstreamNetwork)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", &mcpgateway.Error{
-			Code: mcpgateway.CodeUpstreamError, HTTPStatus: http.StatusOK,
-			Message: fmt.Sprintf("Google Analytics token refresh failed (HTTP %d); operator must re-authorize the ADC", resp.StatusCode),
-			Details: map[string]any{"upstream_status": resp.StatusCode},
-		}
-	}
-	var tok struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := json.Unmarshal(data, &tok); err != nil || tok.AccessToken == "" {
-		return "", &mcpgateway.Error{Code: mcpgateway.CodeUpstreamError, Message: "Google Analytics token refresh returned no access token", HTTPStatus: http.StatusOK}
-	}
-	ttl := tok.ExpiresIn
-	if ttl <= 0 {
-		ttl = 3000
-	}
-	s.mu.Lock()
-	s.token = tok.AccessToken
-	s.expires = s.now().Add(time.Duration(ttl-60) * time.Second)
-	s.mu.Unlock()
-	return tok.AccessToken, nil
-}
-
-func (s *Service) clearToken() {
-	s.mu.Lock()
-	s.token = ""
-	s.expires = time.Time{}
-	s.mu.Unlock()
-}
-
-func credentialError() *mcpgateway.Error {
-	return &mcpgateway.Error{
-		Code: mcpgateway.CodeCredentialMissing, Message: "Google Analytics credential is not available", HTTPStatus: http.StatusOK,
-	}
-}
-
 // ---- HTTP ----
 
 func (s *Service) apiGet(ctx context.Context, base, path string, query url.Values, out any) *mcpgateway.Error {
@@ -256,31 +156,38 @@ func (s *Service) apiPost(ctx context.Context, base, path string, body any, out 
 }
 
 func (s *Service) apiDo(ctx context.Context, method, base, path string, query url.Values, body any, out any) *mcpgateway.Error {
-	token, terr := s.accessToken(ctx)
-	if terr != nil {
-		return terr
-	}
 	u := strings.TrimSuffix(base, "/") + "/" + strings.TrimPrefix(path, "/")
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
-	resp, err := s.upstream.DoRead(ctx, method, u, body, map[string]string{"Authorization": "Bearer " + token})
-	if err != nil {
-		return mcpgateway.UpstreamFailure(err)
-	}
-	if resp.Status != http.StatusOK {
-		if resp.Status == http.StatusUnauthorized || resp.Status == http.StatusForbidden {
-			s.clearToken()
+	for attempt := 0; attempt < 2; attempt++ {
+		token, terr := s.adc.Token(ctx)
+		if terr != nil {
+			return terr
 		}
-		return mcpgateway.UpstreamError(resp.Status)
-	}
-	if out == nil {
+		resp, err := s.upstream.DoRead(ctx, method, u, body, map[string]string{"Authorization": "Bearer " + token})
+		if err != nil {
+			return mcpgateway.UpstreamFailure(err)
+		}
+		if resp.Status == http.StatusUnauthorized {
+			s.adc.Invalidate(token)
+			if attempt == 0 {
+				continue
+			}
+			return mcpgateway.UpstreamError(resp.Status)
+		}
+		if resp.Status != http.StatusOK {
+			return mcpgateway.UpstreamError(resp.Status)
+		}
+		if out == nil {
+			return nil
+		}
+		if err := json.Unmarshal(resp.Body, out); err != nil {
+			return &mcpgateway.Error{Code: mcpgateway.CodeUpstreamError, Message: "Google Analytics returned invalid JSON", HTTPStatus: 200}
+		}
 		return nil
 	}
-	if err := json.Unmarshal(resp.Body, out); err != nil {
-		return &mcpgateway.Error{Code: mcpgateway.CodeUpstreamError, Message: "Google Analytics returned invalid JSON", HTTPStatus: 200}
-	}
-	return nil
+	return mcpgateway.UpstreamError(http.StatusUnauthorized)
 }
 
 // ---- Admin API reads ----
@@ -349,8 +256,9 @@ func (s *Service) listPropertyAnnotations(ctx context.Context, raw json.RawMessa
 
 func (s *Service) listPaged(ctx context.Context, base, path, key string) ([]any, bool, *mcpgateway.Error) {
 	out := []any{}
+	seen := map[string]bool{}
 	pageToken := ""
-	for {
+	for pageNum := 0; pageNum < 50; pageNum++ {
 		query := url.Values{"pageSize": {"200"}}
 		if pageToken != "" {
 			query.Set("pageToken", pageToken)
@@ -368,12 +276,16 @@ func (s *Service) listPaged(ctx context.Context, base, path, key string) ([]any,
 			}
 		}
 		next, _ := page["nextPageToken"].(string)
-		if next == "" || next == pageToken {
-			break
+		if next == "" || seen[next] {
+			return out, false, nil
 		}
+		if len(out) >= s.maxRows {
+			return out, true, nil
+		}
+		seen[next] = true
 		pageToken = next
 	}
-	return out, false, nil
+	return out, true, nil
 }
 
 // ---- Data API metadata ----
@@ -389,11 +301,24 @@ func (s *Service) getCustomDimensionsAndMetrics(ctx context.Context, raw json.Ra
 	}
 	dimensions := customDefinitions(meta["dimensions"])
 	metrics := customDefinitions(meta["metrics"])
+	truncated := false
+	if len(dimensions) > s.maxRows {
+		dimensions = dimensions[:s.maxRows]
+		truncated = true
+	}
+	rem := s.maxRows - len(dimensions)
+	if rem < len(metrics) {
+		if rem < 0 {
+			rem = 0
+		}
+		metrics = metrics[:rem]
+		truncated = true
+	}
 	data := map[string]any{
 		"custom_dimensions": snakeValue(dimensions),
 		"custom_metrics":    snakeValue(metrics),
 	}
-	return mcpgateway.Result{Data: data, RowCount: len(dimensions) + len(metrics)}, nil
+	return mcpgateway.Result{Data: data, Truncated: truncated, RowCount: len(dimensions) + len(metrics)}, nil
 }
 
 func customDefinitions(v any) []any {
@@ -413,6 +338,13 @@ func customDefinitions(v any) []any {
 
 // ---- reports ----
 
+func (s *Service) effectiveLimit(requested int) int {
+	if requested <= 0 || requested > s.maxRows {
+		return s.maxRows + 1
+	}
+	return requested
+}
+
 func (s *Service) runReport(ctx context.Context, raw json.RawMessage) (mcpgateway.Result, error) {
 	var p runReportArgs
 	if err := mcpgateway.DecodeStrict(raw, &p); err != nil {
@@ -426,13 +358,13 @@ func (s *Service) runReport(ctx context.Context, raw json.RawMessage) (mcpgatewa
 		return mcpgateway.Result{}, perr
 	}
 	body := reportBody(p.DateRanges, p.Dimensions, p.Metrics, p.DimensionFilter,
-		p.MetricFilter, p.OrderBys, p.Limit, p.Offset, p.CurrencyCode, p.ReturnPropertyQuota)
+		p.MetricFilter, p.OrderBys, s.effectiveLimit(p.Limit), p.Offset, strings.TrimSpace(p.CurrencyCode), p.ReturnPropertyQuota)
 	var rep map[string]any
 	if err := s.apiPost(ctx, s.dataBase, "/"+path+":runReport", body, &rep); err != nil {
 		return mcpgateway.Result{}, err
 	}
-	rep = snakeMap(rep)
 	rowCount, truncated := trimRowsField(rep, s.maxRows)
+	rep = snakeMap(rep)
 	return mcpgateway.Result{Data: rep, Truncated: truncated, RowCount: rowCount}, nil
 }
 
@@ -449,13 +381,13 @@ func (s *Service) runRealtimeReport(ctx context.Context, raw json.RawMessage) (m
 		return mcpgateway.Result{}, perr
 	}
 	body := reportBody(nil, p.Dimensions, p.Metrics, p.DimensionFilter,
-		p.MetricFilter, p.OrderBys, p.Limit, p.Offset, "", p.ReturnPropertyQuota)
+		p.MetricFilter, p.OrderBys, s.effectiveLimit(p.Limit), 0, "", p.ReturnPropertyQuota)
 	var rep map[string]any
 	if err := s.apiPost(ctx, s.dataBase, "/"+path+":runRealtimeReport", body, &rep); err != nil {
 		return mcpgateway.Result{}, err
 	}
-	rep = snakeMap(rep)
 	rowCount, truncated := trimRowsField(rep, s.maxRows)
+	rep = snakeMap(rep)
 	return mcpgateway.Result{Data: rep, Truncated: truncated, RowCount: rowCount}, nil
 }
 
@@ -472,14 +404,22 @@ func (s *Service) runConversionsReport(ctx context.Context, raw json.RawMessage)
 		return mcpgateway.Result{}, perr
 	}
 	body := reportBody(p.DateRanges, p.Dimensions, p.Metrics, p.DimensionFilter,
-		p.MetricFilter, p.OrderBys, p.Limit, p.Offset, p.CurrencyCode, p.ReturnPropertyQuota)
-	body["conversionSpec"] = camelize(p.ConversionSpec)
+		p.MetricFilter, p.OrderBys, s.effectiveLimit(p.Limit), p.Offset, strings.TrimSpace(p.CurrencyCode), p.ReturnPropertyQuota)
+	actions := p.ConversionSpec.ConversionActions
+	if actions == nil {
+		actions = []string{}
+	}
+	spec := map[string]any{"conversionActions": actions}
+	if p.ConversionSpec.AttributionModel != "" {
+		spec["attributionModel"] = p.ConversionSpec.AttributionModel
+	}
+	body["conversionSpec"] = spec
 	var rep map[string]any
 	if err := s.apiPost(ctx, s.dataAlphaBase, "/"+path+":runReport", body, &rep); err != nil {
 		return mcpgateway.Result{}, err
 	}
-	rep = snakeMap(rep)
 	rowCount, truncated := trimRowsField(rep, s.maxRows)
+	rep = snakeMap(rep)
 	return mcpgateway.Result{Data: rep, Truncated: truncated, RowCount: rowCount}, nil
 }
 
@@ -520,7 +460,7 @@ func funnelBody(p *runFunnelArgs) (map[string]any, *mcpgateway.Error) {
 			filter = camelize(step.FilterExpression)
 		} else if strings.TrimSpace(step.Event) != "" {
 			filter = map[string]any{
-				"funnelEventFilter": map[string]any{"eventName": step.Event},
+				"funnelEventFilter": map[string]any{"eventName": strings.TrimSpace(step.Event)},
 			}
 		} else {
 			return nil, mcpgateway.InvalidParams("funnel_steps[%d] needs filter_expression or event", i)
@@ -538,12 +478,12 @@ func funnelBody(p *runFunnelArgs) (map[string]any, *mcpgateway.Error) {
 	}
 	if p.FunnelBreakdown != nil {
 		body["funnelBreakdown"] = map[string]any{
-			"breakdownDimension": map[string]any{"name": p.FunnelBreakdown.BreakdownDimension},
+			"breakdownDimension": map[string]any{"name": strings.TrimSpace(p.FunnelBreakdown.BreakdownDimension)},
 		}
 	}
 	if p.FunnelNextAction != nil {
 		next := map[string]any{
-			"nextActionDimension": map[string]any{"name": p.FunnelNextAction.NextActionDimension},
+			"nextActionDimension": map[string]any{"name": strings.TrimSpace(p.FunnelNextAction.NextActionDimension)},
 		}
 		if p.FunnelNextAction.Limit > 0 {
 			next["limit"] = p.FunnelNextAction.Limit

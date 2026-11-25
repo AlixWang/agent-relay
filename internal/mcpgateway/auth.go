@@ -158,15 +158,16 @@ func (a *Authenticator) authenticateKey(token, ip string) (Actor, *Error) {
 	if row.Status != "active" || (row.RevokedAt != 0 && row.RevokedAt <= now) || KeyExpired(row.ExpiresAt, now) {
 		return Actor{}, NewError(CodeUnauthorized, "unauthorized", 401)
 	}
+	actor := Actor{
+		Kind: ActorKey, ID: row.ID, Name: row.Name, KeyID: row.ID,
+		IP: ip, AuthKind: AuthMCPKey, Scopes: row.Scopes,
+	}
 	if !HasAnyScope(row.Scopes) {
-		return Actor{}, NewError(CodeInsufficientScope, "this key has no scopes", 403)
+		return actor, NewError(CodeInsufficientScope, "this key has no scopes", 403)
 	}
 	// Best effort: a usage-counter failure must not block calls.
 	_ = a.st.UpdateMCPKeyUsage(row.ID, now, ip)
-	return Actor{
-		Kind: ActorKey, ID: row.ID, Name: row.Name, KeyID: row.ID,
-		IP: ip, AuthKind: AuthMCPKey, Scopes: row.Scopes,
-	}, nil
+	return actor, nil
 }
 
 func (a *Authenticator) authenticatePeer(token, ip string) (Actor, *Error) {
@@ -180,29 +181,31 @@ func (a *Authenticator) authenticatePeer(token, ip string) (Actor, *Error) {
 	if peer == nil {
 		return Actor{}, NewError(CodeUnauthorized, "unauthorized", 401)
 	}
+	actor := Actor{
+		Kind: ActorPeer, ID: peer.ID, Name: peer.ID, PeerID: peer.ID,
+		IP: ip, AuthKind: AuthRelayToken,
+	}
 	// MCP requires an active, verified assistant; pending/suspended peers
 	// keep their message-path tokens but cannot reach upstream credentials.
 	if peer.Status != "active" {
-		return Actor{}, NewError(CodeUnauthorized, "unauthorized", 401)
+		return actor, NewError(CodeUnauthorized, "unauthorized", 401)
 	}
 	if peer.ProtocolVer < a.minProtocol {
-		return Actor{}, NewError(CodeUnauthorized, "client protocol too old; re-run onboarding", 403)
+		return actor, NewError(CodeUnauthorized, "client protocol too old; re-run onboarding", 426)
 	}
 	a.relay.Touch(tok.ID, ip)
 	row, err := a.st.GetMCPPeerGrant(peer.ID)
 	if err != nil {
-		return Actor{}, NewError(CodeInternal, "authorization failed", 500)
-	}
-	if row == nil || row.Status != "active" || !HasAnyScope(row.Scopes) {
-		return Actor{}, NewError(CodeInsufficientScope, "this peer has no MCP authorization", 403)
+		return actor, NewError(CodeInternal, "authorization failed", 500)
 	}
 	now := a.now().Unix()
+	if row == nil || row.Status != "active" || (row.RevokedAt != 0 && row.RevokedAt <= now) || !HasAnyScope(row.Scopes) {
+		return actor, NewError(CodeInsufficientScope, "this peer has no MCP authorization", 403)
+	}
 	if row.ExpiresAt != 0 && row.ExpiresAt <= now {
-		return Actor{}, NewError(CodeInsufficientScope, "this peer authorization has expired", 403)
+		return actor, NewError(CodeInsufficientScope, "this peer authorization has expired", 403)
 	}
 	_ = a.st.UpdateMCPKeyUsage(row.ID, now, ip)
-	return Actor{
-		Kind: ActorPeer, ID: peer.ID, Name: peer.ID, PeerID: peer.ID,
-		IP: ip, AuthKind: AuthRelayToken, Scopes: row.Scopes,
-	}, nil
+	actor.Scopes = row.Scopes
+	return actor, nil
 }

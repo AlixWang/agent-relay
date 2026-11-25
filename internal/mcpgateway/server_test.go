@@ -598,3 +598,168 @@ func TestMCPRateLimitAndKeyRevocation(t *testing.T) {
 		t.Fatalf("revoked peer grant = %d", code)
 	}
 }
+
+func TestMCPSecurityHardeningAndConcurrency(t *testing.T) {
+	// 1. Disabled gateway answers 503 without auditing unauthenticated floods.
+	fDisabled := newMCPFixture(t, func(c *Config) { c.Enabled = false })
+	code, _ := fDisabled.call(t, "/mcp", "", rpc("tools/list", 1, nil))
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("disabled gateway code = %d, want 503", code)
+	}
+	if rows, _, _ := fDisabled.st.ListMCPAudit(store.MCPAuditFilter{}, 10, 0); len(rows) != 0 {
+		t.Fatalf("disabled gateway wrote audit rows: %d", len(rows))
+	}
+
+	// 2. Origin check, null id, invalid JSON (-32700), min_client 426, and unauth audit rate limit.
+	f := newMCPFixture(t, func(c *Config) {
+		c.Write.Services = map[string]WriteServiceConfig{
+			"mock": {AllowedTools: []string{"write_low", "write_high"}, HighRiskWritePerHour: 20},
+		}
+	})
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	req.Host = "relay.example"
+	req.Header.Set("Origin", "https://evil.example")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "bearer "+f.peerToken)
+	rec := httptest.NewRecorder()
+	f.srv.MCPHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin code = %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{bad-json`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "bearer "+f.peerToken)
+	rec = httptest.NewRecorder()
+	f.srv.MCPHandler().ServeHTTP(rec, req)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "-32700") {
+		t.Fatalf("bad json: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":null,"method":"ping"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "bearer "+f.peerToken)
+	rec = httptest.NewRecorder()
+	f.srv.MCPHandler().ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("null id code = %d", rec.Code)
+	}
+
+	// Unauthenticated flood caps audit DB rows at 5/min per IP.
+	for i := 0; i < 10; i++ {
+		code, _ = f.call(t, "/mcp", "rmk_invalid_token", rpc("tools/list", i+1, nil))
+		if code != 401 {
+			t.Fatalf("unauth code = %d", code)
+		}
+	}
+	rows, _, _ := f.st.ListMCPAudit(store.MCPAuditFilter{Outcome: "denied"}, 50, 0)
+	if len(rows) != 5 {
+		t.Fatalf("unauth audit rows = %d, want capped 5", len(rows))
+	}
+
+	// min_client violation returns 426 and audits real peer actor.
+	if err := f.st.CreatePeer(&store.Peer{ID: "oldpeer", Status: "active", ProtocolVer: 1, CreatedAt: f.now.Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	oldTok, _ := auth.GenerateToken()
+	_, _ = f.st.CreateToken("oldpeer", auth.HashToken(oldTok), "t", f.now.Unix())
+	f.srv.authn.minProtocol = 99
+	code, _ = f.call(t, "/mcp", oldTok, rpc("tools/list", 1, nil))
+	if code != http.StatusUpgradeRequired {
+		t.Fatalf("min_client code = %d, want 426", code)
+	}
+	f.srv.authn.minProtocol = 1
+	peerDenied, _, _ := f.st.ListMCPAudit(store.MCPAuditFilter{Actor: "peer:oldpeer"}, 10, 0)
+	if len(peerDenied) == 0 {
+		t.Fatal("expected peer:oldpeer in audit log on 426")
+	}
+
+	// 3. Low-risk write ignores spoofed approval_id in audit.
+	code, _ = f.call(t, "/mcp", f.writeKey, rpc("tools/call", 2, map[string]any{
+		"name": "mock_write_low", "arguments": map[string]any{"site": "https://x.test", "url": "https://x.test/a", "approval_id": "mcpap_fake"},
+	}))
+	if code != 200 {
+		t.Fatalf("low write code = %d", code)
+	}
+	spoofRows, _, _ := f.st.ListMCPAudit(store.MCPAuditFilter{ApprovalID: "mcpap_fake"}, 10, 0)
+	if len(spoofRows) != 0 {
+		t.Fatalf("low write recorded spoofed approval_id: %+v", spoofRows)
+	}
+
+	// 4. High-risk concurrent replay: request approval once, approve once, race 8 executions.
+	_, out := f.call(t, "/mcp", f.writeKey, rpc("tools/call", 3, map[string]any{
+		"name": "mock_write_high", "arguments": map[string]any{"site": "https://x.test/", "url": "https://x.test/race"},
+	}))
+	apID := structured(t, out)["data"].(map[string]any)["approval_id"].(string)
+	if code, _ := f.admin(t, http.MethodPost, "/admin/mcp/approvals/"+apID+"/approve", nil); code != 200 {
+		t.Fatalf("approve = %d", code)
+	}
+	var wg sync.WaitGroup
+	var okCount int
+	var mu sync.Mutex
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_, o := f.call(t, "/mcp", f.writeKey, rpc("tools/call", 10+n, map[string]any{
+				"name": "mock_write_high", "arguments": map[string]any{"site": "https://x.test/", "url": "https://x.test/race", "approval_id": apID},
+			}))
+			if sc := structured(t, o); sc["ok"] == true {
+				mu.Lock()
+				okCount++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if okCount != 1 || f.mock.count("write_high") != 1 {
+		t.Fatalf("concurrent approval race: okCount=%d upstream=%d", okCount, f.mock.count("write_high"))
+	}
+
+	// 5. Failed high-risk write logs upstream_error (not executed) and preserves upstream_status=503.
+	_, out = f.call(t, "/mcp", f.writeKey, rpc("tools/call", 30, map[string]any{
+		"name": "mock_write_high", "arguments": map[string]any{"site": "https://x.test/", "url": "https://x.test/fail503", "mode": "fail"},
+	}))
+	failID := structured(t, out)["data"].(map[string]any)["approval_id"].(string)
+	_, _ = f.admin(t, http.MethodPost, "/admin/mcp/approvals/"+failID+"/approve", nil)
+	_, _ = f.call(t, "/mcp", f.writeKey, rpc("tools/call", 31, map[string]any{
+		"name": "mock_write_high", "arguments": map[string]any{"site": "https://x.test/", "url": "https://x.test/fail503", "mode": "fail", "approval_id": failID},
+	}))
+	failAudit, _, _ := f.st.ListMCPAudit(store.MCPAuditFilter{ApprovalID: failID, Outcome: "upstream_error"}, 10, 0)
+	if len(failAudit) != 1 || failAudit[0].UpstreamStatus != 503 {
+		t.Fatalf("failed high-risk audit: %+v", failAudit)
+	}
+
+	// 6. Per-service high_risk_write_per_hour override works, and dry-run/pending request don't burn write quota.
+	fLimit := newMCPFixture(t, func(c *Config) {
+		c.Write.HighRiskWritePerHour = 10
+		c.Write.Services = map[string]WriteServiceConfig{
+			"mock": {AllowedTools: []string{"write_low", "write_high"}, HighRiskWritePerHour: 1},
+		}
+	})
+	if code, _ := fLimit.call(t, "/mcp", fLimit.writeKey, rpc("tools/call", 40, map[string]any{
+		"name": "mock_write_high", "arguments": map[string]any{"site": "https://x.test/", "url": "https://x.test/dry", "dry_run": true},
+	})); code != 200 {
+		t.Fatalf("dry_run code = %d", code)
+	}
+	_, out = fLimit.call(t, "/mcp", fLimit.writeKey, rpc("tools/call", 41, map[string]any{
+		"name": "mock_write_high", "arguments": map[string]any{"site": "https://x.test/", "url": "https://x.test/q1"},
+	}))
+	q1 := structured(t, out)["data"].(map[string]any)["approval_id"].(string)
+	_, _ = fLimit.admin(t, http.MethodPost, "/admin/mcp/approvals/"+q1+"/approve", nil)
+	if code, out := fLimit.call(t, "/mcp", fLimit.writeKey, rpc("tools/call", 42, map[string]any{
+		"name": "mock_write_high", "arguments": map[string]any{"site": "https://x.test/", "url": "https://x.test/q1", "approval_id": q1},
+	})); code != 200 || structured(t, out)["ok"] != true {
+		t.Fatalf("first high-risk execution should succeed within per-service limit=1: %d %+v", code, out)
+	}
+	_, out = fLimit.call(t, "/mcp", fLimit.writeKey, rpc("tools/call", 43, map[string]any{
+		"name": "mock_write_high", "arguments": map[string]any{"site": "https://x.test/", "url": "https://x.test/q2"},
+	}))
+	q2 := structured(t, out)["data"].(map[string]any)["approval_id"].(string)
+	_, _ = fLimit.admin(t, http.MethodPost, "/admin/mcp/approvals/"+q2+"/approve", nil)
+	if code, _ := fLimit.call(t, "/mcp", fLimit.writeKey, rpc("tools/call", 44, map[string]any{
+		"name": "mock_write_high", "arguments": map[string]any{"site": "https://x.test/", "url": "https://x.test/q2", "approval_id": q2},
+	})); code != http.StatusTooManyRequests {
+		t.Fatalf("second high-risk execution should hit per-service limit=1, got %d", code)
+	}
+}

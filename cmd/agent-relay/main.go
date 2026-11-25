@@ -173,15 +173,17 @@ func main() {
 	}
 	mcpSrv, err := mcpgateway.New(mcpgateway.Options{
 		Config: mcpCfg, Store: st, Auth: au, MinProtocol: cfg.MinClient,
+		MaxBodyBytes: cfg.MaxBodyBytes, Credentials: mcpCreds,
 	})
 	if err != nil {
 		log.Fatalf("mcp gateway config: %v", err)
 	}
 	if err := mcpSrv.Registry().Register(adsense.New(adsense.Options{
-		CredentialRef: mcpCfg.Service(mcpgateway.ServiceAdSense).CredentialRef,
-		Credentials:   mcpCreds,
-		Upstream:      mcpSrv.Upstream(),
-		MaxRows:       mcpCfg.MaxRowsPerCall,
+		CredentialRef:   mcpCfg.Service(mcpgateway.ServiceAdSense).CredentialRef,
+		Credentials:     mcpCreds,
+		Upstream:        mcpSrv.Upstream(),
+		UpstreamTimeout: time.Duration(mcpCfg.UpstreamTimeoutSecs) * time.Second,
+		MaxRows:         mcpCfg.MaxRowsPerCall,
 	})); err != nil {
 		log.Fatalf("mcp gateway register adsense: %v", err)
 	}
@@ -195,10 +197,11 @@ func main() {
 		log.Fatalf("mcp gateway register bing: %v", err)
 	}
 	if err := mcpSrv.Registry().Register(ga.New(ga.Options{
-		CredentialRef: mcpCfg.Service(mcpgateway.ServiceGA).CredentialRef,
-		Credentials:   mcpCreds,
-		Upstream:      mcpSrv.Upstream(),
-		MaxRows:       mcpCfg.MaxRowsPerCall,
+		CredentialRef:   mcpCfg.Service(mcpgateway.ServiceGA).CredentialRef,
+		Credentials:     mcpCreds,
+		Upstream:        mcpSrv.Upstream(),
+		UpstreamTimeout: time.Duration(mcpCfg.UpstreamTimeoutSecs) * time.Second,
+		MaxRows:         mcpCfg.MaxRowsPerCall,
 	})); err != nil {
 		log.Fatalf("mcp gateway register ga: %v", err)
 	}
@@ -466,14 +469,11 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resS
 	})
 	t := time.NewTicker(6 * time.Hour)
 	defer t.Stop()
-	// Run once shortly after startup (delayed so boot isn't blocked).
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(5 * time.Minute):
+	runPass := func() {
 		stats, err := r.RunOnce(time.Now().Unix())
 		if err != nil {
 			log.Printf("retention: %v", err)
+			stats = map[string]int64{}
 		} else {
 			log.Printf("retention: %+v", stats)
 		}
@@ -484,41 +484,32 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resS
 				log.Printf("resources: expired %d pending submissions", n)
 			}
 		}
-		compactDB(st, stats)
 		if mcpSrv != nil {
 			if sum, err := mcpSrv.RunMaintenance(time.Now()); err != nil {
 				log.Printf("mcp gateway retention: %v", err)
-			} else if sum.PendingExpired+sum.ApprovedExpired > 0 || sum.Pruned+sum.Trimmed > 0 {
-				log.Printf("mcp gateway retention: %+v", sum)
+			} else {
+				stats["mcp_audit_pruned"] = sum.Pruned
+				stats["mcp_audit_trimmed"] = sum.Trimmed
+				if sum.PendingExpired+sum.ApprovedExpired > 0 || sum.Pruned+sum.Trimmed > 0 {
+					log.Printf("mcp gateway retention: %+v", sum)
+				}
 			}
 		}
+		compactDB(st, stats)
+	}
+	// Run once shortly after startup (delayed so boot isn't blocked).
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(5 * time.Minute):
+		runPass()
 	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			stats, err := r.RunOnce(time.Now().Unix())
-			if err != nil {
-				log.Printf("retention: %v", err)
-			} else {
-				log.Printf("retention: %+v", stats)
-			}
-			if resSvc != nil {
-				if n, err := resSvc.ExpirePendingSubmissions(); err != nil {
-					log.Printf("resources: expire submissions: %v", err)
-				} else if n > 0 {
-					log.Printf("resources: expired %d pending submissions", n)
-				}
-			}
-			compactDB(st, stats)
-			if mcpSrv != nil {
-				if sum, err := mcpSrv.RunMaintenance(time.Now()); err != nil {
-					log.Printf("mcp gateway retention: %v", err)
-				} else if sum.PendingExpired+sum.ApprovedExpired > 0 || sum.Pruned+sum.Trimmed > 0 {
-					log.Printf("mcp gateway retention: %+v", sum)
-				}
-			}
+			runPass()
 		}
 	}
 }
@@ -529,6 +520,7 @@ func compactDB(st store.Store, stats map[string]int64) {
 		"audit_noise_purged", "log_noise_purged", "status_spam_purged", "messages_deleted",
 		"peers_pruned", "audit_pruned", "agent_logs_pruned",
 		"agent_logs_trimmed", "permissions_pruned", "tickets_pruned",
+		"mcp_audit_pruned", "mcp_audit_trimmed",
 	} {
 		deleted += stats[k]
 	}

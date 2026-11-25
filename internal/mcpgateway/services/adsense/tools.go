@@ -110,29 +110,48 @@ func accountSchema() json.RawMessage {
 }
 
 var dateRanges = []string{
-	"TODAY", "YESTERDAY", "LAST_7_DAYS", "LAST_14_DAYS", "LAST_30_DAYS",
-	"MONTH_TO_DATE", "YEAR_TO_DATE", "LAST_WEEK", "LAST_MONTH",
+	"TODAY", "YESTERDAY", "LAST_7_DAYS", "LAST_30_DAYS", "MONTH_TO_DATE", "YEAR_TO_DATE",
 }
 
 var allowedDimensions = map[string]bool{
-	"DATE": true, "WEEK": true, "MONTH": true, "YEAR": true,
-	"COUNTRY_NAME": true, "COUNTRY_CODE": true, "REGION_NAME": true,
-	"PLATFORM_TYPE": true, "SITE": true, "SITE_NAME": true,
-	"AD_UNIT_NAME": true, "AD_UNIT_ID": true, "AD_CLIENT_NAME": true,
-	"CUSTOM_CHANNEL_NAME": true, "URL_CHANNEL_NAME": true, "DOMAIN_NAME": true,
-	"PAGE_URL": true, "OWNERSHIP_NAME": true, "TARGETING_TYPE": true,
-	"BID_TYPE_NAME": true, "CONTENT_PLATFORM_TYPE": true, "MOBILE_PLATFORM_TYPE": true,
-	"REQUESTED_AD_TYPE": true, "SERVED_AD_TYPE": true, "AD_FORMAT_NAME": true,
+	"DATE": true, "WEEK": true, "MONTH": true, "ACCOUNT_NAME": true, "AD_CLIENT_ID": true,
+	"PRODUCT_NAME": true, "PRODUCT_CODE": true, "AD_UNIT_NAME": true, "AD_UNIT_ID": true,
+	"AD_UNIT_SIZE_NAME": true, "AD_UNIT_SIZE_CODE": true,
+	"CUSTOM_CHANNEL_NAME": true, "CUSTOM_CHANNEL_ID": true,
+	"OWNED_SITE_DOMAIN_NAME": true, "OWNED_SITE_ID": true,
+	"URL_CHANNEL_NAME": true, "URL_CHANNEL_ID": true,
+	"BUYER_NETWORK_NAME": true, "BUYER_NETWORK_ID": true,
+	"BID_TYPE_NAME": true, "BID_TYPE_CODE": true,
+	"CREATIVE_SIZE_NAME": true, "CREATIVE_SIZE_CODE": true,
+	"DOMAIN_NAME": true, "DOMAIN_CODE": true,
+	"COUNTRY_NAME": true, "COUNTRY_CODE": true,
+	"PLATFORM_TYPE_NAME": true, "PLATFORM_TYPE_CODE": true,
+	"TARGETING_TYPE_NAME": true, "TARGETING_TYPE_CODE": true,
+	"CONTENT_PLATFORM_NAME": true, "CONTENT_PLATFORM_CODE": true,
+	"AD_PLACEMENT_NAME": true, "AD_PLACEMENT_CODE": true,
+	"REQUESTED_AD_TYPE_NAME": true, "REQUESTED_AD_TYPE_CODE": true,
+	"SERVED_AD_TYPE_NAME": true, "SERVED_AD_TYPE_CODE": true,
+	"AD_FORMAT_NAME": true, "AD_FORMAT_CODE": true,
+	"CUSTOM_SEARCH_STYLE_NAME": true, "CUSTOM_SEARCH_STYLE_ID": true,
+	"DOMAIN_REGISTRANT":          true,
+	"WEBSEARCH_RESULT_TYPE_NAME": true, "WEBSEARCH_RESULT_TYPE_CODE": true,
 }
 
 var allowedMetrics = map[string]bool{
-	"ESTIMATED_EARNINGS": true, "IMPRESSIONS": true, "CLICKS": true,
-	"PAGE_VIEWS": true, "PAGE_VIEWS_CTR": true, "PAGE_VIEWS_RPM": true,
-	"AD_REQUESTS": true, "MATCHED_AD_REQUESTS": true, "COVERAGE": true,
-	"CTR": true, "CPC": true, "RPM": true, "AD_REQUESTS_CTR": true,
-	"AD_REQUESTS_RPM": true, "MATCHED_AD_REQUESTS_CTR": true,
-	"MATCHED_AD_REQUESTS_RPM": true, "INDIVIDUAL_AD_IMPRESSIONS": true,
-	"INDIVIDUAL_AD_IMPRESSIONS_CTR": true, "INDIVIDUAL_AD_IMPRESSIONS_RPM": true,
+	"PAGE_VIEWS": true, "AD_REQUESTS": true, "MATCHED_AD_REQUESTS": true,
+	"TOTAL_IMPRESSIONS": true, "IMPRESSIONS": true, "INDIVIDUAL_AD_IMPRESSIONS": true, "CLICKS": true,
+	"PAGE_VIEWS_SPAM_RATIO": true, "AD_REQUESTS_SPAM_RATIO": true, "MATCHED_AD_REQUESTS_SPAM_RATIO": true,
+	"IMPRESSIONS_SPAM_RATIO": true, "INDIVIDUAL_AD_IMPRESSIONS_SPAM_RATIO": true, "CLICKS_SPAM_RATIO": true,
+	"AD_REQUESTS_COVERAGE": true,
+	"PAGE_VIEWS_CTR":       true, "AD_REQUESTS_CTR": true, "MATCHED_AD_REQUESTS_CTR": true,
+	"IMPRESSIONS_CTR": true, "INDIVIDUAL_AD_IMPRESSIONS_CTR": true,
+	"ACTIVE_VIEW_MEASURABILITY": true, "ACTIVE_VIEW_VIEWABILITY": true, "ACTIVE_VIEW_TIME": true,
+	"ESTIMATED_EARNINGS": true,
+	"PAGE_VIEWS_RPM":     true, "AD_REQUESTS_RPM": true, "MATCHED_AD_REQUESTS_RPM": true,
+	"IMPRESSIONS_RPM": true, "INDIVIDUAL_AD_IMPRESSIONS_RPM": true,
+	"COST_PER_CLICK": true, "ADS_PER_IMPRESSION": true, "TOTAL_EARNINGS": true,
+	"WEBSEARCH_RESULT_PAGES": true, "FUNNEL_REQUESTS": true, "FUNNEL_IMPRESSIONS": true,
+	"FUNNEL_CLICKS": true, "FUNNEL_RPM": true,
 }
 
 var defaultMetrics = []string{
@@ -181,6 +200,9 @@ func validateReportArg(raw json.RawMessage) error {
 		return mcpgateway.InvalidParams("account must be an AdSense account (accounts/pub-...)")
 	}
 	if p.DateRange != "" {
+		if p.StartDate != "" || p.EndDate != "" {
+			return mcpgateway.InvalidParams("supply either dateRange or startDate+endDate, not both")
+		}
 		if !contains(dateRanges, p.DateRange) {
 			return mcpgateway.InvalidParams("unsupported dateRange %q", p.DateRange)
 		}
@@ -257,9 +279,15 @@ func checkNames(names []string, allowed map[string]bool, kind string) error {
 	return nil
 }
 
-var filterRe = regexp.MustCompile(`^([A-Z][A-Z0-9_]*)(==|!=|=~|!~|>=|<=|>|<)([^,]{1,128})$`)
+var filterRe = regexp.MustCompile(`^([A-Z][A-Z0-9_]*)(==|=@)([^,]{1,128})$`)
 
-func validFilter(s string) bool { return filterRe.MatchString(strings.TrimSpace(s)) }
+func validFilter(s string) bool {
+	m := filterRe.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return false
+	}
+	return allowedDimensions[m[1]]
+}
 
 func contains(list []string, v string) bool {
 	for _, s := range list {

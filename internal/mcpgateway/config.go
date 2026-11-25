@@ -292,7 +292,7 @@ func (c *Config) Validate() error {
 	if err := c.Write.validate(); err != nil {
 		return err
 	}
-	if err := c.Keys.normalized().validate(); err != nil {
+	if err := c.Keys.validate(); err != nil {
 		return err
 	}
 	return nil
@@ -334,14 +334,13 @@ func (w *WriteConfig) validate() error {
 }
 
 func (k KeysConfig) validate() error {
-	k = k.normalized()
-	if k.ReadKeyTTLDays < 1 || k.ReadKeyTTLDays > 3650 {
+	if k.ReadKeyTTLDays < 0 || k.ReadKeyTTLDays > 3650 {
 		return fmt.Errorf("mcp_gateway.keys.read_key_ttl_days must be 1-3650")
 	}
-	if k.WriteKeyTTLDays < 1 || k.WriteKeyTTLDays > 3650 {
+	if k.WriteKeyTTLDays < 0 || k.WriteKeyTTLDays > 3650 {
 		return fmt.Errorf("mcp_gateway.keys.write_key_ttl_days must be 1-3650")
 	}
-	if k.PerToolKeyTTLDays < 1 || k.PerToolKeyTTLDays > 3650 {
+	if k.PerToolKeyTTLDays < 0 || k.PerToolKeyTTLDays > 3650 {
 		return fmt.Errorf("mcp_gateway.keys.per_tool_key_ttl_days must be 1-3650")
 	}
 	if k.RotateGraceSecs < 0 || k.RotateGraceSecs > 7*86400 {
@@ -464,7 +463,8 @@ func (c *Config) UnmarshalTOML(v any) error {
 				c.Services = map[string]ServiceConfig{}
 			}
 			for id, raw := range services {
-				svc, err := decodeServiceConfig(id, raw)
+				base, hasBase := c.Services[id]
+				svc, err := decodeServiceConfig(id, base, hasBase, raw)
 				if err != nil {
 					return err
 				}
@@ -493,12 +493,15 @@ func (c *Config) UnmarshalTOML(v any) error {
 	return c.Validate()
 }
 
-func decodeServiceConfig(id string, raw any) (ServiceConfig, error) {
+func decodeServiceConfig(id string, base ServiceConfig, hasBase bool, raw any) (ServiceConfig, error) {
 	m, ok := raw.(map[string]any)
 	if !ok {
 		return ServiceConfig{}, fmt.Errorf("mcp_gateway.services.%s must be a table", id)
 	}
 	svc := ServiceConfig{Enabled: true, AllowedTools: []string{"*"}}
+	if hasBase {
+		svc = base
+	}
 	for key, val := range m {
 		switch key {
 		case "enabled":

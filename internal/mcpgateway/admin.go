@@ -20,6 +20,10 @@ import (
 // whole handler in requireAdmin; these handlers never see an unauthenticated
 // request in production.
 func (s *Server) AdminHandler() http.Handler {
+	return s.adminHandler
+}
+
+func (s *Server) buildAdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/mcp/services", s.adminServices)
 	mux.HandleFunc("GET /admin/mcp/tools", s.adminTools)
@@ -46,7 +50,7 @@ func (s *Server) AdminHandler() http.Handler {
 }
 
 func (s *Server) readAdminJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
@@ -129,13 +133,18 @@ func (s *Server) adminTools(w http.ResponseWriter, r *http.Request) {
 // ---- keys ----
 
 func keyView(k *store.MCPKey, now int64) map[string]any {
+	revoked := k.Status == "revoked" || (k.RevokedAt != 0 && k.RevokedAt <= now)
+	status := k.Status
+	if revoked && status == "active" {
+		status = "revoked"
+	}
 	return map[string]any{
 		"id": k.ID, "principal_type": k.PrincipalType, "peer_id": k.PeerID, "name": k.Name,
-		"key_prefix": k.KeyPrefix, "scopes": k.Scopes, "status": k.Status, "note": k.Note,
+		"key_prefix": k.KeyPrefix, "scopes": k.Scopes, "status": status, "note": k.Note,
 		"created_by": k.CreatedBy, "created_at": k.CreatedAt, "expires_at": k.ExpiresAt,
 		"revoked_at": k.RevokedAt, "rotated_from": k.RotatedFrom, "last_used_at": k.LastUsedAt,
 		"last_used_ip": k.LastUsedIP, "use_count": k.UseCount,
-		"expired": KeyExpired(k.ExpiresAt, now), "revoked": k.Status == "revoked",
+		"expired": KeyExpired(k.ExpiresAt, now), "revoked": revoked,
 	}
 }
 
@@ -245,7 +254,8 @@ func (s *Server) adminRotateKey(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "key not found")
 		return
 	}
-	if old.Status != "active" || (old.RevokedAt != 0 && old.RevokedAt <= s.now().Unix()) {
+	now := s.now().Unix()
+	if old.Status != "active" || old.RevokedAt != 0 || KeyExpired(old.ExpiresAt, now) {
 		writeErr(w, http.StatusConflict, "key is not active")
 		return
 	}
@@ -259,22 +269,25 @@ func (s *Server) adminRotateKey(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "could not generate key id")
 		return
 	}
-	now := s.now().Unix()
 	days := keyTTLDays(old.Scopes, s.cfg.Keys)
 	row := &store.MCPKey{
 		ID: newID, PrincipalType: "key", Name: old.Name, KeyPrefix: prefix, KeyHash: hash,
 		Scopes: old.Scopes, Status: "active", Note: old.Note, CreatedBy: "admin",
 		CreatedAt: now, ExpiresAt: now + int64(days)*86400, RotatedFrom: old.ID,
 	}
-	if err := s.st.CreateMCPKey(row); err != nil {
-		writeErr(w, http.StatusInternalServerError, "could not store key")
+	grace := s.cfg.Keys.normalized().RotateGraceSecs
+	var graceRevokeAt int64
+	if grace > 0 {
+		graceRevokeAt = now + int64(grace)
+	}
+	ok, err := s.st.RotateMCPKey(old.ID, row, now, graceRevokeAt)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not rotate key")
 		return
 	}
-	grace := s.cfg.Keys.normalized().RotateGraceSecs
-	if grace > 0 {
-		_, _ = s.st.SetMCPKeyRevokedAt(old.ID, now+int64(grace))
-	} else {
-		_, _ = s.st.RevokeMCPKey(old.ID, now)
+	if !ok {
+		writeErr(w, http.StatusConflict, "key is not active")
+		return
 	}
 	s.auditAdmin("mcp.key_rotate", fmt.Sprintf("old=%s new=%s name=%s grace_secs=%d", old.ID, newID, old.Name, grace))
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -285,18 +298,22 @@ func (s *Server) adminRotateKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminRevokeKey(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	row, err := s.st.GetMCPKey(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not load key")
+		return
+	}
+	if row == nil || row.PrincipalType != "key" {
+		writeErr(w, http.StatusNotFound, "key not found")
+		return
+	}
 	ok, err := s.st.RevokeMCPKey(id, s.now().Unix())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "could not revoke key")
 		return
 	}
 	if !ok {
-		row, _ := s.st.GetMCPKey(id)
-		if row == nil {
-			writeErr(w, http.StatusNotFound, "key not found")
-		} else {
-			writeErr(w, http.StatusConflict, "key is already revoked")
-		}
+		writeErr(w, http.StatusConflict, "key is already revoked")
 		return
 	}
 	s.auditAdmin("mcp.key_revoke", "id="+id)
@@ -311,6 +328,13 @@ func (s *Server) adminListPeers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "could not list peers")
 		return
 	}
+	grants, gerr := s.st.ListMCPPeerGrants()
+	byPeer := map[string]*store.MCPKey{}
+	if gerr == nil {
+		for _, g := range grants {
+			byPeer[g.PeerID] = g
+		}
+	}
 	now := s.now().Unix()
 	out := make([]map[string]any, 0, len(peers))
 	for _, p := range peers {
@@ -319,7 +343,7 @@ func (s *Server) adminListPeers(w http.ResponseWriter, r *http.Request) {
 			"status": p.Status, "protocol_version": p.ProtocolVer, "last_seen": p.LastSeen,
 			"authorized": false, "scopes": []string{}, "mcp_status": "none",
 		}
-		if grant, gerr := s.st.GetMCPPeerGrant(p.ID); gerr == nil && grant != nil {
+		if grant := byPeer[p.ID]; grant != nil {
 			view["authorized"] = p.Status == "active" && grant.Status == "active" && len(grant.Scopes) > 0 && !KeyExpired(grant.ExpiresAt, now)
 			view["scopes"] = grant.Scopes
 			view["mcp_status"] = grant.Status
@@ -391,7 +415,7 @@ func (s *Server) adminPutPeer(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auditAdmin("mcp.peer_grant", fmt.Sprintf("peer=%s scopes=%s", peerID, strings.Join(scopes, ",")))
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "peer_id": peerID, "authorized": true,
+		"ok": true, "peer_id": peerID, "authorized": peer.Status == "active",
 		"scopes": grant.Scopes, "mcp_status": grant.Status,
 	})
 }
@@ -512,7 +536,7 @@ func (s *Server) adminApprove(w http.ResponseWriter, r *http.Request) {
 	row, aerr := s.approval.Approve(r.PathValue("id"), "admin", strings.TrimSpace(req.Note))
 	if aerr != nil {
 		if aerr.Code == CodeApprovalExpired {
-			s.recordApprovalExpired(r.PathValue("id"))
+			s.recordApprovalExpired(r.PathValue("id"), Actor{})
 		}
 		adminError(w, aerr)
 		return
@@ -535,7 +559,7 @@ func (s *Server) adminReject(w http.ResponseWriter, r *http.Request) {
 	row, aerr := s.approval.Reject(r.PathValue("id"), "admin", strings.TrimSpace(req.Note))
 	if aerr != nil {
 		if aerr.Code == CodeApprovalExpired {
-			s.recordApprovalExpired(r.PathValue("id"))
+			s.recordApprovalExpired(r.PathValue("id"), Actor{})
 		}
 		adminError(w, aerr)
 		return
@@ -607,16 +631,33 @@ func (s *Server) adminAuditExport(w http.ResponseWriter, r *http.Request) {
 	for _, a := range rows {
 		_ = cw.Write([]string{
 			strconv.FormatInt(a.Seq, 10), strconv.FormatInt(a.Ts, 10),
-			time.Unix(a.Ts, 0).UTC().Format(time.RFC3339), a.RequestID, a.Actor, a.AuthKind,
-			a.KeyName, a.Endpoint, a.ServiceID, a.Tool, a.Risk, a.ParamsHash, a.ParamsSummary,
-			a.ApprovalID, a.Outcome, a.ErrorCode, strconv.Itoa(a.HTTPStatus),
-			strconv.Itoa(a.UpstreamStatus), strconv.Itoa(a.LatencyMS), a.ClientIP, a.Detail,
+			time.Unix(a.Ts, 0).UTC().Format(time.RFC3339),
+			csvSafeCell(a.RequestID), csvSafeCell(a.Actor), csvSafeCell(a.AuthKind),
+			csvSafeCell(a.KeyName), csvSafeCell(a.Endpoint), csvSafeCell(a.ServiceID),
+			csvSafeCell(a.Tool), csvSafeCell(a.Risk), csvSafeCell(a.ParamsHash),
+			csvSafeCell(a.ParamsSummary), csvSafeCell(a.ApprovalID), csvSafeCell(a.Outcome),
+			csvSafeCell(a.ErrorCode), strconv.Itoa(a.HTTPStatus),
+			strconv.Itoa(a.UpstreamStatus), strconv.Itoa(a.LatencyMS),
+			csvSafeCell(a.ClientIP), csvSafeCell(a.Detail),
 		})
 	}
 	cw.Flush()
 	if err := cw.Error(); err != nil {
 		log.Printf("mcp audit export: %v", err)
 	}
+}
+
+// csvSafeCell neutralizes spreadsheet formula injection (OWASP CSV Injection).
+func csvSafeCell(s string) string {
+	trimmed := strings.TrimLeft(s, " \t\r\n")
+	if trimmed == "" {
+		return s
+	}
+	switch trimmed[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	}
+	return s
 }
 
 // ---- dry run / health ----
@@ -648,7 +689,7 @@ func (s *Server) adminDryRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	_, hash, err := FreezeParams(rt.Name, req.Params)
+	_, hash, err := FreezeParams(rt.ServiceID, rt.Name, req.Params)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "valid": false, "error": err.Error(), "code": CodeInvalidParams})
 		return
@@ -662,8 +703,15 @@ func (s *Server) adminDryRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
-	pending, _ := s.st.CountMCPApprovals("pending")
+	now := s.now().Unix()
+	pending := s.PendingApprovals()
 	keys, _ := s.st.ListMCPKeys()
+	activeKeys := 0
+	for _, k := range keys {
+		if k.Status == "active" && (k.RevokedAt == 0 || k.RevokedAt > now) && !KeyExpired(k.ExpiresAt, now) {
+			activeKeys++
+		}
+	}
 	services := []map[string]any{}
 	for _, info := range s.registry.List() {
 		services = append(services, map[string]any{
@@ -673,7 +721,7 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "version": Version, "enabled": s.cfg.Enabled, "write_enabled": s.cfg.Write.Enabled,
-		"pending_approvals": pending, "keys": len(keys), "services": services,
+		"pending_approvals": pending, "keys": activeKeys, "services": services,
 		"protocol_versions": supportedVersions, "batch_cap": s.cfg.Write.BatchCap,
 	})
 }
@@ -682,6 +730,9 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 func parsePage(q map[string][]string) (int, int) {
 	page, size := 1, 20
 	if v, err := strconv.Atoi(first(q["page"])); err == nil && v > 0 {
+		if v > 100000 {
+			v = 100000
+		}
 		page = v
 	}
 	if v, err := strconv.Atoi(first(q["page_size"])); err == nil && v > 0 {

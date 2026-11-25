@@ -73,7 +73,7 @@ func TestMCPApprovalCAS(t *testing.T) {
 	if err := st.CreateMCPApproval(a); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if open, _ := st.GetOpenMCPApproval("peer:alice", "add_blocked_url", "h1"); open == nil || open.ID != "ap1" {
+	if open, _ := st.GetOpenMCPApproval("peer:alice", "bing-webmaster", "add_blocked_url", "h1"); open == nil || open.ID != "ap1" {
 		t.Fatalf("open lookup: %+v", open)
 	}
 	if ok, _ := st.ApproveMCPApproval("ap1", 10, 20, "admin", "ok"); !ok {
@@ -147,5 +147,55 @@ func TestMCPAuditListPruneTrim(t *testing.T) {
 	}
 	if n, err := st.TrimMCPAudit(3); err != nil || n != 3 {
 		t.Fatalf("trim: n=%d err=%v", n, err)
+	}
+}
+
+func TestMCPPeerCleanupAndRejectExpiry(t *testing.T) {
+	st := openMCPStore(t)
+	if err := st.CreatePeer(&Peer{ID: "bob", Status: "active", ProtocolVer: 1, LastSeen: 10, CreatedAt: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveMCPPeerGrant(&MCPKey{
+		ID: "mp-bob", PrincipalType: "peer", PeerID: "bob", Name: "bob",
+		Scopes: []string{"mcp:ga:read:*"}, Status: "active", CreatedAt: 10,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PrunePeers(100); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := st.GetMCPPeerGrant("bob"); g != nil {
+		t.Fatalf("pruned peer kept mcp grant: %+v", g)
+	}
+
+	// DeletePeer revokes peer's mcp grant atomically.
+	if err := st.CreatePeer(&Peer{ID: "carol", Status: "active", ProtocolVer: 1, LastSeen: 200, CreatedAt: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveMCPPeerGrant(&MCPKey{
+		ID: "mp-carol", PrincipalType: "peer", PeerID: "carol", Name: "carol",
+		Scopes: []string{"mcp:ga:read:*"}, Status: "active", CreatedAt: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DeletePeer("carol", 250); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := st.GetMCPPeerGrant("carol"); g == nil || g.Status != "revoked" {
+		t.Fatalf("deleted peer grant not revoked: %+v", g)
+	}
+
+	// RejectMCPApproval fails CAS after expiry; CountPendingMCPApprovals ignores expired rows.
+	if err := st.CreateMCPApproval(&MCPApproval{
+		ID: "ap-exp", Principal: "key:k1", AuthKind: "mcp_key", Endpoint: "/mcp", ServiceID: "bing-webmaster",
+		Tool: "add_blocked_url", ParamsHash: "hx", Status: "pending", RequestedAt: 1, ExpiresAt: 50,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := st.CountPendingMCPApprovals(60); n != 0 {
+		t.Fatalf("expired row counted as pending: %d", n)
+	}
+	if ok, _ := st.RejectMCPApproval("ap-exp", 60, "admin", "late"); ok {
+		t.Fatal("reject succeeded on expired approval")
 	}
 }

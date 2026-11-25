@@ -28,12 +28,24 @@ var (
 
 const maxUpstreamBytes = 4 << 20
 
-func NewUpstream(timeout time.Duration) *Upstream {
+// NoRedirectClient returns an HTTP client with redirects disabled so
+// Authorization headers, query-string API keys, and OAuth form bodies are never
+// forwarded on 3xx responses.
+func NoRedirectClient(timeout time.Duration) *http.Client {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func NewUpstream(timeout time.Duration) *Upstream {
 	return &Upstream{
-		client:    &http.Client{Timeout: timeout},
+		client:    NoRedirectClient(timeout),
 		userAgent: "relay-mcp/1.0",
 	}
 }
@@ -79,7 +91,7 @@ func (u *Upstream) Do(ctx context.Context, method, rawURL string, body any, head
 	}
 	resp, err := u.client.Do(req)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || isTimeout(err) {
+		if IsTimeout(err) {
 			return nil, ErrUpstreamTimeout
 		}
 		return nil, ErrUpstreamNetwork
@@ -88,6 +100,9 @@ func (u *Upstream) Do(ctx context.Context, method, rawURL string, body any, head
 	limited := io.LimitReader(resp.Body, maxUpstreamBytes+1)
 	data, err := io.ReadAll(limited)
 	if err != nil {
+		if IsTimeout(err) || IsTimeout(ctx.Err()) {
+			return nil, ErrUpstreamTimeout
+		}
 		return nil, ErrUpstreamNetwork
 	}
 	if len(data) > maxUpstreamBytes {
@@ -96,7 +111,15 @@ func (u *Upstream) Do(ctx context.Context, method, rawURL string, body any, head
 	return &Response{Status: resp.StatusCode, Body: data, Header: resp.Header}, nil
 }
 
-func isTimeout(err error) bool {
+// IsTimeout reports whether err represents a context cancellation/deadline or
+// transport timeout.
+func IsTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
 	type timeout interface{ Timeout() bool }
 	var t timeout
 	return errors.As(err, &t) && t.Timeout()

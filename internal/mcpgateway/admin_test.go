@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/AlixWang/agent-relay/internal/store"
 )
 
 func TestMCPAdminKeysAndPeers(t *testing.T) {
@@ -143,6 +146,66 @@ func TestMCPAdminApprovalAuditDryRunAndHealth(t *testing.T) {
 	code, out = f.admin(t, http.MethodGet, "/admin/mcp/services", nil)
 	if code != 200 || len(out["services"].([]any)) != 1 {
 		t.Fatalf("services: %d %+v", code, out)
+	}
+}
+
+func TestMCPAdminKeyRotationGraceExpiryAndCSVExport(t *testing.T) {
+	f := newMCPFixture(t, func(c *Config) {
+		c.Keys.RotateGraceSecs = 60
+	})
+	// Create key with 1 day TTL.
+	code, out := f.admin(t, http.MethodPost, "/admin/mcp/keys", map[string]any{
+		"name": "grace-key", "scopes": []string{"mcp:mock:read:*"}, "expires_in_days": 1,
+	})
+	if code != 200 {
+		t.Fatalf("create: %d", code)
+	}
+	id := out["key"].(map[string]any)["id"].(string)
+	// First rotate succeeds and sets grace revoked_at.
+	if code, _ := f.admin(t, http.MethodPost, "/admin/mcp/keys/"+id+"/rotate", nil); code != 200 {
+		t.Fatalf("first rotate = %d", code)
+	}
+	// Second rotate during grace must be rejected with 409.
+	if code, _ := f.admin(t, http.MethodPost, "/admin/mcp/keys/"+id+"/rotate", nil); code != 409 {
+		t.Fatalf("double rotate during grace = %d", code)
+	}
+	// After grace elapses, keyView must report revoked=true even though status column stayed active.
+	f.srv.SetClock(func() time.Time { return f.now.Add(120 * time.Second) })
+	code, out = f.admin(t, http.MethodGet, "/admin/mcp/keys", nil)
+	if code != 200 {
+		t.Fatalf("list keys = %d", code)
+	}
+	var sawRevoked bool
+	for _, raw := range out["keys"].([]any) {
+		k := raw.(map[string]any)
+		if k["id"] == id {
+			if k["revoked"] != true || k["status"] != "revoked" {
+				t.Fatalf("past-grace key view = %+v", k)
+			}
+			sawRevoked = true
+		}
+	}
+	if !sawRevoked {
+		t.Fatal("missing rotated key in list")
+	}
+	// Expired key cannot be rotated.
+	f.srv.SetClock(func() time.Time { return f.now.Add(100 * 24 * time.Hour) })
+	if code, _ := f.admin(t, http.MethodPost, "/admin/mcp/keys/key-read/rotate", nil); code != 409 {
+		t.Fatalf("expired key rotate = %d", code)
+	}
+	// Revoking a peer grant via /keys/{id}/revoke must 404.
+	if code, _ := f.admin(t, http.MethodPost, "/admin/mcp/keys/peer-grant/revoke", nil); code != 404 {
+		t.Fatalf("revoke peer via key endpoint = %d", code)
+	}
+	// CSV export neutralizes formula injection.
+	_ = f.st.AppendMCPAudit(&store.MCPAuditEntry{
+		Ts: f.now.Unix(), Actor: "peer:alice", ServiceID: "mock", Tool: "=CMD|calc", ParamsSummary: "+SUM(1,1)", Outcome: "denied",
+	})
+	req := newTestRequest(http.MethodGet, "/admin/mcp/audit/export", nil)
+	rec := newTestRecorder()
+	f.srv.AdminHandler().ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "'=CMD|calc") || !strings.Contains(rec.Body.String(), "'+SUM(1,1)") {
+		t.Fatalf("csv injection not escaped: %s", rec.Body.String())
 	}
 }
 

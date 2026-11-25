@@ -118,11 +118,11 @@ func reportSchema(withDateRanges, withCurrency, withConversionSpec bool) json.Ra
 		"metric_filter":         filterProp("Data API FilterExpression applied to metrics (snake_case field names)."),
 		"order_bys":             orderBysProp(),
 		"limit":                 mcpgateway.Prop("integer", "Maximum rows to return (positive, <=250000)."),
-		"offset":                mcpgateway.Prop("integer", "Zero-based start row for pagination."),
 		"return_property_quota": mcpgateway.Prop("boolean", "Include property quota details in the response."),
 	}
 	required := []string{"property_id", "dimensions", "metrics"}
 	if withDateRanges {
+		props["offset"] = mcpgateway.Prop("integer", "Zero-based start row for pagination.")
 		props["date_ranges"] = dateRangesProp()
 		required = append(required, "date_ranges")
 	}
@@ -267,23 +267,27 @@ type runRealtimeArgs struct {
 	MetricFilter        map[string]any   `json:"metric_filter"`
 	OrderBys            []map[string]any `json:"order_bys"`
 	Limit               int              `json:"limit"`
-	Offset              int              `json:"offset"`
 	ReturnPropertyQuota bool             `json:"return_property_quota"`
 }
 
+type conversionSpecArg struct {
+	ConversionActions []string `json:"conversion_actions"`
+	AttributionModel  string   `json:"attribution_model"`
+}
+
 type runConversionsArgs struct {
-	PropertyID          propertyID       `json:"property_id"`
-	DateRanges          []dateRangeArg   `json:"date_ranges"`
-	Dimensions          []string         `json:"dimensions"`
-	Metrics             []string         `json:"metrics"`
-	ConversionSpec      map[string]any   `json:"conversion_spec"`
-	DimensionFilter     map[string]any   `json:"dimension_filter"`
-	MetricFilter        map[string]any   `json:"metric_filter"`
-	OrderBys            []map[string]any `json:"order_bys"`
-	Limit               int              `json:"limit"`
-	Offset              int              `json:"offset"`
-	CurrencyCode        string           `json:"currency_code"`
-	ReturnPropertyQuota bool             `json:"return_property_quota"`
+	PropertyID          propertyID         `json:"property_id"`
+	DateRanges          []dateRangeArg     `json:"date_ranges"`
+	Dimensions          []string           `json:"dimensions"`
+	Metrics             []string           `json:"metrics"`
+	ConversionSpec      *conversionSpecArg `json:"conversion_spec"`
+	DimensionFilter     map[string]any     `json:"dimension_filter"`
+	MetricFilter        map[string]any     `json:"metric_filter"`
+	OrderBys            []map[string]any   `json:"order_bys"`
+	Limit               int                `json:"limit"`
+	Offset              int                `json:"offset"`
+	CurrencyCode        string             `json:"currency_code"`
+	ReturnPropertyQuota bool               `json:"return_property_quota"`
 }
 
 type funnelStepArg struct {
@@ -407,6 +411,8 @@ func validateRunFunnel(raw json.RawMessage) error {
 	return p.validate()
 }
 
+var currencyCodeRe = regexp.MustCompile(`^[A-Z]{3}$`)
+
 func (p *runReportArgs) validate() error {
 	if _, err := normalizePropertyID(p.PropertyID); err != nil {
 		return err
@@ -421,6 +427,9 @@ func (p *runReportArgs) validate() error {
 		return err
 	}
 	if err := validateMetrics(p.Metrics); err != nil {
+		return err
+	}
+	if err := validateCurrencyCode(p.CurrencyCode); err != nil {
 		return err
 	}
 	return validateWindow(p.Limit, p.Offset)
@@ -439,7 +448,7 @@ func (p *runRealtimeArgs) validate() error {
 	if err := validateMetrics(p.Metrics); err != nil {
 		return err
 	}
-	return validateWindow(p.Limit, p.Offset)
+	return validateWindow(p.Limit, 0)
 }
 
 func (p *runConversionsArgs) validate() error {
@@ -460,6 +469,14 @@ func (p *runConversionsArgs) validate() error {
 	}
 	if p.ConversionSpec == nil {
 		return mcpgateway.InvalidParams("conversion_spec is required")
+	}
+	switch p.ConversionSpec.AttributionModel {
+	case "", "DATA_DRIVEN", "LAST_CLICK", "ATTRIBUTION_MODEL_UNSPECIFIED":
+	default:
+		return mcpgateway.InvalidParams("conversion_spec.attribution_model is invalid")
+	}
+	if err := validateCurrencyCode(p.CurrencyCode); err != nil {
+		return err
 	}
 	return validateWindow(p.Limit, p.Offset)
 }
@@ -486,9 +503,17 @@ func (p *runFunnelArgs) validate() error {
 		if strings.TrimSpace(p.FunnelNextAction.NextActionDimension) == "" {
 			return mcpgateway.InvalidParams("funnel_next_action.next_action_dimension is required")
 		}
-		if p.FunnelNextAction.Limit < 0 {
-			return mcpgateway.InvalidParams("funnel_next_action.limit must be >= 0")
+		if p.FunnelNextAction.Limit < 0 || p.FunnelNextAction.Limit > 10000 {
+			return mcpgateway.InvalidParams("funnel_next_action.limit must be between 0 and 10000")
 		}
+	}
+	return nil
+}
+
+func validateCurrencyCode(code string) error {
+	c := strings.TrimSpace(code)
+	if c != "" && !currencyCodeRe.MatchString(c) {
+		return mcpgateway.InvalidParams("currency_code must be a 3-letter ISO4217 code")
 	}
 	return nil
 }
@@ -550,9 +575,12 @@ func propertyPath(raw propertyID) (string, *mcpgateway.Error) {
 func dateRangesJSON(rs []dateRangeArg) []map[string]any {
 	out := make([]map[string]any, 0, len(rs))
 	for _, r := range rs {
-		m := map[string]any{"startDate": r.StartDate, "endDate": r.EndDate}
-		if r.Name != "" {
-			m["name"] = r.Name
+		m := map[string]any{
+			"startDate": strings.TrimSpace(r.StartDate),
+			"endDate":   strings.TrimSpace(r.EndDate),
+		}
+		if name := strings.TrimSpace(r.Name); name != "" {
+			m["name"] = name
 		}
 		out = append(out, m)
 	}
@@ -562,7 +590,7 @@ func dateRangesJSON(rs []dateRangeArg) []map[string]any {
 func dimensionsJSON(names []string) []map[string]any {
 	out := make([]map[string]any, 0, len(names))
 	for _, name := range names {
-		out = append(out, map[string]any{"name": name})
+		out = append(out, map[string]any{"name": strings.TrimSpace(name)})
 	}
 	return out
 }
@@ -571,23 +599,30 @@ func dimensionsJSON(names []string) []map[string]any {
 // supplied filter/order/segment objects to the lowerCamelCase JSON names the
 // REST endpoints use. Values are left untouched.
 func camelize(v any) any {
+	return camelizeDepth(v, 0)
+}
+
+func camelizeDepth(v any, depth int) any {
+	if depth > 32 {
+		return v
+	}
 	switch x := v.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, val := range x {
-			out[camelKey(k)] = camelize(val)
+			out[camelKey(k)] = camelizeDepth(val, depth+1)
 		}
 		return out
 	case []any:
 		out := make([]any, len(x))
 		for i, val := range x {
-			out[i] = camelize(val)
+			out[i] = camelizeDepth(val, depth+1)
 		}
 		return out
 	case []map[string]any:
 		out := make([]any, len(x))
 		for i, val := range x {
-			out[i] = camelize(val)
+			out[i] = camelizeDepth(val, depth+1)
 		}
 		return out
 	default:
@@ -611,8 +646,9 @@ func camelKey(k string) string {
 		if part == "" {
 			continue
 		}
-		b.WriteString(strings.ToUpper(part[:1]))
-		b.WriteString(part[1:])
+		r := []rune(part)
+		r[0] = unicode.ToUpper(r[0])
+		b.WriteString(string(r))
 	}
 	return b.String()
 }

@@ -13,18 +13,18 @@ import (
 // difference, so the core is the sole approval gate.
 
 func (s *Service) submitURL(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
-	if call.DryRun {
-		return dryRunResult(call.Tool, false), nil
-	}
 	var p submitURLArgs
 	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
 		return mcpgateway.Result{}, err
 	}
-	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
-		return mcpgateway.Result{}, verr
-	}
 	if !mcpgateway.URLBelongsToSite(p.Site, p.URL) {
 		return mcpgateway.Result{}, mcpgateway.InvalidParams("url must belong to the site")
+	}
+	if call.DryRun {
+		return dryRunResult(call.Tool, false), nil
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
 	}
 	p.URL = canonicalURL(p.URL)
 	quota, qerr := s.quota(ctx, p.Site)
@@ -44,19 +44,19 @@ func (s *Service) submitURL(ctx context.Context, call mcpgateway.Call) (mcpgatew
 }
 
 func (s *Service) submitURLBatch(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
-	if call.DryRun {
-		return dryRunResult(call.Tool, false), nil
-	}
 	var p submitBatchArgs
 	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
 		return mcpgateway.Result{}, err
 	}
-	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
-		return mcpgateway.Result{}, verr
-	}
 	urls, err := mcpgateway.ValidateBatchURLs(p.Site, p.URLs, s.batchCap)
 	if err != nil {
 		return mcpgateway.Result{}, mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if call.DryRun {
+		return dryRunResult(call.Tool, false), nil
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
 	}
 	quota, qerr := s.quota(ctx, p.Site)
 	if qerr != nil {
@@ -75,18 +75,18 @@ func (s *Service) submitURLBatch(ctx context.Context, call mcpgateway.Call) (mcp
 }
 
 func (s *Service) submitFeed(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
-	if call.DryRun {
-		return dryRunResult(call.Tool, false), nil
-	}
 	var p feedArgs
 	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
 		return mcpgateway.Result{}, err
 	}
-	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
-		return mcpgateway.Result{}, verr
-	}
 	if !mcpgateway.URLBelongsToSite(p.Site, p.FeedURL) {
 		return mcpgateway.Result{}, mcpgateway.InvalidParams("feedUrl must belong to the site")
+	}
+	if call.DryRun {
+		return dryRunResult(call.Tool, false), nil
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
 	}
 	p.FeedURL = canonicalURL(p.FeedURL)
 	body := map[string]any{"siteUrl": p.Site, "feedUrl": p.FeedURL}
@@ -99,18 +99,18 @@ func (s *Service) submitFeed(ctx context.Context, call mcpgateway.Call) (mcpgate
 }
 
 func (s *Service) removeFeed(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
-	if call.DryRun {
-		return dryRunResult(call.Tool, false), nil
-	}
 	var p feedArgs
 	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
 		return mcpgateway.Result{}, err
 	}
-	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
-		return mcpgateway.Result{}, verr
-	}
 	if !mcpgateway.URLBelongsToSite(p.Site, p.FeedURL) {
 		return mcpgateway.Result{}, mcpgateway.InvalidParams("feedUrl must belong to the site")
+	}
+	if call.DryRun {
+		return dryRunResult(call.Tool, false), nil
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
 	}
 	p.FeedURL = canonicalURL(p.FeedURL)
 	present, ferr := s.feedPresent(ctx, p.Site, p.FeedURL)
@@ -130,18 +130,30 @@ func (s *Service) removeFeed(ctx context.Context, call mcpgateway.Call) (mcpgate
 }
 
 func (s *Service) addBlockedURL(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
-	if call.DryRun {
-		return dryRunResult(call.Tool, true), nil
-	}
 	var p blockedArgs
 	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
 		return mcpgateway.Result{}, err
 	}
-	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
-		return mcpgateway.Result{}, verr
-	}
 	if !mcpgateway.URLBelongsToSite(p.Site, p.BlockedURL) {
 		return mcpgateway.Result{}, mcpgateway.InvalidParams("blockedUrl must belong to the site")
+	}
+	if isSiteRoot(p.Site, p.BlockedURL) {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("blockedUrl cannot be the site root")
+	}
+	entityType := 0
+	switch p.EntityType {
+	case "", "page":
+		entityType = 0
+	case "directory":
+		entityType = 1
+	default:
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("entity_type must be page or directory")
+	}
+	if call.DryRun {
+		return dryRunResult(call.Tool, true), nil
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
 	}
 	p.BlockedURL = canonicalURL(p.BlockedURL)
 	body := map[string]any{
@@ -149,7 +161,7 @@ func (s *Service) addBlockedURL(ctx context.Context, call mcpgateway.Call) (mcpg
 		"blockedUrl": map[string]any{
 			"__type":      "BlockedUrl:#Microsoft.Bing.Webmaster.Api",
 			"Date":        "/Date(-62135568000000-0800)/",
-			"EntityType":  0,
+			"EntityType":  entityType,
 			"RequestType": 1,
 			"Url":         p.BlockedURL,
 		},
@@ -158,7 +170,7 @@ func (s *Service) addBlockedURL(ctx context.Context, call mcpgateway.Call) (mcpg
 		return mcpgateway.Result{}, err
 	}
 	return mcpgateway.Result{Data: map[string]any{
-		"blocked": true, "site": p.Site, "blocked_url": p.BlockedURL,
+		"blocked": true, "site": p.Site, "blocked_url": p.BlockedURL, "entity_type": p.EntityType,
 	}, RowCount: 1, UpstreamStatus: 200}, nil
 }
 

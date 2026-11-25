@@ -245,3 +245,22 @@ func TestBingCredentialAndUpstreamErrorsDoNotLeakKey(t *testing.T) {
 		t.Fatalf("missing credential: %v", err)
 	}
 }
+
+func TestBingHardeningSiteRootDirectoryAndTotals(t *testing.T) {
+	svc, mock := newTestService(t)
+	ctx := context.Background()
+	// Site root cannot be blocked.
+	if err := svc.validateAddBlockedURL(json.RawMessage(`{"site":"https://x.test/","blockedUrl":"https://x.test/"}`)); err == nil {
+		t.Fatal("blocking site root accepted")
+	}
+	// entity_type directory maps to EntityType=1.
+	if _, err := svc.Handle(ctx, mcpgateway.Call{Tool: ToolAddBlockedURL, Params: json.RawMessage(`{"site":"https://x.test/","blockedUrl":"https://x.test/dir/","entity_type":"directory"}`)}); err != nil {
+		t.Fatalf("directory block: %v", err)
+	}
+	mock.mu.Lock()
+	last := mock.writes[len(mock.writes)-1].body["blockedUrl"].(map[string]any)
+	mock.mu.Unlock()
+	if int(last["EntityType"].(float64)) != 1 {
+		t.Fatalf("directory EntityType = %v, want 1", last["EntityType"])
+	}
+}

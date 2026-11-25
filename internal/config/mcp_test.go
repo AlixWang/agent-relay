@@ -128,6 +128,27 @@ allowed_tools = ["*"]
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "explicit tools") {
 		t.Fatalf("write wildcard accepted: %v", err)
 	}
+
+	path = writeConfig(t, `
+[mcp_gateway.keys]
+read_key_ttl_days = -5
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("negative read_key_ttl_days accepted")
+	}
+
+	// Partial service override must preserve default credential_ref.
+	path = writeConfig(t, `
+[mcp_gateway.services.adsense]
+allowed_tools = ["list_accounts"]
+`)
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("partial service override failed: %v", err)
+	}
+	if loaded.MCPGateway.Services["adsense"].CredentialRef != "secret:GA_ADSENSE_ADC" {
+		t.Fatalf("partial override wiped credential_ref: %+v", loaded.MCPGateway.Services["adsense"])
+	}
 }
 
 func TestExampleConfigParses(t *testing.T) {

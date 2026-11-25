@@ -428,7 +428,7 @@ func TestGAReportAndRealtimePassthrough(t *testing.T) {
 	if ob["metric"].(map[string]any)["metricName"] != "sessions" || ob["desc"] != true {
 		t.Fatalf("orderBys: %+v", ob)
 	}
-	if body["limit"].(float64) != 25 || body["offset"].(float64) != 5 ||
+	if body["limit"].(float64) != 3 || body["offset"].(float64) != 5 ||
 		body["currencyCode"] != "USD" || body["returnPropertyQuota"] != true {
 		t.Fatalf("window/quota: %+v", body)
 	}
@@ -439,7 +439,6 @@ func TestGAReportAndRealtimePassthrough(t *testing.T) {
 		"metrics":["activeUsers"],
 		"dimension_filter":{"filter":{"field_name":"city","string_filter":{"match_type":"EXACT","value":"Tokyo"}}},
 		"limit":10,
-		"offset":0,
 		"return_property_quota":true
 	}`)
 	res, err = svc.Handle(ctx, mcpgateway.Call{Tool: ToolRunRealtimeReport, Params: realtimeParams})
@@ -459,7 +458,10 @@ func TestGAReportAndRealtimePassthrough(t *testing.T) {
 	if _, has := rtBody["currencyCode"]; has {
 		t.Fatalf("realtime must not send currencyCode: %+v", rtBody)
 	}
-	if rtBody["limit"].(float64) != 10 || rtBody["returnPropertyQuota"] != true {
+	if _, has := rtBody["offset"]; has {
+		t.Fatalf("realtime must not send offset: %+v", rtBody)
+	}
+	if rtBody["limit"].(float64) != 3 || rtBody["returnPropertyQuota"] != true {
 		t.Fatalf("realtime body: %+v", rtBody)
 	}
 	rtFilter := rtBody["dimensionFilter"].(map[string]any)["filter"].(map[string]any)
@@ -667,5 +669,19 @@ func TestGAValidationRejectsBadParams(t *testing.T) {
 	mock.mu.Unlock()
 	if dims, ok := body["dimensions"].([]any); !ok || len(dims) != 0 {
 		t.Fatalf("totals-only dimensions: %+v", body["dimensions"])
+	}
+
+	// Realtime must reject offset; conversions must reject invalid attribution_model; report rejects bad currency.
+	for _, tc := range []struct {
+		tool   string
+		params string
+	}{
+		{ToolRunRealtimeReport, `{"property_id":"470553943","dimensions":["city"],"metrics":["activeUsers"],"offset":1}`},
+		{ToolRunConversionsReport, `{"property_id":"470553943","date_ranges":[{"start_date":"2026-11-01","end_date":"2026-11-02"}],"dimensions":["campaignName"],"metrics":["advertiserAdCost"],"conversion_spec":{"attribution_model":"BOGUS"}}`},
+		{ToolRunReport, `{"property_id":"470553943","date_ranges":[{"start_date":"2026-11-01","end_date":"2026-11-02"}],"dimensions":["date"],"metrics":["sessions"],"currency_code":"US"}`},
+	} {
+		if _, err := svc.Handle(ctx, mcpgateway.Call{Tool: tc.tool, Params: json.RawMessage(tc.params)}); err == nil {
+			t.Fatalf("%s accepted bad params: %s", tc.tool, tc.params)
+		}
 	}
 }
