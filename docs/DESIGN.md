@@ -35,7 +35,7 @@ This framework turns that one-off script into a reusable, self-hostable system: 
 
 ### 1.3 Non-goals
 
-- Not a replacement for A2A (enterprise agent-to-agent) or MCP (tool access). This sits below both: when an agent can only run shell commands, A2A's SDK requirement locks it out. This framework is for that tier. The resource hub (§4.12) *distributes* MCP configs and skills to assistants; it never proxies MCP tool calls or executes skills.
+- Not a replacement for A2A (enterprise agent-to-agent) or general MCP orchestration. This sits below both: when an agent can only run shell commands, A2A's SDK requirement locks it out. The resource hub (§4.12) *distributes* static MCP configs and skills to assistants without executing skills; the opt-in in-process MCP gateway (`docs/adr/0007-in-process-mcp-gateway.md`, disabled by default) is the approved exception for credential-isolated, audited upstream MCP tool calls.
 - Not a general-purpose MQ. It does queue semantics, but it is opinionated for LLM assistants, not a Kafka/RabbitMQ competitor.
 - Not a workflow engine. No DAG execution, no retries-with-backoff orchestration beyond basic redelivery.
 

@@ -336,3 +336,28 @@ audience 计算（广播、房间成员、私聊收件人；操作者回复走�
 - `GET /admin/resource-takedowns?status=`；`POST /admin/resource-takedowns/{id}/approve|reject`。
 - 资源记录多 `owner_peer`（空 = operator）；`PATCH /admin/peers/{id}` 支持 `resource_submit_enabled`；
   `DELETE /admin/peers/{id}?delete_resources=1` 决定是否连同其资源删除。
+
+## MCP 网关（ADR-0007）
+
+进程内 MCP 代理网关（默认关闭；配置见 `CONFIG.md`）。凭据通过资源中心 `secret:<name>` 在服务端内存解析，永不下发或回显明文。
+
+### MCP 协议端点（Streamable HTTP，无状态 JSON-only，`2025-06-18` / `2025-03-26`）
+
+- `GET /mcp/health`（免鉴权）→ `{ ok, enabled, write_enabled }`
+- `POST /mcp` → 聚合端点，暴露带前缀工具名（`adsense_*`、`bing_*`、`ga_*`）
+- `POST /mcp/{service}` → 单服务端点（`adsense`、`bing-webmaster`、`ga`），暴露短工具名
+- 协议与安全约定：
+  - `GET`/`DELETE`（除 `/mcp/health`）返回 `405`（带 `Allow` 头）；网关关闭时直接返回 `503 service_disabled`（不读请求体、不写审计）。
+  - `Authorization: Bearer <token>` 支持两类身份：`rmk_` 外部 Key 与已授 MCP 权限的 active relay peer token；`min_client` 不满足收 `426`；缺授权/超 scope 收 `403`。
+  - 校验 `Origin` 头防 DNS rebinding（跨域 `403`）；Body 上限遵守 `max_body_bytes`（超限 `413`）；JSON 解析错误返回 `-32700`，拒绝批量请求与 `"id": null`（`-32600`）；超限流返回 `429 + Retry-After`。
+  - 高风险写（如 `bing-webmaster` `add_blocked_url`）首次调用冻结参数并返回 `{ status:"pending", approval_id, expires_at, params_hash }`；管理员在控制台批准后，发起方在执行窗口（默认 10 分钟）内携带相同参数与 `approval_id` 一次性执行（服务端严格按冻结的 `params_json` 执行，重放返回 `approval_already_used`）。
+
+### Admin 控制台端点（cookie）
+
+- `GET /admin/mcp/health` → 网关开关、待审批数（`pending_approvals`）、有效 Key 数及服务概览；`GET /admin/stats` 亦包含 `mcp_enabled`、`mcp_write_enabled`、`mcp_pending_approvals`。
+- `GET /admin/mcp/services`、`GET /admin/mcp/tools` → 已注册服务状态、最近调用/错误及工具元数据。
+- `GET /admin/mcp/keys`、`POST /admin/mcp/keys`（默认仅读 scope；`plaintext` 仅返回这一次）、`POST /admin/mcp/keys/{id}/rotate`、`POST /admin/mcp/keys/{id}/revoke`。
+- `GET /admin/mcp/peers`、`PUT /admin/mcp/peers/{peer_id}` `{ scopes, enabled?, note? }`、`DELETE /admin/mcp/peers/{peer_id}`。
+- `GET /admin/mcp/approvals?status=&principal=&service_id=&tool=&page=&page_size=`、`GET /admin/mcp/approvals/{id}`、`POST /admin/mcp/approvals/{id}/approve`、`POST /admin/mcp/approvals/{id}/reject`。
+- `GET /admin/mcp/audit?actor=&service_id=&tool=&outcome=&approval_id=&since=&until=&page=&page_size=`、`GET /admin/mcp/audit/export`（CSV 导出，上限 10000 行，已做公式注入转义）。
+- `POST /admin/mcp/dry-run` `{ service, tool, params }` → 校验参数并计算 `params_hash`，不写状态、不调上游。
