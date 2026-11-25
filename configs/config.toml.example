@@ -138,3 +138,64 @@ muse_chat_global_per_minute = 30      # 1-30
 muse_task_nudge_enabled = true
 muse_task_nudge_after_secs = 180
 muse_task_nudge_cooldown_secs = 600
+# Relay MCP gateway (design v5). The gateway and the write path are OFF by
+# default. Credentials are secret:<name> references to resource-hub secrets;
+# never put a plaintext key here. Config changes require a restart.
+
+[mcp_gateway]
+enabled = false
+upstream_timeout_secs = 15
+gateway_timeout_secs = 30
+rate_per_minute_per_peer = 30
+rate_per_hour_per_peer = 600
+max_rows_per_call = 1000
+audit_retention_days_read = 90
+audit_retention_days_write = 180
+audit_max_rows = 2000000
+
+[mcp_gateway.services.adsense]
+enabled = true
+credential_ref = "secret:GA_ADSENSE_ADC"
+allowed_tools = ["*"]
+
+[mcp_gateway.services.bing-webmaster]
+enabled = true
+credential_ref = "secret:BING_WM_API_KEY"
+allowed_tools = ["*"]
+
+# Google Analytics reads reuse the same ADC secret as AdSense. GA writes are
+# deliberately not implemented (create_property_annotation included).
+[mcp_gateway.services.ga]
+enabled = true
+credential_ref = "secret:GA_ADSENSE_ADC"
+allowed_tools = ["*"]
+
+[mcp_gateway.write]
+enabled = false
+
+# AdSense writes exist upstream but stay disabled until the project is AFP and
+# the ADC carries the full adsense scope (design v5 §5.3).
+[mcp_gateway.write.adsense]
+allowed_tools = []
+
+# GA is read-only; keep the write allowlist empty.
+[mcp_gateway.write.ga]
+allowed_tools = []
+
+# First batch: four low-risk writes. add_blocked_url is implemented but is
+# intentionally absent until the second wave; high-risk calls need an
+# operator approval and are always one-shot. These scalar knobs may live here
+# (v5 §6) or under [mcp_gateway.write]; per-service values win.
+[mcp_gateway.write.bing-webmaster]
+allowed_tools = ["submit_url", "submit_url_batch", "submit_feed", "remove_feed"]
+batch_cap = 100
+approval_ttl_secs = 600
+approval_pending_ttl_secs = 86400
+low_risk_write_per_hour = 50
+high_risk_write_per_hour = 10
+
+[mcp_gateway.keys]
+read_key_ttl_days = 90
+write_key_ttl_days = 30
+per_tool_key_ttl_days = 7
+rotate_grace_secs = 0

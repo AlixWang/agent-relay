@@ -95,6 +95,13 @@ export async function refreshStats() {
       navLogs.hidden = errors === 0;
     }
 
+    const mcpPending = s.mcp_pending_approvals || 0;
+    const navMCP = $('navMCP');
+    if (navMCP) {
+      navMCP.textContent = mcpPending > 0 ? mcpPending : '';
+      navMCP.hidden = mcpPending === 0;
+    }
+
     const navResource = $('navResource');
     const pendingResources = (s.resource_submissions_pending || 0) + (s.resource_takedowns_pending || 0);
     if (navResource) {

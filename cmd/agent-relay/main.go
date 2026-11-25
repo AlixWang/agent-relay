@@ -21,6 +21,10 @@ import (
 	"github.com/AlixWang/agent-relay/internal/effects"
 	"github.com/AlixWang/agent-relay/internal/gateway"
 	"github.com/AlixWang/agent-relay/internal/guard"
+	"github.com/AlixWang/agent-relay/internal/mcpgateway"
+	"github.com/AlixWang/agent-relay/internal/mcpgateway/services/adsense"
+	"github.com/AlixWang/agent-relay/internal/mcpgateway/services/bing"
+	"github.com/AlixWang/agent-relay/internal/mcpgateway/services/ga"
 	"github.com/AlixWang/agent-relay/internal/muse"
 	"github.com/AlixWang/agent-relay/internal/presence"
 	"github.com/AlixWang/agent-relay/internal/prompts"
@@ -47,6 +51,25 @@ const (
 	serverVersion   = 2
 	protocolVersion = 1
 )
+
+// disableMCPServicesWithoutCredentials applies the design v5 §6 startup rule:
+// a missing credential disables only that service; the gateway and the other
+// services still start. Only the reference name is logged, never the value.
+func disableMCPServicesWithoutCredentials(cfg *mcpgateway.Config, creds *mcpgateway.Credentials) {
+	for id, svc := range cfg.Services {
+		if !svc.Enabled {
+			continue
+		}
+		if svc.CredentialRef == "" {
+			svc.Enabled = false
+			log.Printf("WARN: mcp gateway service %s disabled: no credential_ref", id)
+		} else if _, err := creds.Resolve(svc.CredentialRef); err != nil {
+			svc.Enabled = false
+			log.Printf("WARN: mcp gateway service %s disabled: %s unavailable", id, svc.CredentialRef)
+		}
+		cfg.Services[id] = svc
+	}
+}
 
 func main() {
 	flag.Parse()
@@ -132,6 +155,57 @@ func main() {
 				fmt.Sprintf("secret=%s where=message", strings.Join(names, ",")), now)
 		})
 	}
+	// Relay MCP gateway v5. Secrets are resolved in-process by the resource
+	// hub; services are explicitly registered and validated against the
+	// per-service config. The gateway can be disabled without disabling the
+	// console/admin surface.
+	var secretResolver mcpgateway.SecretResolver
+	if resSvc != nil {
+		secretResolver = resSvc
+	}
+	mcpCreds := mcpgateway.NewCredentials(secretResolver)
+	mcpCfg := cfg.MCPGateway
+	// Design v5 §6: a missing service credential disables only that service;
+	// the gateway and the rest of the relay still start. Values are never
+	// logged (the message carries the reference name only).
+	if mcpCfg.Enabled {
+		disableMCPServicesWithoutCredentials(&mcpCfg, mcpCreds)
+	}
+	mcpSrv, err := mcpgateway.New(mcpgateway.Options{
+		Config: mcpCfg, Store: st, Auth: au, MinProtocol: cfg.MinClient,
+	})
+	if err != nil {
+		log.Fatalf("mcp gateway config: %v", err)
+	}
+	if err := mcpSrv.Registry().Register(adsense.New(adsense.Options{
+		CredentialRef: mcpCfg.Service(mcpgateway.ServiceAdSense).CredentialRef,
+		Credentials:   mcpCreds,
+		Upstream:      mcpSrv.Upstream(),
+		MaxRows:       mcpCfg.MaxRowsPerCall,
+	})); err != nil {
+		log.Fatalf("mcp gateway register adsense: %v", err)
+	}
+	if err := mcpSrv.Registry().Register(bing.New(bing.Options{
+		CredentialRef: mcpCfg.Service(mcpgateway.ServiceBing).CredentialRef,
+		Credentials:   mcpCreds,
+		Upstream:      mcpSrv.Upstream(),
+		MaxRows:       mcpCfg.MaxRowsPerCall,
+		BatchCap:      mcpCfg.BatchCapFor(mcpgateway.ServiceBing),
+	})); err != nil {
+		log.Fatalf("mcp gateway register bing: %v", err)
+	}
+	if err := mcpSrv.Registry().Register(ga.New(ga.Options{
+		CredentialRef: mcpCfg.Service(mcpgateway.ServiceGA).CredentialRef,
+		Credentials:   mcpCreds,
+		Upstream:      mcpSrv.Upstream(),
+		MaxRows:       mcpCfg.MaxRowsPerCall,
+	})); err != nil {
+		log.Fatalf("mcp gateway register ga: %v", err)
+	}
+	if err := mcpSrv.ValidateConfig(); err != nil {
+		log.Fatalf("mcp gateway: %v", err)
+	}
+
 	p := presence.New(st, int64(cfg.OnlineTimeoutSecs), cfg.OfflineWebhookURL)
 	v := verify.New(st, int64(cfg.VerifyTimeoutSecs))
 
@@ -198,6 +272,7 @@ func main() {
 	// SSE fan-out (DESIGN §4.4b): in-memory wake-ups, DB stays authoritative.
 	gw.SetStream(stream.New(cfg.StreamMaxPerPeer, 500))
 	gw.SetMuse(museSvc)
+	gw.SetMCP(mcpSrv)
 	if resSvc != nil {
 		gw.SetResources(resSvc)
 		gw.AgentLogs().SetRedactor(resSvc.Redactor().Redact, func(peerID string, names []string) {
@@ -242,7 +317,7 @@ func main() {
 	fx.Start(ctx)
 	go presenceLoop(ctx, p)
 	go verifyLoop(ctx, v)
-	go retentionLoop(ctx, st, cfg, resSvc)
+	go retentionLoop(ctx, st, cfg, resSvc, mcpSrv)
 	if museSvc != nil && cfg.MuseKeepaliveSecs > 0 {
 		go museLoop(ctx, museSvc, cfg)
 	}
@@ -379,7 +454,7 @@ func museNudgeLoop(ctx context.Context, m *muse.Service) {
 	}
 }
 
-func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resSvc *resources.Service) {
+func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resSvc *resources.Service, mcpSrv *mcpgateway.Server) {
 	r := retention.New(st, retention.Policy{
 		MessageTTLDays:         cfg.MessageTTLDays,
 		PeerPruneAfterDays:     cfg.PeerPruneAfterDays,
@@ -410,6 +485,13 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resS
 			}
 		}
 		compactDB(st, stats)
+		if mcpSrv != nil {
+			if sum, err := mcpSrv.RunMaintenance(time.Now()); err != nil {
+				log.Printf("mcp gateway retention: %v", err)
+			} else if sum.PendingExpired+sum.ApprovedExpired > 0 || sum.Pruned+sum.Trimmed > 0 {
+				log.Printf("mcp gateway retention: %+v", sum)
+			}
+		}
 	}
 	for {
 		select {
@@ -430,6 +512,13 @@ func retentionLoop(ctx context.Context, st store.Store, cfg *config.Config, resS
 				}
 			}
 			compactDB(st, stats)
+			if mcpSrv != nil {
+				if sum, err := mcpSrv.RunMaintenance(time.Now()); err != nil {
+					log.Printf("mcp gateway retention: %v", err)
+				} else if sum.PendingExpired+sum.ApprovedExpired > 0 || sum.Pruned+sum.Trimmed > 0 {
+					log.Printf("mcp gateway retention: %+v", sum)
+				}
+			}
 		}
 	}
 }

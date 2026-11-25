@@ -513,6 +513,25 @@ func (s *Service) granted(peerID, kind, name string) (*store.Resource, error) {
 	return nil, nil
 }
 
+// RevealServerSecret returns a secret's plaintext to an in-process server
+// integration (the MCP gateway), without a per-peer grant. This is not an
+// agent-facing path: the gateway never exposes the value, logs it, or returns
+// it in a tool result. Missing secrets are ErrNotFound.
+func (s *Service) RevealServerSecret(name string) (string, error) {
+	r, err := s.st.GetResource(KindSecret, name)
+	if err != nil {
+		return "", err
+	}
+	if r == nil {
+		return "", ErrNotFound
+	}
+	plain, err := open(s.key, r.Content)
+	if err != nil {
+		return "", fmt.Errorf("resources: decrypt %s: %w", name, err)
+	}
+	return string(plain), nil
+}
+
 // RevealSecret returns the plaintext of a secret granted to peerID.
 // Missing and not-granted are indistinguishable (ErrNotFound) by design.
 func (s *Service) RevealSecret(peerID, name string) (string, error) {

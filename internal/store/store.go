@@ -438,6 +438,35 @@ type Store interface {
 	// PurgeStatusSpamV1 is a one-time, settings-guarded cleanup of historical
 	// repeated kind='status' storms (keeping the first and last row per group).
 	PurgeStatusSpamV1(now int64) (*StatusSpamPurge, error)
+	// Relay MCP gateway v5 (§2): external keys and peer grants share
+	// mcp_keys; approvals are a CAS state machine; mcp_audit is separate
+	// from audit_log (the gateway mirrors best-effort).
+	CreateMCPKey(k *MCPKey) error
+	GetMCPKey(id string) (*MCPKey, error)
+	GetMCPKeyByHash(hash string) (*MCPKey, error)
+	GetMCPPeerGrant(peerID string) (*MCPKey, error)
+	ListMCPKeys() ([]*MCPKey, error)
+	ListMCPPeerGrants() ([]*MCPKey, error)
+	SaveMCPPeerGrant(k *MCPKey) (*MCPKey, error)
+	UpdateMCPKeyScopes(id string, scopes []string) error
+	UpdateMCPKeyUsage(id string, ts int64, ip string) error
+	RevokeMCPKey(id string, ts int64) (bool, error)
+	SetMCPKeyRevokedAt(id string, at int64) (bool, error)
+	CreateMCPApproval(a *MCPApproval) error
+	GetMCPApproval(id string) (*MCPApproval, error)
+	GetOpenMCPApproval(principal, tool, paramsHash string) (*MCPApproval, error)
+	ListMCPApprovals(f MCPApprovalFilter, limit, offset int) ([]*MCPApproval, int, error)
+	CountMCPApprovals(status string) (int, error)
+	ApproveMCPApproval(id string, now, executeBefore int64, by, note string) (bool, error)
+	RejectMCPApproval(id string, now int64, by, note string) (bool, error)
+	ClaimMCPApprovalExecution(id string, now int64) (bool, error)
+	UpdateMCPApprovalOutcome(id, outcome, errCode string, upstreamStatus int) error
+	ExpireMCPApproval(id string, now int64) (bool, error)
+	ExpireDueMCPApprovals(now int64) ([]*MCPApproval, error)
+	AppendMCPAudit(e *MCPAuditEntry) error
+	ListMCPAudit(f MCPAuditFilter, limit, offset int) ([]*MCPAuditEntry, int, error)
+	PruneMCPAudit(readBefore, writeBefore int64) (int64, error)
+	TrimMCPAudit(maxRows int64) (int64, error)
 	// agent runtime logs (DESIGN §4.11): uploaded diagnostics, not audit.
 	InsertAgentLogs(events []*AgentLog) (accepted, duplicates int, err error)
 	ListAgentLogsPage(f AgentLogFilter, limit, offset int) ([]*AgentLog, int, error)

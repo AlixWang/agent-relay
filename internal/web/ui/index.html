@@ -146,6 +146,7 @@
       <div class="sb-group">接入</div>
       <a href="#prompts" data-route="prompts" data-tip="邀请 &amp; Prompt" class="sb-link"><svg class="icon"><use href="#i-user-plus"/></svg><span>邀请 &amp; Prompt</span></a>
       <a href="#resources" data-route="resources" data-tip="资源中心" class="sb-link"><svg class="icon"><use href="#i-package"/></svg><span>资源中心</span><em id="navResource" class="sb-count warn" hidden></em></a>
+      <a href="#mcp" data-route="mcp" data-tip="MCP 网关" class="sb-link"><svg class="icon"><use href="#i-bot"/></svg><span>MCP 网关</span><em id="navMCP" class="sb-count warn" hidden></em></a>
       <div class="sb-group">安全</div>
       <a href="#audit" data-route="audit" data-tip="审计日志" class="sb-link"><svg class="icon"><use href="#i-scroll"/></svg><span>审计日志</span></a>
       <a href="#logs" data-route="logs" data-tip="Agent 日志" class="sb-link"><svg class="icon"><use href="#i-terminal"/></svg><span>Agent 日志</span><em id="navLogs" class="sb-count warn" hidden></em></a>
@@ -967,6 +968,59 @@
         </div>
       </section>
 
+      <!-- ---------- MCP 网关 ---------- -->
+      <section id="page-mcp" class="page" hidden>
+        <div class="stats">
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-activity"/></svg>网关</span><b id="mcpEnabled">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-shield"/></svg>待批准</span><b id="mcpPending">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-key"/></svg>外部 Key</span><b id="mcpKeys">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-server"/></svg>服务</span><b id="mcpServices">-</b></div>
+        </div>
+        <div class="panel">
+          <div class="panel-bar">
+            <div class="seg" id="mcpSeg" role="tablist">
+              <button data-v="services" class="on">服务</button>
+              <button data-v="keys">Key 管理</button>
+              <button data-v="peers">Peer 授权</button>
+              <button data-v="approvals">待批准 <span class="badge xs" id="mcpApprovalBadge" hidden></span></button>
+              <button data-v="audit">审计</button>
+            </div>
+            <div class="bar-right">
+              <button class="btn btn-outline btn-sm" id="mcpRefresh"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button>
+              <button class="btn btn-outline btn-sm" id="mcpDryRun"><svg class="icon"><use href="#i-wrench"/></svg>Dry-run</button>
+              <button class="btn btn-primary btn-sm" id="mcpNewKey" hidden><svg class="icon"><use href="#i-plus"/></svg>新建 Key</button>
+              <button class="btn btn-outline btn-sm" id="mcpExport" hidden><svg class="icon"><use href="#i-download"/></svg>导出 CSV</button>
+            </div>
+          </div>
+          <div class="panel-bar" id="mcpAuditFilters" hidden>
+            <label class="search"><svg class="icon"><use href="#i-user"/></svg><input id="mcpAuditActor" type="search" placeholder="actor（peer:... / key:...）"></label>
+            <label class="search"><svg class="icon"><use href="#i-server"/></svg><input id="mcpAuditService" type="search" placeholder="service id"></label>
+            <label class="search"><svg class="icon"><use href="#i-wrench"/></svg><input id="mcpAuditTool" type="search" placeholder="tool"></label>
+            <select id="mcpAuditOutcome" aria-label="结果过滤">
+              <option value="">全部结果</option>
+              <option value="ok">ok</option>
+              <option value="executed">executed</option>
+              <option value="pending">pending</option>
+              <option value="approved">approved</option>
+              <option value="rejected">rejected</option>
+              <option value="expired">expired</option>
+              <option value="denied">denied</option>
+              <option value="error">error</option>
+            </select>
+            <button class="btn btn-outline btn-sm" id="mcpAuditApply">筛选</button>
+            <button class="btn btn-ghost btn-sm" id="mcpAuditClear">清除</button>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="mcpTable">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pager" id="mcpPager"></div>
+          <p class="hint"><svg class="icon xs"><use href="#i-info"/></svg><span id="mcpNote">网关总开关关闭时 POST /mcp 返回 503；写总开关默认关。Key 原文只在新建/轮换时显示一次，服务端只存 SHA-256。高风险写需在「待批准」二次批准，批准后 10 分钟内可执行一次。</span></p>
+        </div>
+      </section>
+
       <!-- ---------- 系统 ---------- -->
       <section id="page-system" class="page" hidden>
         <div class="grid-2">
@@ -1185,6 +1239,54 @@
     <div class="modal-foot">
       <button type="button" class="btn btn-ghost" data-close>取消</button>
       <button type="button" class="btn btn-danger" id="resRejectOk">确认拒绝</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ MCP dry-run dialog ============ -->
+<dialog id="mcpDryDlg" class="modal" aria-labelledby="mcpDryTitle">
+  <form method="dialog" id="mcpDryForm">
+    <div class="modal-head">
+      <svg class="icon" style="color: var(--muted)"><use href="#i-wrench"/></svg>
+      <div><h2 id="mcpDryTitle">写工具 Dry-run</h2><p class="muted xs">只校验服务/工具/参数与 scope 配置，不调上游，不创建批准。</p></div>
+    </div>
+    <div class="grid-2">
+      <label class="field">服务 id<input id="mcpDryService" placeholder="bing-webmaster" required autocomplete="off"></label>
+      <label class="field">工具短名<input id="mcpDryTool" placeholder="submit_url" required autocomplete="off"></label>
+    </div>
+    <label class="field">参数（JSON 对象）<textarea id="mcpDryParams" rows="5">{}</textarea></label>
+    <pre id="mcpDryResult" class="mcp-params" hidden></pre>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" data-close>关闭</button>
+      <button type="submit" class="btn btn-primary" id="mcpDryBtn" value="go">校验</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ MCP key dialog ============ -->
+<dialog id="mcpKeyDlg" class="modal" aria-labelledby="mcpKeyTitle">
+  <form method="dialog" id="mcpKeyForm">
+    <div class="modal-head">
+      <svg class="icon" style="color: var(--muted)"><use href="#i-key"/></svg>
+      <div><h2 id="mcpKeyTitle">新建 MCP Key</h2><p class="muted xs">默认只给读 scope；原文只在创建成功后显示一次。</p></div>
+    </div>
+    <label class="field">名称<input id="mcpKeyName" placeholder="例如 cursor-readonly-01" required autocomplete="off"></label>
+    <label class="field">Scope（逗号或换行分隔）
+      <textarea id="mcpKeyScopes" rows="4" placeholder="mcp:adsense:read:*&#10;mcp:bing-webmaster:read:*" required></textarea>
+    </label>
+    <div class="grid-2">
+      <label class="field">有效期（天，0=按默认）<input id="mcpKeyDays" type="number" min="0" max="3650" value="0"></label>
+      <label class="field">备注<input id="mcpKeyNote" placeholder="可选" autocomplete="off"></label>
+    </div>
+    <div id="mcpKeyResult" hidden>
+      <div class="alert alert-warn"><svg class="icon"><use href="#i-alert"/></svg>这是唯一一次显示原文；关闭后服务端无法再取回。</div>
+      <div class="invite-box"><code id="mcpKeyPlain" class="big-code wrap"></code>
+        <button type="button" class="btn-icon" data-copy="#mcpKeyPlain" data-tip="复制" aria-label="复制"><svg class="icon"><use href="#i-copy"/></svg></button></div>
+      <p class="muted xs" id="mcpKeyMeta"></p>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" data-close>关闭</button>
+      <button type="submit" class="btn btn-primary" id="mcpKeyBtn" value="go"><svg class="icon"><use href="#i-key"/></svg>签发</button>
     </div>
   </form>
 </dialog>

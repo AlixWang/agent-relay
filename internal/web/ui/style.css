@@ -2655,3 +2655,8 @@ button.ack-badge:is(.ok, .warn) {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* MCP gateway: frozen approval params need a bounded scroll box inside a table cell. */
+.mcp-params { max-width: 360px; max-height: 120px; overflow: auto; margin: 0 0 4px; padding: 6px 8px;
+  white-space: pre-wrap; word-break: break-word; font-size: 11px; background: var(--bg-soft, rgba(127,127,127,.08));
+  border-radius: 6px; }

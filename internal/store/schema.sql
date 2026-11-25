@@ -435,3 +435,92 @@ CREATE INDEX IF NOT EXISTS idx_agent_logs_level_received ON agent_logs(level, re
 CREATE INDEX IF NOT EXISTS idx_agent_logs_event_received ON agent_logs(event, received_at);
 CREATE INDEX IF NOT EXISTS idx_resource_revisions_kind_name ON resource_revisions(kind, name, created_at);
 CREATE INDEX IF NOT EXISTS idx_resource_grants_peer ON resource_grants(peer_id);
+
+-- Relay MCP gateway v5 (docs design v5 §2.2). Three tables, no foreign keys
+-- (matching the existing schema convention); enums are validated in Go, not
+-- with CHECK constraints (#32). Timestamps are Unix seconds; scopes are JSON.
+-- mcp_keys is one table with two principal types: external client keys
+-- (principal_type='key', key_hash set) and relay peer grants
+-- (principal_type='peer', one row per peer, key_hash empty).
+CREATE TABLE IF NOT EXISTS mcp_keys (
+    id            TEXT PRIMARY KEY,
+    principal_type TEXT NOT NULL DEFAULT 'key',
+    peer_id       TEXT NOT NULL DEFAULT '',
+    name          TEXT NOT NULL,
+    key_prefix    TEXT NOT NULL DEFAULT '',
+    key_hash      TEXT NOT NULL DEFAULT '',
+    scopes        TEXT NOT NULL DEFAULT '[]',
+    status        TEXT NOT NULL DEFAULT 'active',
+    note          TEXT NOT NULL DEFAULT '',
+    created_by    TEXT NOT NULL DEFAULT 'admin',
+    created_at    INTEGER NOT NULL,
+    expires_at    INTEGER NOT NULL,
+    revoked_at    INTEGER NOT NULL DEFAULT 0,
+    rotated_from  TEXT NOT NULL DEFAULT '',
+    last_used_at  INTEGER NOT NULL DEFAULT 0,
+    last_used_ip  TEXT NOT NULL DEFAULT '',
+    use_count     INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_keys_hash ON mcp_keys(key_hash) WHERE key_hash <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_keys_peer ON mcp_keys(peer_id) WHERE principal_type = 'peer';
+
+-- High-risk write approvals. params_json/params_hash freeze the tool+params
+-- at request time; execution re-hashes and compares. status is a CAS state
+-- machine: pending -> approved|rejected|expired, approved -> executed|expired.
+CREATE TABLE IF NOT EXISTS mcp_approvals (
+    id              TEXT PRIMARY KEY,
+    key_id          TEXT NOT NULL DEFAULT '',
+    key_name        TEXT NOT NULL DEFAULT '',
+    principal       TEXT NOT NULL,
+    auth_kind       TEXT NOT NULL,
+    endpoint        TEXT NOT NULL,
+    service_id      TEXT NOT NULL,
+    tool            TEXT NOT NULL,
+    risk            TEXT NOT NULL DEFAULT 'high',
+    params_json     TEXT NOT NULL,
+    params_hash     TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    requested_at    INTEGER NOT NULL,
+    expires_at      INTEGER NOT NULL,
+    decided_at      INTEGER NOT NULL DEFAULT 0,
+    decided_by      TEXT NOT NULL DEFAULT 'admin',
+    decision_note   TEXT NOT NULL DEFAULT '',
+    execute_before  INTEGER NOT NULL DEFAULT 0,
+    executed_at     INTEGER NOT NULL DEFAULT 0,
+    outcome         TEXT NOT NULL DEFAULT '',
+    error_code      TEXT NOT NULL DEFAULT '',
+    upstream_status INTEGER NOT NULL DEFAULT 0,
+    request_id      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_approvals_status ON mcp_approvals(status, expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_approvals_open
+    ON mcp_approvals(principal, tool, params_hash) WHERE status IN ('pending','approved');
+
+-- Gateway audit. Written for every tool call and every approval transition;
+-- mirrored into audit_log (best effort) by internal/mcpgateway.
+CREATE TABLE IF NOT EXISTS mcp_audit (
+    seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            INTEGER NOT NULL,
+    request_id    TEXT NOT NULL DEFAULT '',
+    actor         TEXT NOT NULL,
+    auth_kind     TEXT NOT NULL DEFAULT '',
+    key_id        TEXT NOT NULL DEFAULT '',
+    key_name      TEXT NOT NULL DEFAULT '',
+    endpoint      TEXT NOT NULL DEFAULT '',
+    service_id    TEXT NOT NULL DEFAULT '',
+    tool          TEXT NOT NULL DEFAULT '',
+    risk          TEXT NOT NULL DEFAULT '',
+    params_hash   TEXT NOT NULL DEFAULT '',
+    params_summary TEXT NOT NULL DEFAULT '',
+    approval_id   TEXT NOT NULL DEFAULT '',
+    outcome       TEXT NOT NULL DEFAULT '',
+    error_code    TEXT NOT NULL DEFAULT '',
+    http_status   INTEGER NOT NULL DEFAULT 0,
+    upstream_status INTEGER NOT NULL DEFAULT 0,
+    latency_ms    INTEGER NOT NULL DEFAULT 0,
+    client_ip     TEXT NOT NULL DEFAULT '',
+    detail        TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_audit_actor ON mcp_audit(actor, ts);
+CREATE INDEX IF NOT EXISTS idx_mcp_audit_service ON mcp_audit(service_id, tool, ts);
+CREATE INDEX IF NOT EXISTS idx_mcp_audit_approval ON mcp_audit(approval_id, ts);
