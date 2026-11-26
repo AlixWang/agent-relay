@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/AlixWang/agent-relay/internal/mcpgateway"
+	"github.com/AlixWang/agent-relay/internal/mcpgateway/services/bing"
+	"github.com/AlixWang/agent-relay/internal/resources"
 )
 
 func TestMCPRoutesAndAdminAuth(t *testing.T) {
@@ -87,4 +89,98 @@ func doRaw(t *testing.T, h http.Handler, method, path string, body any, token st
 	var out map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
 	return rec.Code, out
+}
+
+func TestMCPLiveSecretAndConfigIntegration(t *testing.T) {
+	f := newFixture(t)
+	resSvc, err := resources.New(f.srv.st, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.srv.SetResources(resSvc)
+
+	creds := mcpgateway.NewCredentials(resSvc)
+	cfg := mcpgateway.DefaultConfig()
+	cfg.Enabled = false
+	cfg.Write.Enabled = false
+	cfg.Services = map[string]mcpgateway.ServiceConfig{
+		mcpgateway.ServiceBing: cfg.Service(mcpgateway.ServiceBing),
+	}
+	cfg.Write.Services = map[string]mcpgateway.WriteServiceConfig{
+		mcpgateway.ServiceBing: cfg.Write.Services[mcpgateway.ServiceBing],
+	}
+	mcpSrv, err := mcpgateway.New(mcpgateway.Options{
+		Config: cfg, Store: f.srv.st, Auth: f.srv.auth, MinProtocol: 1, Credentials: creds,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mcpSrv.Registry().Register(bing.New(bing.Options{
+		CredentialRef: mcpgateway.CredentialBing,
+		Credentials:   creds,
+		Upstream:      mcpSrv.Upstream(),
+		MaxRows:       cfg.MaxRowsPerCall,
+		BatchCap:      cfg.BatchCapFor(mcpgateway.ServiceBing),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := mcpSrv.ValidateConfig(); err != nil {
+		t.Fatal(err)
+	}
+	f.srv.SetMCP(mcpSrv)
+	f.mux = f.srv.Handler(nil)
+	cookie := f.adminLogin(t)
+
+	// 1. Initially missing secret -> credential_configured=false, effective_enabled=false.
+	code, out := f.doCookie(t, http.MethodGet, "/admin/mcp/services", nil, cookie)
+	if code != 200 {
+		t.Fatalf("GET /admin/mcp/services: %d %+v", code, out)
+	}
+	svc := out["services"].([]any)[0].(map[string]any)
+	if svc["credential_configured"] != false || svc["effective_enabled"] != false {
+		t.Fatalf("expected missing credential state, got %+v", svc)
+	}
+
+	// 2. Save secret through console Resource Hub route -> live activation without restart.
+	code, out = f.doCookie(t, http.MethodPut, "/admin/resources/secret/BING_WM_API_KEY", map[string]any{
+		"description": "bing api key",
+		"value":       "super-secret-bing-key",
+	}, cookie)
+	if code != 200 || out["ok"] != true {
+		t.Fatalf("PUT /admin/resources/secret/BING_WM_API_KEY: %d %+v", code, out)
+	}
+	code, out = f.doCookie(t, http.MethodGet, "/admin/mcp/services", nil, cookie)
+	if code != 200 {
+		t.Fatalf("GET /admin/mcp/services after put: %d %+v", code, out)
+	}
+	svc = out["services"].([]any)[0].(map[string]any)
+	if svc["credential_configured"] != true || svc["effective_enabled"] != true {
+		t.Fatalf("expected live credential activation after secret PUT, got %+v", svc)
+	}
+
+	// 3. Delete secret -> invalidates MCP cache and flips back to missing.
+	code, _ = f.doCookie(t, http.MethodDelete, "/admin/resources/secret/BING_WM_API_KEY", nil, cookie)
+	if code != 200 {
+		t.Fatalf("DELETE /admin/resources/secret/BING_WM_API_KEY: %d", code)
+	}
+	code, out = f.doCookie(t, http.MethodGet, "/admin/mcp/services", nil, cookie)
+	if code != 200 {
+		t.Fatalf("GET /admin/mcp/services after delete: %d", code)
+	}
+	svc = out["services"].([]any)[0].(map[string]any)
+	if svc["credential_configured"] != false || svc["effective_enabled"] != false {
+		t.Fatalf("expected missing credential after delete, got %+v", svc)
+	}
+
+	// 4. Console runtime config toggles reflect immediately in /admin/stats.
+	code, out = f.doCookie(t, http.MethodPut, "/admin/mcp/config", map[string]any{
+		"enabled": true, "write_enabled": true,
+	}, cookie)
+	if code != 200 || out["enabled"] != true || out["write_enabled"] != true {
+		t.Fatalf("PUT /admin/mcp/config: %d %+v", code, out)
+	}
+	code, stats := f.doCookie(t, http.MethodGet, "/admin/stats", nil, cookie)
+	if code != 200 || stats["mcp_enabled"] != true || stats["mcp_write_enabled"] != true {
+		t.Fatalf("GET /admin/stats after mcp config update: %d %+v", code, stats)
+	}
 }

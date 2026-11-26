@@ -2660,3 +2660,12 @@ button.ack-badge:is(.ok, .warn) {
 .mcp-params { max-width: 360px; max-height: 120px; overflow: auto; margin: 0 0 4px; padding: 6px 8px;
   white-space: pre-wrap; word-break: break-word; font-size: 11px; background: var(--bg-soft, rgba(127,127,127,.08));
   border-radius: 6px; }
+.mcp-policy-bar { background: var(--bg-subtle); border-bottom: 1px solid var(--border); }
+.mcp-switches { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-4); }
+.mcp-section { display: flex; flex-direction: column; gap: var(--s-2); margin-top: var(--s-3); }
+.mcp-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); font-size: var(--fs-sm); font-weight: var(--fw-medium); color: var(--fg-2); }
+.mcp-perm-row { display: flex; flex-direction: column; gap: 2px; padding: 6px 4px; border-bottom: 1px solid var(--border-soft); }
+.mcp-perm-row:last-child { border-bottom: 0; }
+.mcp-perm-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.mcp-perm-meta { padding-left: 22px; color: var(--muted); font-size: var(--fs-xs); line-height: 1.4; }
+.mcp-actions-cell { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }

@@ -52,22 +52,20 @@ const (
 	protocolVersion = 1
 )
 
-// disableMCPServicesWithoutCredentials applies the design v5 §6 startup rule:
-// a missing credential disables only that service; the gateway and the other
-// services still start. Only the reference name is logged, never the value.
-func disableMCPServicesWithoutCredentials(cfg *mcpgateway.Config, creds *mcpgateway.Credentials) {
+// warnMissingMCPCredentials logs a startup notice when an enabled service has
+// no configured secret yet. Services remain enabled so operators can configure
+// the secret live in the console (Resource Hub) without restarting the server.
+// Only the reference name is logged, never any secret value.
+func warnMissingMCPCredentials(cfg mcpgateway.Config, creds *mcpgateway.Credentials) {
 	for id, svc := range cfg.Services {
 		if !svc.Enabled {
 			continue
 		}
 		if svc.CredentialRef == "" {
-			svc.Enabled = false
-			log.Printf("WARN: mcp gateway service %s disabled: no credential_ref", id)
+			log.Printf("WARN: mcp gateway service %s has no credential_ref; configure it before calling tools", id)
 		} else if _, err := creds.Resolve(svc.CredentialRef); err != nil {
-			svc.Enabled = false
-			log.Printf("WARN: mcp gateway service %s disabled: %s unavailable", id, svc.CredentialRef)
+			log.Printf("WARN: mcp gateway service %s credential %s not yet configured; configure it in the console without restarting", id, svc.CredentialRef)
 		}
-		cfg.Services[id] = svc
 	}
 }
 
@@ -165,12 +163,6 @@ func main() {
 	}
 	mcpCreds := mcpgateway.NewCredentials(secretResolver)
 	mcpCfg := cfg.MCPGateway
-	// Design v5 §6: a missing service credential disables only that service;
-	// the gateway and the rest of the relay still start. Values are never
-	// logged (the message carries the reference name only).
-	if mcpCfg.Enabled {
-		disableMCPServicesWithoutCredentials(&mcpCfg, mcpCreds)
-	}
 	mcpSrv, err := mcpgateway.New(mcpgateway.Options{
 		Config: mcpCfg, Store: st, Auth: au, MinProtocol: cfg.MinClient,
 		MaxBodyBytes: cfg.MaxBodyBytes, Credentials: mcpCreds,
@@ -207,6 +199,9 @@ func main() {
 	}
 	if err := mcpSrv.ValidateConfig(); err != nil {
 		log.Fatalf("mcp gateway: %v", err)
+	}
+	if mcpSrv.Enabled() {
+		warnMissingMCPCredentials(mcpSrv.Config(), mcpCreds)
 	}
 
 	p := presence.New(st, int64(cfg.OnlineTimeoutSecs), cfg.OfflineWebhookURL)

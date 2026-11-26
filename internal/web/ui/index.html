@@ -972,11 +972,21 @@
       <section id="page-mcp" class="page" hidden>
         <div class="stats">
           <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-activity"/></svg>网关</span><b id="mcpEnabled">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-sliders"/></svg>写总开关</span><b id="mcpWriteEnabled">-</b></div>
           <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-shield"/></svg>待批准</span><b id="mcpPending">-</b></div>
-          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-key"/></svg>外部 Key</span><b id="mcpKeys">-</b></div>
-          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-server"/></svg>服务</span><b id="mcpServices">-</b></div>
+          <div class="stat"><span class="stat-label"><svg class="icon xs"><use href="#i-key"/></svg>外部 Key</span><b><span id="mcpKeys">-</span> <small>· <span id="mcpServices">-</span> 服务</small></b></div>
         </div>
         <div class="panel">
+          <div class="panel-bar mcp-policy-bar" id="mcpPolicyBar">
+            <div class="bar-left mcp-switches">
+              <label class="switch"><input type="checkbox" id="mcpToggleEnabled"><span></span>网关总开关</label>
+              <label class="switch"><input type="checkbox" id="mcpToggleWrite"><span></span>写总开关</label>
+              <button type="button" class="btn btn-ghost btn-xs" id="mcpResetPolicy" hidden>恢复默认配置</button>
+            </div>
+            <div class="bar-right">
+              <span class="muted xs">运行时修改立即生效并持久化到数据库，无需重启</span>
+            </div>
+          </div>
           <div class="panel-bar">
             <div class="seg" id="mcpSeg" role="tablist">
               <button data-v="services" class="on">服务</button>
@@ -1289,6 +1299,49 @@
     <div class="modal-foot">
       <button type="button" class="btn btn-ghost" data-close>关闭</button>
       <button type="submit" class="btn btn-primary" id="mcpKeyBtn" value="go"><svg class="icon"><use href="#i-key"/></svg>签发</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ MCP credential dialog ============ -->
+<dialog id="mcpCredDlg" class="modal" aria-labelledby="mcpCredTitle">
+  <form method="dialog" id="mcpCredForm" autocomplete="off">
+    <div class="modal-head">
+      <svg class="icon" style="color: var(--muted)"><use href="#i-lock"/></svg>
+      <div><h2 id="mcpCredTitle">配置服务凭证</h2><p class="muted xs">保存在资源中心（AES-GCM 加密，非环境变量），提交后立即生效，无需重启</p></div>
+    </div>
+    <div class="field">密钥名称（Secret Ref）<code id="mcpCredName">—</code></div>
+    <div class="alert alert-info" id="mcpCredHintBox"><svg class="icon"><use href="#i-info"/></svg><span id="mcpCredHint"></span></div>
+    <label class="field">密钥值（写后不回显）<textarea id="mcpCredValue" rows="6" placeholder="粘贴 API Key 或 Google ADC JSON" autocomplete="off" spellcheck="false" required></textarea></label>
+    <label class="field">备注说明（可选）<input id="mcpCredDesc" maxlength="500" placeholder="例如：生产账号凭证" autocomplete="off"></label>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" id="mcpCredGoRes">去资源中心</button>
+      <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <button type="submit" class="btn btn-primary" id="mcpCredBtn" value="go"><svg class="icon"><use href="#i-key"/></svg>保存并生效</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ MCP service permissions dialog ============ -->
+<dialog id="mcpPermDlg" class="modal" aria-labelledby="mcpPermTitle">
+  <form method="dialog" id="mcpPermForm">
+    <div class="modal-head">
+      <svg class="icon" style="color: var(--muted)"><use href="#i-sliders"/></svg>
+      <div><h2 id="mcpPermTitle">服务权限配置</h2><p class="muted xs" id="mcpPermSub">管理服务开关、允许的写工具及读工具白名单</p></div>
+    </div>
+    <label class="switch"><input type="checkbox" id="mcpPermEnabled"><span></span>启用该服务</label>
+    <div class="alert alert-warn" id="mcpPermWriteWarn" hidden><svg class="icon"><use href="#i-alert"/></svg><span>全局「写总开关」当前处于关闭状态；下面的写白名单会保存，开启写总开关后生效。</span></div>
+    <div class="mcp-section">
+      <div class="mcp-section-head"><span>写工具白名单</span><small class="muted xs">必须逐个勾选；高风险写仍需人工二次批准</small></div>
+      <div id="mcpPermWriteList" class="grant-list"></div>
+    </div>
+    <div class="mcp-section">
+      <div class="mcp-section-head"><span>读工具白名单</span><label class="check"><input type="checkbox" id="mcpPermReadAll">允许全部读工具 (*)</label></div>
+      <div id="mcpPermReadList" class="grant-list"></div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <button type="submit" class="btn btn-primary" id="mcpPermBtn" value="go">保存策略</button>
     </div>
   </form>
 </dialog>

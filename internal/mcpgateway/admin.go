@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +28,9 @@ func (s *Server) AdminHandler() http.Handler {
 func (s *Server) buildAdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/mcp/services", s.adminServices)
+	mux.HandleFunc("PUT /admin/mcp/services/{id}", s.adminPutService)
+	mux.HandleFunc("PUT /admin/mcp/config", s.adminPutConfig)
+	mux.HandleFunc("DELETE /admin/mcp/config", s.adminResetConfig)
 	mux.HandleFunc("GET /admin/mcp/tools", s.adminTools)
 	mux.HandleFunc("GET /admin/mcp/keys", s.adminListKeys)
 	mux.HandleFunc("POST /admin/mcp/keys", s.adminCreateKey)
@@ -75,46 +80,180 @@ func (s *Server) auditAdmin(action, detail string) {
 	s.auditor.RecordAdmin(action, detail)
 }
 
-// ---- services / tools ----
+// ---- services / tools / runtime policy ----
+
+func (s *Server) serviceAdminView(cfg Config, info ServiceInfo, now int64) map[string]any {
+	cfgSvc := cfg.Service(info.ID)
+	writeAllowed := append([]string(nil), cfg.writeService(info.ID).AllowedTools...)
+	if writeAllowed == nil {
+		writeAllowed = []string{}
+	}
+	allowedTools := append([]string(nil), cfgSvc.AllowedTools...)
+	if allowedTools == nil {
+		allowedTools = []string{}
+	}
+	credName, credErr := ParseSecretRef(cfgSvc.CredentialRef)
+	if credErr != nil {
+		credName = ""
+	}
+	credConfigured, credRequired := s.serviceCredentialStatus(info, cfgSvc)
+
+	readTools := make([]map[string]any, 0)
+	writeTools := make([]map[string]any, 0)
+	enabledToolCount := 0
+	for _, t := range info.Tools {
+		enabled := cfg.toolAllowed(info.ID, t)
+		if enabled {
+			enabledToolCount++
+		}
+		if WriteTool(t) {
+			writeTools = append(writeTools, map[string]any{
+				"name":         t.Name,
+				"risk":         t.Risk,
+				"destructive":  t.Destructive,
+				"description":  t.Description,
+				"in_allowlist": slices.Contains(writeAllowed, t.Name),
+				"enabled":      enabled,
+			})
+		} else {
+			readTools = append(readTools, map[string]any{
+				"name":        t.Name,
+				"description": t.Description,
+				"enabled":     enabled,
+			})
+		}
+	}
+	sort.Slice(readTools, func(i, j int) bool { return readTools[i]["name"].(string) < readTools[j]["name"].(string) })
+	sort.Slice(writeTools, func(i, j int) bool { return writeTools[i]["name"].(string) < writeTools[j]["name"].(string) })
+
+	entry := map[string]any{
+		"id": info.ID, "display_name": info.DisplayName, "version": info.Version,
+		"prefix": info.Prefix, "enabled": cfgSvc.Enabled, "registered": true,
+		"effective_enabled":     cfgSvc.Enabled && (!credRequired || credConfigured),
+		"credential_ref":        cfgSvc.CredentialRef,
+		"credential_name":       credName,
+		"credential_configured": credConfigured,
+		"credential_required":   credRequired,
+		"allowed_tools":         allowedTools,
+		"tool_count":            info.ToolCount,
+		"enabled_tool_count":    enabledToolCount,
+		"write_enabled":         cfg.Write.Enabled,
+		"write_allowed_tools":   writeAllowed,
+		"read_tools":            readTools,
+		"write_tools":           writeTools,
+	}
+	recent, _, err := s.st.ListMCPAudit(store.MCPAuditFilter{ServiceID: info.ID}, 50, 0)
+	if err == nil {
+		for _, a := range recent {
+			if _, ok := entry["last_call_at"]; !ok {
+				entry["last_call_at"] = a.Ts
+			}
+			if (a.Outcome == "error" || a.Outcome == "denied") && entry["last_error"] == nil {
+				entry["last_error"] = map[string]any{
+					"ts": a.Ts, "tool": a.Tool, "code": a.ErrorCode, "outcome": a.Outcome,
+				}
+			}
+		}
+	}
+	entry["now"] = now
+	return entry
+}
 
 func (s *Server) adminServices(w http.ResponseWriter, r *http.Request) {
+	cfg := s.snapshotConfig()
 	now := s.now().Unix()
 	out := []map[string]any{}
 	for _, info := range s.registry.List() {
-		cfgSvc := s.cfg.Service(info.ID)
-		entry := map[string]any{
-			"id": info.ID, "display_name": info.DisplayName, "version": info.Version,
-			"prefix": info.Prefix, "enabled": cfgSvc.Enabled, "registered": true,
-			"credential_ref": cfgSvc.CredentialRef, "allowed_tools": cfgSvc.AllowedTools,
-			"tool_count": info.ToolCount, "enabled_tool_count": 0,
-			"write_enabled":       s.cfg.Write.Enabled,
-			"write_allowed_tools": s.cfg.writeService(info.ID).AllowedTools,
-		}
-		for _, t := range info.Tools {
-			if s.cfg.toolAllowed(info.ID, t) {
-				entry["enabled_tool_count"] = entry["enabled_tool_count"].(int) + 1
-			}
-		}
-		recent, _, err := s.st.ListMCPAudit(store.MCPAuditFilter{ServiceID: info.ID}, 50, 0)
-		if err == nil {
-			for _, a := range recent {
-				if _, ok := entry["last_call_at"]; !ok {
-					entry["last_call_at"] = a.Ts
-				}
-				if (a.Outcome == "error" || a.Outcome == "denied") && entry["last_error"] == nil {
-					entry["last_error"] = map[string]any{
-						"ts": a.Ts, "tool": a.Tool, "code": a.ErrorCode, "outcome": a.Outcome,
-					}
-				}
-			}
-		}
-		entry["now"] = now
-		out = append(out, entry)
+		out = append(out, s.serviceAdminView(cfg, info, now))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "services": out})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "services": out, "has_runtime_overrides": s.hasRuntimeOverrides(),
+	})
+}
+
+type putConfigRequest struct {
+	Enabled      *bool `json:"enabled"`
+	WriteEnabled *bool `json:"write_enabled"`
+}
+
+func (s *Server) adminPutConfig(w http.ResponseWriter, r *http.Request) {
+	var req putConfigRequest
+	if !s.readAdminJSON(w, r, &req) {
+		return
+	}
+	if req.Enabled == nil && req.WriteEnabled == nil {
+		writeErr(w, http.StatusBadRequest, "enabled or write_enabled is required")
+		return
+	}
+	cfg, hasOverrides, err := s.applyRuntimeConfigUpdate(req.Enabled, req.WriteEnabled)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not save MCP config")
+		return
+	}
+	s.auditAdmin("mcp.config_update", fmt.Sprintf("enabled=%t write_enabled=%t", cfg.Enabled, cfg.Write.Enabled))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "enabled": cfg.Enabled, "write_enabled": cfg.Write.Enabled,
+		"has_runtime_overrides": hasOverrides,
+	})
+}
+
+func (s *Server) adminResetConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.resetRuntimePolicy()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not reset MCP config")
+		return
+	}
+	s.auditAdmin("mcp.config_reset", fmt.Sprintf("enabled=%t write_enabled=%t", cfg.Enabled, cfg.Write.Enabled))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "enabled": cfg.Enabled, "write_enabled": cfg.Write.Enabled,
+		"has_runtime_overrides": false,
+	})
+}
+
+type putServiceRequest struct {
+	Enabled           *bool     `json:"enabled"`
+	AllowedTools      *[]string `json:"allowed_tools"`
+	WriteAllowedTools *[]string `json:"write_allowed_tools"`
+}
+
+func (s *Server) adminPutService(w http.ResponseWriter, r *http.Request) {
+	serviceID := r.PathValue("id")
+	var req putServiceRequest
+	if !s.readAdminJSON(w, r, &req) {
+		return
+	}
+	if req.Enabled == nil && req.AllowedTools == nil && req.WriteAllowedTools == nil {
+		writeErr(w, http.StatusBadRequest, "at least one field (enabled, allowed_tools, write_allowed_tools) is required")
+		return
+	}
+	cfg, err := s.applyRuntimeServiceUpdate(serviceID, req.Enabled, req.AllowedTools, req.WriteAllowedTools)
+	if err != nil {
+		switch {
+		case errors.Is(err, errUnknownService):
+			writeErr(w, http.StatusNotFound, "unknown MCP service")
+		case errors.Is(err, errPolicyPersist):
+			writeErr(w, http.StatusInternalServerError, "could not save MCP service policy")
+		default:
+			writeErr(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	info, _ := s.registry.ServiceInfo(serviceID)
+	cfgSvc := cfg.Service(serviceID)
+	wSvc := cfg.writeService(serviceID)
+	s.auditAdmin("mcp.service_update", fmt.Sprintf(
+		"service=%s enabled=%t allowed_tools=%s write_allowed_tools=%s",
+		serviceID, cfgSvc.Enabled, strings.Join(cfgSvc.AllowedTools, ","), strings.Join(wSvc.AllowedTools, ","),
+	))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                    true,
+		"service":               s.serviceAdminView(cfg, info, s.now().Unix()),
+		"has_runtime_overrides": s.hasRuntimeOverrides(),
+	})
 }
 
 func (s *Server) adminTools(w http.ResponseWriter, r *http.Request) {
+	cfg := s.snapshotConfig()
 	out := []map[string]any{}
 	for _, info := range s.registry.List() {
 		for _, t := range s.registry.ToolsFor(info.ID) {
@@ -122,7 +261,7 @@ func (s *Server) adminTools(w http.ResponseWriter, r *http.Request) {
 				"service_id": info.ID, "name": t.Name, "aggregate_name": AggregateName(info.Prefix, t.Name),
 				"description": t.Description, "risk": t.Risk, "read_only": t.ReadOnly,
 				"destructive": t.Destructive, "idempotent": t.Idempotent, "open_world": t.OpenWorld,
-				"enabled": s.cfg.toolAllowed(info.ID, t),
+				"enabled": cfg.toolAllowed(info.ID, t),
 				"scope":   fmt.Sprintf("mcp:%s:%s:%s", info.ID, RiskClass(t), t.Name),
 			})
 		}
@@ -191,10 +330,11 @@ func (s *Server) adminCreateKey(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "name is required (1-80 printable characters)")
 		return
 	}
+	cfg := s.snapshotConfig()
 	if len(req.Scopes) == 0 {
 		// #25: a new key defaults to read-only across configured services.
 		for _, info := range s.registry.List() {
-			if s.cfg.serviceEnabled(info.ID) {
+			if cfg.serviceEnabled(info.ID) {
 				req.Scopes = append(req.Scopes, fmt.Sprintf("mcp:%s:read:*", info.ID))
 			}
 		}
@@ -210,7 +350,7 @@ func (s *Server) adminCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	days := req.ExpiresInDays
 	if days == 0 {
-		days = keyTTLDays(scopes, s.cfg.Keys)
+		days = keyTTLDays(scopes, cfg.Keys)
 	}
 	if len(req.Note) > 500 {
 		writeErr(w, http.StatusBadRequest, "note is too long")
@@ -269,13 +409,14 @@ func (s *Server) adminRotateKey(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "could not generate key id")
 		return
 	}
-	days := keyTTLDays(old.Scopes, s.cfg.Keys)
+	cfg := s.snapshotConfig()
+	days := keyTTLDays(old.Scopes, cfg.Keys)
 	row := &store.MCPKey{
 		ID: newID, PrincipalType: "key", Name: old.Name, KeyPrefix: prefix, KeyHash: hash,
 		Scopes: old.Scopes, Status: "active", Note: old.Note, CreatedBy: "admin",
 		CreatedAt: now, ExpiresAt: now + int64(days)*86400, RotatedFrom: old.ID,
 	}
-	grace := s.cfg.Keys.normalized().RotateGraceSecs
+	grace := cfg.Keys.normalized().RotateGraceSecs
 	var graceRevokeAt int64
 	if grace > 0 {
 		graceRevokeAt = now + int64(grace)
@@ -681,7 +822,8 @@ func (s *Server) adminDryRun(w http.ResponseWriter, r *http.Request) {
 	if len(req.Params) == 0 {
 		req.Params = json.RawMessage(`{}`)
 	}
-	enabled := s.cfg.toolAllowed(rt.ServiceID, rt.Tool)
+	cfg := s.snapshotConfig()
+	enabled := cfg.toolAllowed(rt.ServiceID, rt.Tool)
 	if rt.Tool.Validate != nil {
 		if err := rt.Tool.Validate(req.Params); err != nil {
 			e := AsError(err)
@@ -697,12 +839,13 @@ func (s *Server) adminDryRun(w http.ResponseWriter, r *http.Request) {
 	s.auditAdmin("mcp.dry_run", fmt.Sprintf("service=%s tool=%s valid=true", rt.ServiceID, rt.Name))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "valid": true, "service": rt.ServiceID, "tool": rt.Name,
-		"risk": rt.Tool.Risk, "tool_enabled": enabled, "write_enabled": s.cfg.Write.Enabled,
-		"params_hash": hash, "would_require_approval": rt.Tool.Risk == RiskHigh && s.cfg.Write.Enabled,
+		"risk": rt.Tool.Risk, "tool_enabled": enabled, "write_enabled": cfg.Write.Enabled,
+		"params_hash": hash, "would_require_approval": rt.Tool.Risk == RiskHigh && cfg.Write.Enabled,
 	})
 }
 
 func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
+	cfg := s.snapshotConfig()
 	now := s.now().Unix()
 	pending := s.PendingApprovals()
 	keys, _ := s.st.ListMCPKeys()
@@ -714,15 +857,22 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	services := []map[string]any{}
 	for _, info := range s.registry.List() {
+		cfgSvc := cfg.Service(info.ID)
+		credConfigured, _ := s.serviceCredentialStatus(info, cfgSvc)
+		effEnabled, _ := s.serviceEffectiveEnabled(cfg, info.ID)
 		services = append(services, map[string]any{
-			"id": info.ID, "enabled": s.cfg.serviceEnabled(info.ID),
-			"tool_count": info.ToolCount,
+			"id":                    info.ID,
+			"enabled":               cfgSvc.Enabled,
+			"effective_enabled":     effEnabled,
+			"credential_configured": credConfigured,
+			"tool_count":            info.ToolCount,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "version": Version, "enabled": s.cfg.Enabled, "write_enabled": s.cfg.Write.Enabled,
-		"pending_approvals": pending, "keys": activeKeys, "services": services,
-		"protocol_versions": supportedVersions, "batch_cap": s.cfg.Write.BatchCap,
+		"ok": true, "version": Version, "enabled": cfg.Enabled, "write_enabled": cfg.Write.Enabled,
+		"has_runtime_overrides": s.hasRuntimeOverrides(),
+		"pending_approvals":     pending, "keys": activeKeys, "services": services,
+		"protocol_versions": supportedVersions, "batch_cap": cfg.Write.BatchCap,
 	})
 }
 

@@ -24,12 +24,13 @@ type registeredService struct {
 
 // ServiceInfo is the safe admin view of one registered service.
 type ServiceInfo struct {
-	ID          string
-	DisplayName string
-	Version     string
-	Prefix      string
-	ToolCount   int
-	Tools       []Tool
+	ID             string
+	DisplayName    string
+	Version        string
+	Prefix         string
+	CredentialRefs []string
+	ToolCount      int
+	Tools          []Tool
 }
 
 // ResolvedTool is one tool resolved from an endpoint name.
@@ -137,7 +138,8 @@ func (r *Registry) ServiceInfo(id string) (ServiceInfo, bool) {
 	}
 	return ServiceInfo{
 		ID: rs.svc.ID(), DisplayName: rs.svc.DisplayName(), Version: rs.svc.Version(),
-		Prefix: rs.prefix, ToolCount: len(tools), Tools: tools,
+		Prefix: rs.prefix, CredentialRefs: append([]string(nil), rs.svc.CredentialRefs()...),
+		ToolCount: len(tools), Tools: tools,
 	}, true
 }
 

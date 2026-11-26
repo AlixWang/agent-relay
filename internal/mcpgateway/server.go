@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AlixWang/agent-relay/internal/auth"
@@ -35,6 +37,9 @@ type Options struct {
 // Server owns routing, auth, policy, approvals, limits, and audit for the MCP
 // endpoint family.
 type Server struct {
+	cfgMu        sync.RWMutex
+	baseCfg      Config
+	policy       runtimePolicy
 	cfg          Config
 	st           store.Store
 	registry     *Registry
@@ -52,7 +57,7 @@ type Server struct {
 }
 
 func New(opts Options) (*Server, error) {
-	cfg := fillConfigDefaults(opts.Config)
+	cfg := fillConfigDefaults(opts.Config).Clone()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -69,7 +74,7 @@ func New(opts Options) (*Server, error) {
 		maxBody = 1 << 20
 	}
 	s := &Server{
-		cfg: cfg, st: opts.Store, registry: reg,
+		baseCfg: cfg.Clone(), cfg: cfg, st: opts.Store, registry: reg,
 		authn:        NewAuthenticator(opts.Store, opts.Auth, minProto),
 		approval:     NewApprovalManager(opts.Store, cfg),
 		auditor:      NewAuditor(opts.Store, cfg),
@@ -79,6 +84,7 @@ func New(opts Options) (*Server, error) {
 		maxBodyBytes: maxBody,
 		clientIP:     opts.ClientIP, now: time.Now,
 	}
+	s.loadRuntimePolicy()
 	if s.clientIP == nil {
 		s.clientIP = func(r *http.Request) string {
 			host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -148,11 +154,31 @@ func fillConfigDefaults(c Config) Config {
 	return c
 }
 
+func (s *Server) snapshotConfig() Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg.Clone()
+}
+
+func (s *Server) hasRuntimeOverrides() bool {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return !s.policy.isEmpty()
+}
+
 // Enabled reports the gateway master switch (console badge/stats).
-func (s *Server) Enabled() bool { return s.cfg.Enabled }
+func (s *Server) Enabled() bool {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg.Enabled
+}
 
 // WriteEnabled reports the write master switch.
-func (s *Server) WriteEnabled() bool { return s.cfg.Write.Enabled }
+func (s *Server) WriteEnabled() bool {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg.Write.Enabled
+}
 
 // RevokePeerGrant materializes peer deactivation (design v5 §4.5): when the
 // operator suspends/retires a peer, its mcp_keys peer row becomes revoked.
@@ -182,13 +208,29 @@ func (s *Server) PendingApprovals() int {
 func (s *Server) Registry() *Registry { return s.registry }
 
 // Config returns a copy of the effective config.
-func (s *Server) Config() Config { return s.cfg }
+func (s *Server) Config() Config { return s.snapshotConfig() }
 
 // Upstream exposes the shared HTTP client to service constructors.
 func (s *Server) Upstream() *Upstream { return s.upstream }
 
-// ValidateConfig performs registry-dependent startup checks.
-func (s *Server) ValidateConfig() error { return s.cfg.ValidateAgainst(s.registry) }
+// ValidateConfig performs registry-dependent startup checks and prunes any
+// stale runtime overrides referencing unregistered services or tools.
+func (s *Server) ValidateConfig() error {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	if err := s.baseCfg.ValidateAgainst(s.registry); err != nil {
+		return err
+	}
+	sanitized, changed := sanitizeRuntimePolicy(s.registry, s.policy)
+	if changed {
+		if err := s.saveRuntimePolicyLocked(sanitized); err != nil {
+			log.Printf("WARN: could not save sanitized mcp runtime policy: %v", err)
+		}
+	}
+	s.policy = sanitized
+	s.cfg = mergeRuntimePolicy(s.baseCfg, s.policy)
+	return nil
+}
 
 // SetClientIP overrides the IP extractor; internal/gateway passes its
 // trusted-proxy-aware version so audit rows do not record the reverse proxy.
@@ -265,8 +307,9 @@ func (s *Server) buildMCPHandler() http.Handler {
 }
 
 func (s *Server) handlePublicHealth(w http.ResponseWriter) {
+	cfg := s.snapshotConfig()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "enabled": s.cfg.Enabled, "write_enabled": s.cfg.Write.Enabled,
+		"ok": true, "enabled": cfg.Enabled, "write_enabled": cfg.Write.Enabled,
 	})
 }
 
@@ -311,7 +354,7 @@ type rpcError struct {
 
 func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request, serviceID string) {
 	start := time.Now()
-	if !s.cfg.Enabled {
+	if !s.Enabled() {
 		e := NewError(CodeServiceDisabled, "MCP gateway is disabled", http.StatusServiceUnavailable)
 		writeRPCError(w, http.StatusServiceUnavailable, nil, -32003, e.Code, e.Message, nil)
 		return
@@ -428,13 +471,16 @@ func (s *Server) handleInitialize(w http.ResponseWriter, req rpcRequest) {
 }
 
 func (s *Server) handleToolsList(w http.ResponseWriter, req rpcRequest, serviceID string, actor Actor, requestID string, start time.Time, r *http.Request) {
-	tools := s.visibleTools(serviceID, actor)
-	if serviceID != "" && !s.cfg.serviceEnabled(serviceID) {
-		e := NewError(CodeServiceDisabled, "service is disabled", http.StatusForbidden)
-		s.recordDenied(r, actor, "/mcp/"+serviceID, serviceID, "", "", "", "", requestID, e)
-		writeRPCError(w, http.StatusForbidden, req.ID, -32003, e.Code, e.Message, nil)
-		return
+	cfg := s.snapshotConfig()
+	if serviceID != "" {
+		if ok, reason := s.serviceEffectiveEnabled(cfg, serviceID); !ok {
+			e := NewError(CodeServiceDisabled, reason, http.StatusForbidden)
+			s.recordDenied(r, actor, "/mcp/"+serviceID, serviceID, "", "", "", "", requestID, e)
+			writeRPCError(w, http.StatusForbidden, req.ID, -32003, e.Code, e.Message, nil)
+			return
+		}
 	}
+	tools := s.visibleTools(cfg, serviceID, actor)
 	out := make([]map[string]any, 0, len(tools))
 	for _, t := range tools {
 		out = append(out, toolDescriptor(t))
@@ -472,13 +518,14 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, req rpcRequest, serviceI
 	if len(bytes.TrimSpace(raw)) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
-	if !s.cfg.serviceEnabled(rt.ServiceID) {
+	cfg := s.snapshotConfig()
+	if !cfg.serviceEnabled(rt.ServiceID) {
 		e := NewError(CodeServiceDisabled, "service is disabled", http.StatusForbidden)
 		s.recordCall(r, actor, endpointLabel(serviceID), rt.ServiceID, rt.Name, rt.Tool.Risk, "", ParamsSummary(raw), "", requestID, start, "denied", e, http.StatusForbidden, nil)
 		writeRPCError(w, http.StatusForbidden, req.ID, -32003, e.Code, e.Message, nil)
 		return
 	}
-	if !s.cfg.toolAllowed(rt.ServiceID, rt.Tool) {
+	if !cfg.toolAllowed(rt.ServiceID, rt.Tool) {
 		e := NewError(CodeToolDisabled, "tool is disabled", http.StatusForbidden)
 		s.recordCall(r, actor, endpointLabel(serviceID), rt.ServiceID, rt.Name, rt.Tool.Risk, "", ParamsSummary(raw), "", requestID, start, "denied", e, http.StatusForbidden, nil)
 		writeRPCError(w, http.StatusForbidden, req.ID, -32003, e.Code, e.Message, nil)
@@ -602,7 +649,7 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, req rpcRequest, serviceI
 }
 
 func (s *Server) execute(parent context.Context, rt *ResolvedTool, call Call) (Result, *Error) {
-	timeout := time.Duration(s.cfg.GatewayTimeoutSecs) * time.Second
+	timeout := time.Duration(s.snapshotConfig().GatewayTimeoutSecs) * time.Second
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	start := time.Now()
@@ -764,22 +811,22 @@ func toolDescriptor(t Tool) map[string]any {
 	return desc
 }
 
-func (s *Server) visibleTools(serviceID string, actor Actor) []Tool {
+func (s *Server) visibleTools(cfg Config, serviceID string, actor Actor) []Tool {
 	var out []Tool
 	if serviceID != "" {
 		for _, t := range s.registry.ToolsFor(serviceID) {
-			if s.toolVisible(serviceID, t, actor) {
+			if toolVisible(cfg, serviceID, t, actor) {
 				out = append(out, t)
 			}
 		}
 		return out
 	}
 	for _, info := range s.registry.List() {
-		if !s.cfg.serviceEnabled(info.ID) {
+		if ok, _ := s.serviceEffectiveEnabled(cfg, info.ID); !ok {
 			continue
 		}
 		for _, t := range s.registry.ToolsFor(info.ID) {
-			if !s.toolVisible(info.ID, t, actor) {
+			if !toolVisible(cfg, info.ID, t, actor) {
 				continue
 			}
 			t.Name = AggregateName(info.Prefix, t.Name)
@@ -790,8 +837,8 @@ func (s *Server) visibleTools(serviceID string, actor Actor) []Tool {
 	return out
 }
 
-func (s *Server) toolVisible(serviceID string, t Tool, actor Actor) bool {
-	if !s.cfg.toolAllowed(serviceID, t) {
+func toolVisible(cfg Config, serviceID string, t Tool, actor Actor) bool {
+	if !cfg.toolAllowed(serviceID, t) {
 		return false
 	}
 	return ScopeMatch(actor.Scopes, serviceID, RiskClass(t), t.Name)

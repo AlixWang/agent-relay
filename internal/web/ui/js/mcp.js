@@ -7,6 +7,10 @@ const state = {
   page: 1,
   pageSize: 20,
   refreshSeq: 0,
+  health: null,
+  services: [],
+  credTarget: null,
+  permTarget: null,
   audit: { actor: '', service: '', tool: '', outcome: '' },
 };
 
@@ -58,13 +62,29 @@ function shortTime(ts) {
   return ts ? `${fmtTime(ts)} <small class="muted">${esc(ago(ts))}</small>` : '<span class="muted">—</span>';
 }
 
+function secretHintFor(service) {
+  const name = service.credential_name || '';
+  if (name === 'GA_ADSENSE_ADC' || name.endsWith('_ADC')) {
+    return `粘贴 Google OAuth2 authorized_user ADC JSON（包含 type、client_id、client_secret、refresh_token）。AdSense 与 GA 共用此密钥（${name}）。`;
+  }
+  if (name === 'BING_WM_API_KEY') {
+    return '粘贴 Bing Webmaster Tools API Key 原文；保存后立即加密入库。';
+  }
+  return `粘贴 ${service.credential_ref || name} 对应的密钥原文；保存后以 AES-GCM 加密保存在资源中心。`;
+}
+
 async function refreshHealth() {
   try {
     const h = await api('/admin/mcp/health');
-    $('mcpEnabled').textContent = h.enabled ? '开启' : '关闭';
-    $('mcpPending').textContent = h.pending_approvals ?? 0;
-    $('mcpKeys').textContent = h.keys ?? 0;
-    $('mcpServices').textContent = (h.services || []).length;
+    state.health = h;
+    if ($('mcpEnabled')) $('mcpEnabled').textContent = h.enabled ? '开启' : '关闭';
+    if ($('mcpWriteEnabled')) $('mcpWriteEnabled').textContent = h.write_enabled ? '开启' : '关闭';
+    if ($('mcpPending')) $('mcpPending').textContent = h.pending_approvals ?? 0;
+    if ($('mcpKeys')) $('mcpKeys').textContent = h.keys ?? 0;
+    if ($('mcpServices')) $('mcpServices').textContent = (h.services || []).length;
+    if ($('mcpToggleEnabled')) $('mcpToggleEnabled').checked = !!h.enabled;
+    if ($('mcpToggleWrite')) $('mcpToggleWrite').checked = !!h.write_enabled;
+    if ($('mcpResetPolicy')) $('mcpResetPolicy').hidden = !h.has_runtime_overrides;
     const badgeEl = $('mcpApprovalBadge');
     if (badgeEl) {
       badgeEl.hidden = !h.pending_approvals;
@@ -108,28 +128,168 @@ export async function refreshMCP() {
   }
 }
 
+function renderWriteCell(s) {
+  const writeTools = s.write_tools || [];
+  if (!writeTools.length) {
+    return `${badge('只读服务')}<br><small class="muted">无写工具</small>`;
+  }
+  const allow = s.write_allowed_tools || [];
+  const head = s.write_enabled ? badge('写总开关开', 'warn') : badge('写总开关关');
+  const detail = allow.length ? allow.map((t) => `<code>${esc(t)}</code>`).join(', ') : '未允许任何写工具';
+  return `${head}<br><small class="muted">${detail}</small>`;
+}
+
+function renderCredCell(s) {
+  if (!s.credential_required) {
+    return '<span class="muted">无需凭证</span>';
+  }
+  const st = s.credential_configured ? badge('已配置', 'ok') : badge('未配置', 'bad');
+  const ref = s.credential_name || s.credential_ref || '—';
+  return `${st} <code>${esc(ref)}</code><br><small class="muted">资源中心加密密钥</small>`;
+}
+
 async function renderServices(table, seq) {
-  setHeaders(table, ['服务', '网关状态', '工具', '写权限', '凭证引用', '最近调用', '最近错误']);
+  setHeaders(table, ['服务', '状态', '工具', '写权限', '凭证（资源中心密钥）', '最近调用', '操作']);
   skeleton(table, 7);
   const r = await api('/admin/mcp/services');
   if (seq !== state.refreshSeq) return;
   const rows = r.services || [];
+  state.services = rows;
+  if ($('mcpResetPolicy') && r.has_runtime_overrides != null) {
+    $('mcpResetPolicy').hidden = !r.has_runtime_overrides;
+  }
   if (!rows.length) {
     table.querySelector('tbody').innerHTML = `<tr><td colspan="7" class="empty-td"><div class="empty">${icon('server')}<p>尚未注册 MCP 服务</p></div></td></tr>`;
     renderPager($('mcpPager'), { total: 0 });
     return;
   }
-  table.querySelector('tbody').innerHTML = rows.map((s) => `<tr>
-    <td><b>${esc(s.display_name || s.id)}</b><br><code>${esc(s.id)}</code> <span class="muted xs">${esc(s.version || '')}</span></td>
-    <td>${s.enabled ? badge('启用', 'ok') : badge('禁用', 'bad')}<br><small class="muted">${s.registered ? '已注册' : '未注册'}</small></td>
-    <td>${esc(s.enabled_tool_count ?? 0)} / ${esc(s.tool_count ?? 0)}</td>
-    <td>${s.write_enabled ? badge('总开关开', 'warn') : badge('总开关关')}<br><small class="muted">${esc((s.write_allowed_tools || []).join(', ') || '—')}</small></td>
-    <td><code>${esc(s.credential_ref || '—')}</code></td>
-    <td>${shortTime(s.last_call_at)}</td>
-    <td>${s.last_error ? `<span class="badge bad">${esc(s.last_error.code || 'error')}</span><br><small class="muted">${esc(s.last_error.tool || '')} ${esc(ago(s.last_error.ts))}</small>` : '<span class="muted">—</span>'}</td>
-  </tr>`).join('');
-  $('mcpNote').textContent = '写工具还受写总开关、服务白名单、key scope 和二次批准四层控制；这里显示的是配置层。';
+  table.querySelector('tbody').innerHTML = rows.map((s) => {
+    const missingCred = s.enabled && s.credential_required && !s.credential_configured;
+    const errPart = s.last_error
+      ? `<br><span class="badge bad">${esc(s.last_error.code || 'error')}</span> <small class="muted">${esc(s.last_error.tool || '')}</small>`
+      : '';
+    return `<tr>
+      <td><b>${esc(s.display_name || s.id)}</b><br><code>${esc(s.id)}</code> <span class="muted xs">${esc(s.version || '')}</span></td>
+      <td>${s.enabled ? badge('启用', 'ok') : badge('禁用', 'bad')}${missingCred ? ` ${badge('缺凭证', 'warn')}` : ''}<br><small class="muted">${s.effective_enabled ? '可被调用' : s.enabled ? '等待凭证' : '已暂停'}</small></td>
+      <td>${esc(s.enabled_tool_count ?? 0)} / ${esc(s.tool_count ?? 0)}</td>
+      <td>${renderWriteCell(s)}</td>
+      <td>${renderCredCell(s)}</td>
+      <td>${shortTime(s.last_call_at)}${errPart}</td>
+      <td class="td-actions">
+        <div class="mcp-actions-cell">
+          ${s.credential_name ? `<button class="btn btn-outline btn-xs" data-cred="${esc(s.id)}">${s.credential_configured ? '更新凭证' : '配置凭证'}</button>` : ''}
+          <button class="btn btn-outline btn-xs" data-perm="${esc(s.id)}">权限配置</button>
+          <button class="btn btn-ghost btn-xs ${s.enabled ? 'danger' : ''}" data-svc-toggle="${esc(s.id)}" data-next="${s.enabled ? '0' : '1'}">${s.enabled ? '禁用' : '启用'}</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  table.querySelectorAll('button[data-cred]').forEach((b) => {
+    b.onclick = () => {
+      const svc = state.services.find((x) => x.id === b.dataset.cred);
+      if (svc) openCredDialog(svc);
+    };
+  });
+  table.querySelectorAll('button[data-perm]').forEach((b) => {
+    b.onclick = () => {
+      const svc = state.services.find((x) => x.id === b.dataset.perm);
+      if (svc) openPermDialog(svc);
+    };
+  });
+  table.querySelectorAll('button[data-svc-toggle]').forEach((b) => {
+    b.onclick = async () => {
+      const nextEnabled = b.dataset.next === '1';
+      try {
+        await api(`/admin/mcp/services/${encodeURIComponent(b.dataset.svcToggle)}`, {
+          method: 'PUT', body: JSON.stringify({ enabled: nextEnabled }),
+        });
+        toast(nextEnabled ? '服务已启用' : '服务已禁用', 'ok');
+        refreshMCP();
+      } catch (err) { toast('操作失败：' + err.message, 'bad'); }
+    };
+  });
+
+  $('mcpNote').textContent = '凭证存储在「资源中心」加密密钥库中（非环境变量），配置后即时生效；开关与工具白名单保存在数据库，修改无需重启。';
   renderPager($('mcpPager'), { total: 0 });
+}
+
+function openCredDialog(svc) {
+  const dlg = $('mcpCredDlg');
+  if (!dlg) return;
+  state.credTarget = svc;
+  $('mcpCredTitle').textContent = `${svc.credential_configured ? '更新' : '配置'} ${svc.display_name || svc.id} 凭证`;
+  $('mcpCredName').textContent = svc.credential_name || svc.credential_ref || '—';
+  $('mcpCredHint').textContent = secretHintFor(svc);
+  const valEl = $('mcpCredValue');
+  valEl.value = '';
+  valEl.placeholder = (svc.credential_name || '').endsWith('_ADC')
+    ? '{\n  "type": "authorized_user",\n  "client_id": "...",\n  "client_secret": "...",\n  "refresh_token": "..."\n}'
+    : '粘贴密钥原文';
+  $('mcpCredDesc').value = `${svc.display_name || svc.id} MCP gateway credential`;
+  $('mcpCredBtn').disabled = false;
+  dlg.showModal();
+}
+
+function openPermDialog(svc) {
+  const dlg = $('mcpPermDlg');
+  if (!dlg) return;
+  state.permTarget = svc;
+  $('mcpPermTitle').textContent = `权限配置 · ${svc.display_name || svc.id}`;
+  $('mcpPermSub').textContent = `服务 ID: ${svc.id} · 控制服务开关与允许暴露的工具白名单`;
+  $('mcpPermEnabled').checked = !!svc.enabled;
+  const writeTools = svc.write_tools || [];
+  const writeWarn = $('mcpPermWriteWarn');
+  if (writeWarn) {
+    writeWarn.hidden = !writeTools.length || !!svc.write_enabled;
+  }
+
+  const writeBox = $('mcpPermWriteList');
+  if (!writeTools.length) {
+    writeBox.innerHTML = '<div class="muted xs">该服务当前没有已注册写工具（只读服务）。</div>';
+  } else {
+    writeBox.innerHTML = writeTools.map((t) => {
+      const riskLabel = t.risk === 'high' ? badge('高风险 · 需二次批准', 'bad') : badge('低风险写', 'warn');
+      return `<div class="mcp-perm-row">
+        <label class="check mcp-perm-head">
+          <input type="checkbox" data-write-tool="${esc(t.name)}" ${t.in_allowlist ? 'checked' : ''}>
+          <code>${esc(t.name)}</code> ${riskLabel}
+        </label>
+        ${t.description ? `<div class="mcp-perm-meta">${esc(t.description)}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  const readTools = svc.read_tools || [];
+  const allowed = svc.allowed_tools || [];
+  const allowAll = allowed.includes('*');
+  const readSet = new Set(allowed);
+  const readAllEl = $('mcpPermReadAll');
+  readAllEl.checked = allowAll;
+  const readBox = $('mcpPermReadList');
+  if (!readTools.length) {
+    readBox.innerHTML = '<div class="muted xs">无已注册读工具。</div>';
+  } else {
+    readBox.innerHTML = readTools.map((t) => {
+      const checked = allowAll || readSet.has(t.name);
+      return `<div class="mcp-perm-row">
+        <label class="check mcp-perm-head">
+          <input type="checkbox" data-read-tool="${esc(t.name)}" ${checked ? 'checked' : ''} ${allowAll ? 'disabled' : ''}>
+          <code>${esc(t.name)}</code>
+        </label>
+        ${t.description ? `<div class="mcp-perm-meta">${esc(t.description)}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+  readAllEl.onchange = () => {
+    const all = readAllEl.checked;
+    readBox.querySelectorAll('input[data-read-tool]').forEach((cb) => {
+      cb.disabled = all;
+      if (all) cb.checked = true;
+    });
+  };
+  $('mcpPermBtn').disabled = false;
+  dlg.showModal();
 }
 
 async function renderKeys(table, seq) {
@@ -379,6 +539,181 @@ export function initMCP() {
   }
   const refresh = $('mcpRefresh');
   if (refresh) refresh.onclick = refreshMCP;
+
+  const toggleEnabled = $('mcpToggleEnabled');
+  if (toggleEnabled) {
+    toggleEnabled.onchange = async () => {
+      const next = toggleEnabled.checked;
+      if (!next) {
+        const ok = await confirmAction({
+          title: '关闭 MCP 网关总开关？',
+          body: '关闭后 POST /mcp* 会立即返回 503，直到重新开启。',
+          danger: true, okText: '确认关闭',
+        });
+        if (!ok) {
+          toggleEnabled.checked = true;
+          return;
+        }
+      }
+      toggleEnabled.disabled = true;
+      try {
+        await api('/admin/mcp/config', { method: 'PUT', body: JSON.stringify({ enabled: next }) });
+        toast(next ? 'MCP 网关已开启' : 'MCP 网关已关闭', 'ok');
+        refreshMCP();
+      } catch (err) {
+        toggleEnabled.checked = !next;
+        toast('切换失败：' + err.message, 'bad');
+      } finally {
+        toggleEnabled.disabled = false;
+      }
+    };
+  }
+
+  const toggleWrite = $('mcpToggleWrite');
+  if (toggleWrite) {
+    toggleWrite.onchange = async () => {
+      const next = toggleWrite.checked;
+      if (next) {
+        const ok = await confirmAction({
+          title: '开启全局写总开关？',
+          body: '开启后，各服务白名单内的写工具（如 Bing URL/Feed 提交）将被允许调用；高风险写仍需人工二次批准。',
+          danger: false, okText: '确认开启',
+        });
+        if (!ok) {
+          toggleWrite.checked = false;
+          return;
+        }
+      }
+      toggleWrite.disabled = true;
+      try {
+        await api('/admin/mcp/config', { method: 'PUT', body: JSON.stringify({ write_enabled: next }) });
+        toast(next ? '写总开关已开启' : '写总开关已关闭', 'ok');
+        refreshMCP();
+      } catch (err) {
+        toggleWrite.checked = !next;
+        toast('切换失败：' + err.message, 'bad');
+      } finally {
+        toggleWrite.disabled = false;
+      }
+    };
+  }
+
+  const resetBtn = $('mcpResetPolicy');
+  if (resetBtn) {
+    resetBtn.onclick = async () => {
+      const ok = await confirmAction({
+        title: '恢复为 config.toml 默认策略？',
+        body: '会清除控制台保存的网关开关、服务开关和工具白名单覆盖，恢复为配置文件默认值。已保存的凭证密钥不受影响。',
+        danger: true, okText: '恢复默认',
+      });
+      if (!ok) return;
+      try {
+        await api('/admin/mcp/config', { method: 'DELETE' });
+        toast('已恢复默认策略', 'ok');
+        refreshMCP();
+      } catch (err) { toast('恢复失败：' + err.message, 'bad'); }
+    };
+  }
+
+  const credDlg = $('mcpCredDlg');
+  if (credDlg) {
+    setupDialog(credDlg);
+    credDlg.addEventListener('close', () => {
+      if ($('mcpCredValue')) $('mcpCredValue').value = '';
+      state.credTarget = null;
+    });
+    const goRes = $('mcpCredGoRes');
+    if (goRes) {
+      goRes.onclick = () => {
+        if ($('mcpCredValue')) $('mcpCredValue').value = '';
+        credDlg.close();
+        location.hash = '#resources';
+      };
+    }
+    const credForm = $('mcpCredForm');
+    if (credForm) {
+      credForm.onsubmit = async (e) => {
+        e.preventDefault();
+        const svc = state.credTarget;
+        const name = svc?.credential_name;
+        if (!name) { toast('该服务未定义密钥名称', 'bad'); return; }
+        const value = ($('mcpCredValue').value || '').trim();
+        if (!value) { toast('请填写密钥值', 'warn'); return; }
+        if (name.endsWith('_ADC')) {
+          try {
+            const parsed = JSON.parse(value);
+            if (!parsed || parsed.type !== 'authorized_user' || !parsed.client_id || !parsed.client_secret || !parsed.refresh_token) {
+              toast('Google ADC JSON 需包含 type=authorized_user、client_id、client_secret、refresh_token', 'warn');
+              return;
+            }
+          } catch {
+            toast('Google ADC 凭证必须是合法 JSON 对象', 'warn');
+            return;
+          }
+        }
+        const btn = $('mcpCredBtn');
+        btn.disabled = true;
+        try {
+          await api(`/admin/resources/secret/${encodeURIComponent(name)}`, {
+            method: 'PUT',
+            body: JSON.stringify({
+              description: ($('mcpCredDesc').value || '').trim(),
+              value,
+            }),
+          });
+          $('mcpCredValue').value = '';
+          credDlg.close();
+          toast(`密钥 ${name} 已保存并生效`, 'ok');
+          refreshMCP();
+        } catch (err) {
+          toast('保存凭证失败：' + err.message, 'bad');
+          btn.disabled = false;
+        }
+      };
+    }
+  }
+
+  const permDlg = $('mcpPermDlg');
+  if (permDlg) {
+    setupDialog(permDlg);
+    permDlg.addEventListener('close', () => { state.permTarget = null; });
+    const permForm = $('mcpPermForm');
+    if (permForm) {
+      permForm.onsubmit = async (e) => {
+        e.preventDefault();
+        const svc = state.permTarget;
+        if (!svc) return;
+        const enabled = $('mcpPermEnabled').checked;
+        let allowedTools = ['*'];
+        if (!$('mcpPermReadAll').checked) {
+          allowedTools = [...$('mcpPermReadList').querySelectorAll('input[data-read-tool]:checked')].map((cb) => cb.dataset.readTool);
+          if (!allowedTools.length) {
+            toast('读工具白名单至少保留 1 个工具（如需完全停用请关闭服务开关）', 'warn');
+            return;
+          }
+        }
+        const writeAllowed = [...$('mcpPermWriteList').querySelectorAll('input[data-write-tool]:checked')].map((cb) => cb.dataset.writeTool);
+        const btn = $('mcpPermBtn');
+        btn.disabled = true;
+        try {
+          await api(`/admin/mcp/services/${encodeURIComponent(svc.id)}`, {
+            method: 'PUT',
+            body: JSON.stringify({
+              enabled,
+              allowed_tools: allowedTools,
+              write_allowed_tools: writeAllowed,
+            }),
+          });
+          permDlg.close();
+          toast('服务权限策略已保存', 'ok');
+          refreshMCP();
+        } catch (err) {
+          toast('保存失败：' + err.message, 'bad');
+          btn.disabled = false;
+        }
+      };
+    }
+  }
 
   const dryDlg = $('mcpDryDlg');
   if (dryDlg) {

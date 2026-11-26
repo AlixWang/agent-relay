@@ -29,3 +29,7 @@ Add an opt-in, in-process MCP gateway (`internal/mcpgateway/`) alongside the exi
 - `DESIGN §1.3`, ADR-0004, and ADR-0006 are amended strictly for explicitly registered, opt-in in-process MCP gateway services.
 - The Resource Hub (`§4.12`) still never executes skills, and `POST /messages` remains the sole message write path.
 - Both `[mcp_gateway].enabled` and `[mcp_gateway.write].enabled` default to `false` so existing deployments are unaffected unless explicitly configured.
+
+## Amendments
+
+- **2026-11-27 — Runtime console controls & live credential activation:** While `config.toml` continues to provide startup defaults and safety ceilings, the operator console (`PUT /admin/mcp/config`, `DELETE /admin/mcp/config`, `PUT /admin/mcp/services/{id}`) can toggle the gateway master switch, write master switch, per-service enablement, and per-service read/write tool allowlists at runtime (persisted in SQLite `settings` under `mcp.runtime_policy_v1` without a schema change; explicit write tool names remain mandatory and `"*"` is still forbidden). Missing `secret:<name>` credentials no longer permanently disable the service segment at boot: `/admin/mcp/services` surfaces live configuration status (`credential_configured`), the MCP Services UI allows configuring/updating the Resource Hub encrypted secret directly, and saving the secret invalidates the gateway cache so the service activates immediately without restarting.

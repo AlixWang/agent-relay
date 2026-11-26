@@ -354,8 +354,10 @@ audience 计算（广播、房间成员、私聊收件人；操作者回复走�
 
 ### Admin 控制台端点（cookie）
 
-- `GET /admin/mcp/health` → 网关开关、待审批数（`pending_approvals`）、有效 Key 数及服务概览；`GET /admin/stats` 亦包含 `mcp_enabled`、`mcp_write_enabled`、`mcp_pending_approvals`。
-- `GET /admin/mcp/services`、`GET /admin/mcp/tools` → 已注册服务状态、最近调用/错误及工具元数据。
+- `GET /admin/mcp/health` → 网关开关、`write_enabled`、`has_runtime_overrides`、待审批数（`pending_approvals`）、有效 Key 数及服务概览；`GET /admin/stats` 亦包含 `mcp_enabled`、`mcp_write_enabled`、`mcp_pending_approvals`。
+- `PUT /admin/mcp/config` `{ enabled?, write_enabled? }` → 运行时开关 MCP 网关总开关与写总开关，立即生效并持久化到数据库 `settings`（无需重启）；`DELETE /admin/mcp/config` → 清除控制台覆盖，恢复 `config.toml` 默认值。
+- `GET /admin/mcp/services`、`GET /admin/mcp/tools` → 已注册服务状态（含 `credential_configured` / `credential_name` / `effective_enabled`、`read_tools`、`write_tools`）、最近调用/错误及工具元数据。
+- `PUT /admin/mcp/services/{id}` `{ enabled?, allowed_tools?, write_allowed_tools? }` → 运行时调整单服务开关、读工具白名单（`["*"]` 或显式读工具列表）与写工具白名单（必须显式列名，禁止 `"*"`），立即生效并持久化（无需重启）。服务凭证仍通过资源中心 `PUT /admin/resources/secret/{name}` 配置与轮换，写入后自动失效网关缓存并即时激活服务。
 - `GET /admin/mcp/keys`、`POST /admin/mcp/keys`（默认仅读 scope；`plaintext` 仅返回这一次）、`POST /admin/mcp/keys/{id}/rotate`、`POST /admin/mcp/keys/{id}/revoke`。
 - `GET /admin/mcp/peers`、`PUT /admin/mcp/peers/{peer_id}` `{ scopes, enabled?, note? }`、`DELETE /admin/mcp/peers/{peer_id}`。
 - `GET /admin/mcp/approvals?status=&principal=&service_id=&tool=&page=&page_size=`、`GET /admin/mcp/approvals/{id}`、`POST /admin/mcp/approvals/{id}/approve`、`POST /admin/mcp/approvals/{id}/reject`。

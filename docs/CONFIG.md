@@ -91,11 +91,11 @@
 
 ## MCP 网关（可选，ADR-0007）
 
-配置文件采用 TOML 分段（完整示例见 `configs/config.toml.example`），未知字段会在启动时 fail-fast。修改后需重启生效；禁止在配置中填入明文上游密钥，只能引用资源中心的 `secret:<name>`。
+配置文件采用 TOML 分段（完整示例见 `configs/config.toml.example`），未知字段会在启动时 fail-fast，用于提供**启动默认值与限流/超时/保留天数上限**；其中网关总开关、写总开关、单服务开关及读/写工具白名单也可在控制台 **MCP 网关** 页动态调整并持久化到 SQLite `settings`（无需重启生效）。禁止在配置中填入明文上游密钥，只能引用资源中心的 `secret:<name>`——在控制台「MCP 网关 → 服务」或「资源中心」配置对应密钥后立即加密生效，同样无需重启。
 
 | 段 / 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `[mcp_gateway]` `enabled` | bool | `false` | 网关总开关；关闭时 `POST /mcp*` 直接返回 `503` |
+| `[mcp_gateway]` `enabled` | bool | `false` | 网关总开关默认值（可在控制台动态切换）；关闭时 `POST /mcp*` 直接返回 `503` |
 | `upstream_timeout_secs` | int | `15` | 上游 HTTP 单次请求超时（1–120） |
 | `gateway_timeout_secs` | int | `30` | 单次工具调用总超时（≥ `upstream_timeout_secs` 且 ≤ 600） |
 | `rate_per_minute_per_peer` | int | `30` | 每主体每分钟调用上限（≥1） |
@@ -104,11 +104,11 @@
 | `audit_retention_days_read` | int | `90` | 读审计保留天数（0=不按天清理） |
 | `audit_retention_days_write` | int | `180` | 写与审批审计保留天数（0=不按天清理） |
 | `audit_max_rows` | int | `2000000` | `mcp_audit` 最大行数上限（0=不限） |
-| `[mcp_gateway.services.<id>]` `enabled` | bool | `true` | 服务开关（`adsense` / `bing-webmaster` / `ga`）；缺引用密钥时启动仅禁用该服务 |
+| `[mcp_gateway.services.<id>]` `enabled` | bool | `true` | 服务开关默认值（`adsense` / `bing-webmaster` / `ga`，可在控制台动态切换）；缺引用密钥时只标记未就绪并在配置密钥后即时激活 |
 | `credential_ref` | string | 服务默认 | 仅允许 `secret:<name>`（如 `secret:GA_ADSENSE_ADC`、`secret:BING_WM_API_KEY`）；局部覆盖保留默认字段 |
-| `allowed_tools` | string[] | `["*"]` | 该服务允许暴露的工具短名白名单（非空） |
-| `[mcp_gateway.write]` `enabled` | bool | `false` | 写工具总开关 |
-| `[mcp_gateway.write.<service>]` `allowed_tools` | string[] | 见示例 | 允许执行的写工具短名（必须显式列名，禁止 `"*"`；默认 `bing-webmaster` 开放 4 个低风险写，`adsense`/`ga` 为空） |
+| `allowed_tools` | string[] | `["*"]` | 该服务允许暴露的读工具短名白名单（非空，可在控制台动态调整） |
+| `[mcp_gateway.write]` `enabled` | bool | `false` | 写工具总开关默认值（可在控制台动态切换） |
+| `[mcp_gateway.write.<service>]` `allowed_tools` | string[] | 见示例 | 允许执行的写工具短名（必须显式列名，禁止 `"*"`；可在控制台动态勾选，默认 `bing-webmaster` 开放 4 个低风险写，`adsense`/`ga` 为空） |
 | `batch_cap` | int | `100` | 批量 URL 上限（1–500；可在 `[mcp_gateway.write]` 设全局默认或按服务覆盖） |
 | `approval_ttl_secs` | int | `600` | 批准后的执行窗口秒数（60–3600；可在 `[mcp_gateway.write]` 设全局默认或按服务覆盖） |
 | `approval_pending_ttl_secs` | int | `86400` | 待审批超时秒数（3600–604800；可在 `[mcp_gateway.write]` 设全局默认或按服务覆盖） |

@@ -561,3 +561,35 @@ func TestConsoleCommandRootIsSingle(t *testing.T) {
 		}
 	}
 }
+
+func TestConsoleMCPControlWiring(t *testing.T) {
+	f := newFixture(t)
+	f.mux = f.srv.Handler(web.Handler())
+	cookie := f.adminLogin(t)
+
+	code, page := getRaw(t, f, "/", cookie)
+	if code != 200 {
+		t.Fatalf("console page: %d", code)
+	}
+	for _, need := range []string{
+		`id="page-mcp"`, `id="mcpToggleEnabled"`, `id="mcpToggleWrite"`, `id="mcpResetPolicy"`,
+		`id="mcpCredDlg"`, `id="mcpCredForm"`, `id="mcpCredValue"`,
+		`id="mcpPermDlg"`, `id="mcpPermForm"`, `id="mcpPermWriteList"`, `id="mcpPermReadList"`,
+	} {
+		if !strings.Contains(page, need) {
+			t.Fatalf("mcp panel markup lost %s", need)
+		}
+	}
+	code, js := getRaw(t, f, "/js/mcp.js", cookie)
+	if code != 200 {
+		t.Fatalf("mcp js: %d", code)
+	}
+	for _, need := range []string{
+		"/admin/mcp/config", "/admin/mcp/services", "/admin/resources/secret/",
+		"openCredDialog", "openPermDialog",
+	} {
+		if !strings.Contains(js, need) {
+			t.Fatalf("mcp js lost %q", need)
+		}
+	}
+}

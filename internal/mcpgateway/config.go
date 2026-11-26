@@ -123,6 +123,29 @@ func DefaultConfig() Config {
 	}
 }
 
+// Clone returns a deep copy of Config so callers and runtime policy overrides
+// never alias service or allowlist maps/slices.
+func (c Config) Clone() Config {
+	out := c
+	if c.Services != nil {
+		out.Services = make(map[string]ServiceConfig, len(c.Services))
+		for id, svc := range c.Services {
+			cp := svc
+			cp.AllowedTools = append([]string(nil), svc.AllowedTools...)
+			out.Services[id] = cp
+		}
+	}
+	if c.Write.Services != nil {
+		out.Write.Services = make(map[string]WriteServiceConfig, len(c.Write.Services))
+		for id, wsvc := range c.Write.Services {
+			cp := wsvc
+			cp.AllowedTools = append([]string(nil), wsvc.AllowedTools...)
+			out.Write.Services[id] = cp
+		}
+	}
+	return out
+}
+
 // Service returns the configured service segment (zero value if absent).
 func (c Config) Service(id string) ServiceConfig { return c.Services[id] }
 

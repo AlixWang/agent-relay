@@ -41,22 +41,20 @@ func TestMCPCredentialGatingIsPerService(t *testing.T) {
 		"TEST_ADSENSE": "adsense-value-not-to-log",
 		"TEST_BING":    "bing-value-not-to-log",
 	})
-	disableMCPServicesWithoutCredentials(&cfg, creds)
+	warnMissingMCPCredentials(cfg, creds)
 
+	// Missing credentials must warn without disabling the service segment so
+	// configuring the secret live in the console works immediately without restart.
 	if !cfg.Enabled {
 		t.Fatal("gateway-wide switch must stay on")
 	}
-	if !cfg.Service(mcpgateway.ServiceAdSense).Enabled {
-		t.Fatal("adsense must stay enabled when its own credential exists")
+	for _, id := range []string{mcpgateway.ServiceAdSense, mcpgateway.ServiceBing, mcpgateway.ServiceGA} {
+		if !cfg.Service(id).Enabled {
+			t.Fatalf("%s must stay enabled in config so console secret activation works without restart", id)
+		}
 	}
-	if !cfg.Service(mcpgateway.ServiceBing).Enabled {
-		t.Fatal("bing must stay enabled when its own credential exists")
-	}
-	if cfg.Service(mcpgateway.ServiceGA).Enabled {
-		t.Fatal("ga must be disabled when its credential is missing")
-	}
-	if !strings.Contains(logs.String(), "service ga disabled") {
-		t.Fatalf("missing ga disable warning: %q", logs.String())
+	if !strings.Contains(logs.String(), "service ga credential secret:TEST_GA not yet configured") {
+		t.Fatalf("missing ga credential warning: %q", logs.String())
 	}
 	for _, secret := range []string{"adsense-value-not-to-log", "bing-value-not-to-log"} {
 		if strings.Contains(logs.String(), secret) {
@@ -64,20 +62,12 @@ func TestMCPCredentialGatingIsPerService(t *testing.T) {
 		}
 	}
 
-	// With every referenced secret present, all three stay enabled. Re-enable
-	// the segment first: a disabled segment is intentionally not re-probed on a
-	// later pass (startup runs this once).
-	for id, svc := range cfg.Services {
-		svc.Enabled = true
-		cfg.Services[id] = svc
-	}
+	logs.Reset()
 	all := mcpgateway.NewCredentials(mapSecrets{
 		"TEST_ADSENSE": "a", "TEST_BING": "b", "TEST_GA": "c",
 	})
-	disableMCPServicesWithoutCredentials(&cfg, all)
-	for _, id := range []string{mcpgateway.ServiceAdSense, mcpgateway.ServiceBing, mcpgateway.ServiceGA} {
-		if !cfg.Service(id).Enabled {
-			t.Fatalf("%s disabled although every credential exists", id)
-		}
+	warnMissingMCPCredentials(cfg, all)
+	if logs.Len() != 0 {
+		t.Fatalf("expected no warnings when all credentials exist, got %q", logs.String())
 	}
 }
