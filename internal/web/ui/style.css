@@ -1268,6 +1268,7 @@ input[type="checkbox"] { height: auto; accent-color: var(--accent); cursor: poin
 
 .th-right, .td-actions { text-align: right !important; }
 .td-actions { white-space: nowrap; width: 1%; }
+.res-name { display: inline-block; max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .td-actions .row-btns { justify-content: flex-end; flex-wrap: nowrap; gap: 2px; }
 .col-seq { width: 64px; }
 .col-check { width: 38px; }

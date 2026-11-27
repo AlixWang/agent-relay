@@ -1,7 +1,7 @@
 // ESM entrypoint with Alpine.js
 
 import Alpine from '/vendor/alpine.esm.js';
-import { initTheme } from './js/utils.js';
+import { initTheme, setupDialog } from './js/utils.js';
 import { initNavigation, setRoute, onRoute } from './js/router.js';
 import { initAuth, refreshStats, showLogin } from './js/auth.js';
 import { initWork, refreshWork, stopWork } from './js/work.js';
@@ -50,6 +50,10 @@ onRoute('system', refreshSystem);
 // Initialize application modules
 initTouchGuards();
 initTheme();
+// Shared dialogs live outside any one tab: wire backdrop-click close here
+// so a future caller of confirmAction/promptInput gets it for free.
+setupDialog(document.getElementById('promptDlg'));
+setupDialog(document.getElementById('confirmDlg'));
 initNavigation();
 initAuth();
 initWork();
