@@ -239,6 +239,9 @@ func main() {
 		p.OnOffline = func(peerID string, offlineSecs int64) {
 			museSvc.MaybeWakeOffline(peerID, offlineSecs)
 		}
+		p.OnStillOffline = func(peerID string, offlineSecs int64) {
+			museSvc.MaybeWakeOffline(peerID, offlineSecs)
+		}
 		if cfg.MuseAutoWake {
 			p.ShouldAuditOffline = func(peerID string) bool {
 				acct, err := st.GetMuseAccountByPeer(peerID)

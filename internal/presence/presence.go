@@ -99,6 +99,12 @@ type Service struct {
 	// block: the Muse integration spawns its own goroutine. Nil disables the
 	// hook.
 	OnOffline func(peerID string, offlineSecs int64)
+	// OnStillOffline is called on every Sweep tick for a previously-seen peer
+	// (LastSeen != 0) that is offline without firing an online→offline transition:
+	// both on the initial baseline sweep after restart (when already offline) and
+	// on subsequent sweeps while the peer remains offline. Audit rows and
+	// webhooks stay strictly edge-triggered on OnOffline. Must not block.
+	OnStillOffline func(peerID string, offlineSecs int64)
 	// ShouldAuditOffline optionally gates writing peer.offline to audit_log.
 	// Nil means always audit (subject to offlineAuditWindowSecs). Returning
 	// false skips only the audit row; OnOffline and webhook effects still run.
@@ -274,11 +280,17 @@ func (s *Service) Sweep(now int64) {
 			// Baseline without event: presence starts reporting from here.
 			s.wasOnline[p.ID] = online
 			s.mu.Unlock()
+			if !online && p.LastSeen != 0 && s.OnStillOffline != nil {
+				s.OnStillOffline(p.ID, now-p.LastSeen)
+			}
 			continue
 		}
 		if !prev || online {
 			s.wasOnline[p.ID] = online
 			s.mu.Unlock()
+			if !online && p.LastSeen != 0 && s.OnStillOffline != nil {
+				s.OnStillOffline(p.ID, now-p.LastSeen)
+			}
 			continue
 		}
 		lastAudit := s.lastOfflineAudit[p.ID]

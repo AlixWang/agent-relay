@@ -72,6 +72,11 @@ type autoWakeAuditStamp struct {
 	at  int64
 }
 
+type offlineSeenStreak struct {
+	lastSeen int64
+	count    int
+}
+
 // Options configures the optional Muse integration. Zero durations select the
 // documented defaults; an empty BaseURL means https://muse.ai.
 type Options struct {
@@ -235,6 +240,8 @@ type Service struct {
 	// cooldown and block offline recovery. In-memory on purpose; a restart can
 	// at worst allow one extra wake.
 	wakeEvents        map[string]int64
+	offlineWakeFails  map[string]int
+	offlineWakeSeen   map[string]offlineSeenStreak
 	lastAutoWakeAudit map[string]autoWakeAuditStamp
 	nudgedTasks       map[string]int64
 	lastPeerNudge     map[string]int64
@@ -361,6 +368,8 @@ func New(st store.Store, opt Options) (*Service, error) {
 		waking:            map[string]bool{},
 		backoff:           map[string]int64{},
 		wakeEvents:        map[string]int64{},
+		offlineWakeFails:  map[string]int{},
+		offlineWakeSeen:   map[string]offlineSeenStreak{},
 		lastAutoWakeAudit: map[string]autoWakeAuditStamp{},
 		nudgedTasks:       map[string]int64{},
 		lastPeerNudge:     map[string]int64{},
@@ -669,6 +678,9 @@ func (s *Service) Keepalive(ctx context.Context, id string) (*Result, error) {
 		return nil, err
 	}
 	s.recordRetry(a.ID, res)
+	if res.OK && res.WakeOK {
+		s.resetOfflineWakeBackoff(a.ID, false)
+	}
 	return toResult(a, res), nil
 }
 
@@ -682,7 +694,11 @@ func (s *Service) Wake(ctx context.Context, id string) (*Result, error) {
 	if s.chatLeaseActive(id) {
 		return nil, ErrChatActive
 	}
-	return s.wakeLocked(ctx, id)
+	res, err := s.wakeLocked(ctx, id)
+	if err == nil && res != nil && res.OK && res.WakeOK {
+		s.resetOfflineWakeBackoff(id, true)
+	}
+	return res, err
 }
 
 // wakeWithPrior runs one wake while holding opMu and returns the account row
@@ -856,13 +872,16 @@ func (s *Service) KeepaliveAll(ctx context.Context, force bool) (*Summary, error
 }
 
 // keepaliveGateSkip implements the upstream 6h/36h cadence. The sweep may skip
-// an account only when all three signals agree: it was renewed less than 6h
-// ago, its essential cookies expire more than 36h from now, and it is
-// currently healthy. Cookies live only 48h, so any doubt (unknown/shorter
-// expiry, older renewal, failed session) must renew. A manual sweep passes
-// force and bypasses this gate entirely.
+// an account only when all signals agree: it was renewed less than 6h ago, its
+// essential cookies expire more than 36h from now, it is currently healthy, and
+// its last wake attempt was not left unconfirmed. Cookies live only 48h, so any
+// doubt (unknown/shorter expiry, older renewal, failed session, unconfirmed
+// wake) must renew. A manual sweep passes force and bypasses this gate entirely.
 func keepaliveGateSkip(a *store.MuseAccount, now int64) bool {
 	if a == nil || a.LastKeepaliveAt <= 0 {
+		return false
+	}
+	if a.LastWakeState == "unconfirmed" || a.LastWakeError != "" || (a.LastWakeAt > 0 && !a.LastWakeOK) {
 		return false
 	}
 	if now-a.LastKeepaliveAt >= keepaliveMinAge {
@@ -979,6 +998,92 @@ func (s *Service) wakeEventAt(accountID string) int64 {
 	return s.wakeEvents[accountID]
 }
 
+func (s *Service) offlineWakeDelay(accountID string, peerLastSeen int64) int64 {
+	cooldown := int64(s.opts.WakeCooldown / time.Second)
+	if cooldown <= 0 {
+		cooldown = 300
+	}
+	maxBackoff := int64(15 * time.Minute / time.Second)
+	if cooldown > maxBackoff {
+		maxBackoff = cooldown
+	}
+	s.mu.Lock()
+	fails := s.offlineWakeFails[accountID]
+	streak := s.offlineWakeSeen[accountID]
+	s.mu.Unlock()
+
+	if fails > 0 {
+		switch fails {
+		case 1:
+			if cooldown < 60 {
+				return cooldown
+			}
+			return 60
+		case 2:
+			if cooldown < 120 {
+				return cooldown
+			}
+			return 120
+		case 3:
+			return cooldown
+		case 4:
+			if cooldown*2 < maxBackoff {
+				return cooldown * 2
+			}
+			return maxBackoff
+		default:
+			return maxBackoff
+		}
+	}
+	if peerLastSeen > 0 && streak.lastSeen == peerLastSeen && streak.count >= 2 {
+		if streak.count == 2 {
+			if cooldown*2 < maxBackoff {
+				return cooldown * 2
+			}
+			return maxBackoff
+		}
+		return maxBackoff
+	}
+	return cooldown
+}
+
+func (s *Service) recordAutoWakeSuccess(accountID string, peerLastSeen int64) {
+	if accountID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.offlineWakeFails, accountID)
+	if peerLastSeen > 0 {
+		if prev := s.offlineWakeSeen[accountID]; prev.lastSeen == peerLastSeen {
+			s.offlineWakeSeen[accountID] = offlineSeenStreak{lastSeen: peerLastSeen, count: prev.count + 1}
+		} else {
+			s.offlineWakeSeen[accountID] = offlineSeenStreak{lastSeen: peerLastSeen, count: 1}
+		}
+	}
+}
+
+func (s *Service) recordAutoWakeFailure(accountID string) {
+	if accountID == "" {
+		return
+	}
+	s.mu.Lock()
+	s.offlineWakeFails[accountID]++
+	s.mu.Unlock()
+}
+
+func (s *Service) resetOfflineWakeBackoff(accountID string, clearSeen bool) {
+	if accountID == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.offlineWakeFails, accountID)
+	if clearSeen {
+		delete(s.offlineWakeSeen, accountID)
+	}
+	s.mu.Unlock()
+}
+
 // MaybeWakeOffline is the presence hook. It returns immediately; the actual
 // wake runs in a goroutine so a 30s presence sweep is never blocked by Muse.
 func (s *Service) MaybeWakeOffline(peerID string, offlineSecs int64) {
@@ -995,16 +1100,16 @@ func (s *Service) MaybeWakeOffline(peerID string, offlineSecs int64) {
 	if s.chatLeaseActive(a.ID) {
 		return
 	}
+	if s.retryAt(a.ID) > 0 {
+		return
+	}
 	peer, err := s.st.GetPeer(peerID)
 	if err != nil || peer == nil || peer.Status == "suspended" {
 		return
 	}
 	now := s.now().Unix()
-	cooldown := int64(s.opts.WakeCooldown / time.Second)
-	if cooldown <= 0 {
-		cooldown = 300
-	}
-	if last := s.wakeEventAt(a.ID); last > 0 && now-last < cooldown {
+	delay := s.offlineWakeDelay(a.ID, peer.LastSeen)
+	if last := s.wakeEventAt(a.ID); last > 0 && now-last < delay {
 		return
 	}
 	s.mu.Lock()
@@ -1033,6 +1138,9 @@ func (s *Service) MaybeWakeForTask(peerID string) {
 		return
 	}
 	if s.chatLeaseActive(a.ID) {
+		return
+	}
+	if s.retryAt(a.ID) > 0 {
 		return
 	}
 	peer, err := s.st.GetPeer(peerID)
@@ -1067,6 +1175,10 @@ func (s *Service) autoWake(accountID, peerID string) {
 		delete(s.waking, peerID)
 		s.mu.Unlock()
 	}()
+	var peerLastSeen int64
+	if peer, perr := s.st.GetPeer(peerID); perr == nil && peer != nil {
+		peerLastSeen = peer.LastSeen
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	// Snapshot the previous wake state before Wake writes the new one. A
@@ -1079,6 +1191,12 @@ func (s *Service) autoWake(accountID, peerID string) {
 		return
 	}
 	now := s.now().Unix()
+	s.noteWakeEvent(accountID, now)
+	if err == nil && res != nil && res.OK && res.WakeOK {
+		s.recordAutoWakeSuccess(accountID, peerLastSeen)
+	} else {
+		s.recordAutoWakeFailure(accountID)
+	}
 	detail := fmt.Sprintf("peer=%s account=%s ok=false", peerID, accountID)
 	if err != nil {
 		detail += " error=" + err.Error()

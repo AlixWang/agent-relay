@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -726,16 +727,18 @@ func TestKeepaliveGateMatrix(t *testing.T) {
 		lastKeepalive time.Duration // 0 means never renewed
 		expiresIn     time.Duration
 		authState     string
+		unconfirmed   bool
 		force         bool
 		wantRun       bool
 	}{
-		{"never renewed", 0, 48 * time.Hour, "ok", false, true},
-		{"fresh under 6h, beyond 36h, ok", 1 * time.Hour, 48 * time.Hour, "ok", false, false},
-		{"stale beyond 6h, beyond 36h, ok", 7 * time.Hour, 48 * time.Hour, "ok", false, true},
-		{"fresh under 6h but cookie inside 36h", 1 * time.Hour, 10 * time.Hour, "ok", false, true},
-		{"stale beyond 6h and cookie inside 36h", 7 * time.Hour, 10 * time.Hour, "ok", false, true},
-		{"fresh cookie but account not ok", 1 * time.Hour, 48 * time.Hour, "unverified", false, true},
-		{"manual force bypasses the gate", 1 * time.Hour, 48 * time.Hour, "ok", true, true},
+		{"never renewed", 0, 48 * time.Hour, "ok", false, false, true},
+		{"fresh under 6h, beyond 36h, ok", 1 * time.Hour, 48 * time.Hour, "ok", false, false, false},
+		{"fresh under 6h, beyond 36h, unconfirmed wake", 1 * time.Hour, 48 * time.Hour, "ok", true, false, true},
+		{"stale beyond 6h, beyond 36h, ok", 7 * time.Hour, 48 * time.Hour, "ok", false, false, true},
+		{"fresh under 6h but cookie inside 36h", 1 * time.Hour, 10 * time.Hour, "ok", false, false, true},
+		{"stale beyond 6h and cookie inside 36h", 7 * time.Hour, 10 * time.Hour, "ok", false, false, true},
+		{"fresh cookie but account not ok", 1 * time.Hour, 48 * time.Hour, "unverified", false, false, true},
+		{"manual force bypasses the gate", 1 * time.Hour, 48 * time.Hour, "ok", false, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -749,6 +752,11 @@ func TestKeepaliveGateMatrix(t *testing.T) {
 				row.LastKeepaliveAt = env.clock - int64(tc.lastKeepalive/time.Second)
 			}
 			row.AuthState = tc.authState
+			if tc.unconfirmed {
+				row.LastWakeOK = false
+				row.LastWakeState = "unconfirmed"
+				row.LastWakeError = "wake skipped: session check failed"
+			}
 			if err := env.st.SaveMuseAccount(row); err != nil {
 				t.Fatal(err)
 			}
@@ -1540,5 +1548,217 @@ func TestKeepaliveAllLogsOneVerdictPerAccount(t *testing.T) {
 		if strings.Contains(line, "hatch_sess") || strings.Contains(line, "hatch_vml") {
 			t.Fatalf("verdict leaked cookies: %s", line)
 		}
+	}
+}
+
+func TestMaybeWakeOfflineRetriesFailedWakeWithBackoff(t *testing.T) {
+	env := newTestEnv(t, true)
+	env.svc.opts.WakeCooldown = 5 * time.Minute
+	a := env.authorize(t, "alice")
+	if err := env.st.TouchPeer("alice", env.clock-400); err != nil {
+		t.Fatal(err)
+	}
+
+	env.fake.setSessionCode(http.StatusInternalServerError)
+	sessionsBefore, _, _ := env.fake.counts()
+	env.svc.MaybeWakeOffline("alice", 400)
+	waitFor(t, func() bool {
+		s, _, _ := env.fake.counts()
+		return s > sessionsBefore
+	})
+	waitAutoWakeIdle(t, env, "alice")
+
+	// Consecutive failure backoff: 60s -> 120s -> 300s -> 600s -> 900s.
+	for _, wantDelay := range []int64{60, 120, 300, 600, 900} {
+		sessionsBefore, _, _ = env.fake.counts()
+		env.clock += wantDelay - 1
+		env.svc.MaybeWakeOffline("alice", 600)
+		time.Sleep(30 * time.Millisecond)
+		if s, _, _ := env.fake.counts(); s != sessionsBefore {
+			t.Fatalf("retried early before %ds backoff: %d -> %d", wantDelay, sessionsBefore, s)
+		}
+		env.clock++
+		env.svc.MaybeWakeOffline("alice", 600)
+		waitFor(t, func() bool {
+			s, _, _ := env.fake.counts()
+			return s > sessionsBefore
+		})
+		waitAutoWakeIdle(t, env, "alice")
+	}
+
+	// Once upstream recovers, the next allowed retry succeeds and clears failure backoff.
+	env.fake.setSessionCode(0)
+	wakesBefore := env.fake.wakeCount()
+	env.clock += 900
+	env.svc.MaybeWakeOffline("alice", 600)
+	waitFor(t, func() bool { return env.fake.wakeCount() > wakesBefore })
+	waitAutoWakeIdle(t, env, "alice")
+
+	// Peer comes online briefly (new LastSeen), then drops again: cooldown returns to 300s.
+	if err := env.st.TouchPeer("alice", env.clock+10); err != nil {
+		t.Fatal(err)
+	}
+	wakesBefore = env.fake.wakeCount()
+	env.clock += 299
+	env.svc.MaybeWakeOffline("alice", 289)
+	time.Sleep(30 * time.Millisecond)
+	if env.fake.wakeCount() != wakesBefore {
+		t.Fatalf("woke before 300s cooldown after recovery: %d -> %d", wakesBefore, env.fake.wakeCount())
+	}
+	env.clock++
+	env.svc.MaybeWakeOffline("alice", 290)
+	waitFor(t, func() bool { return env.fake.wakeCount() > wakesBefore })
+	waitAutoWakeIdle(t, env, "alice")
+	if row, _ := env.st.GetMuseAccount(a.ID); !row.LastWakeOK || row.LastWakeState != "noise_confirmed" {
+		t.Fatalf("recovered account state: %+v", row)
+	}
+}
+
+func TestMaybeWakeOfflineHonorsRetryAfterBackoff(t *testing.T) {
+	env := newTestEnv(t, true)
+	env.svc.opts.WakeCooldown = 5 * time.Minute
+	env.authorize(t, "alice")
+	env.fake.mu.Lock()
+	env.fake.sessionCode = http.StatusTooManyRequests
+	env.fake.retryAfter = "180"
+	env.fake.mu.Unlock()
+
+	sessionsBefore, _, _ := env.fake.counts()
+	env.svc.MaybeWakeOffline("alice", 400)
+	waitFor(t, func() bool {
+		s, _, _ := env.fake.counts()
+		return s > sessionsBefore
+	})
+	waitAutoWakeIdle(t, env, "alice")
+
+	env.fake.mu.Lock()
+	env.fake.sessionCode = 0
+	env.fake.retryAfter = ""
+	env.fake.mu.Unlock()
+
+	// 120s exceeds the 60s first-failure retry window, but 429 Retry-After (180s) must hold.
+	env.clock += 120
+	wakesBefore := env.fake.wakeCount()
+	env.svc.MaybeWakeOffline("alice", 520)
+	time.Sleep(30 * time.Millisecond)
+	if env.fake.wakeCount() != wakesBefore {
+		t.Fatalf("MaybeWakeOffline bypassed 429 Retry-After: %d -> %d", wakesBefore, env.fake.wakeCount())
+	}
+
+	env.clock += 61
+	env.svc.MaybeWakeOffline("alice", 581)
+	waitFor(t, func() bool { return env.fake.wakeCount() > wakesBefore })
+	waitAutoWakeIdle(t, env, "alice")
+}
+
+func TestMaybeWakeOfflineBacksOffWhenPeerStaysSilent(t *testing.T) {
+	env := newTestEnv(t, true)
+	env.svc.opts.WakeCooldown = 5 * time.Minute
+	env.authorize(t, "alice")
+	if err := env.st.TouchPeer("alice", env.clock-400); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wake #1 (count=1) -> next wait 300s. Wake #2 (count=2) -> 600s. Wake #3 (count=3) -> 900s.
+	for _, wantDelay := range []int64{300, 600, 900} {
+		wakesBefore := env.fake.wakeCount()
+		env.svc.MaybeWakeOffline("alice", 400)
+		waitFor(t, func() bool { return env.fake.wakeCount() > wakesBefore })
+		waitAutoWakeIdle(t, env, "alice")
+
+		wakesBefore = env.fake.wakeCount()
+		env.clock += wantDelay - 1
+		env.svc.MaybeWakeOffline("alice", 600)
+		time.Sleep(30 * time.Millisecond)
+		if env.fake.wakeCount() != wakesBefore {
+			t.Fatalf("silent-peer wake fired before %ds: %d -> %d", wantDelay, wakesBefore, env.fake.wakeCount())
+		}
+		env.clock++
+	}
+
+	// Advance peer.LastSeen and perform a wake: streak resets to 1 (300s cooldown).
+	if err := env.st.TouchPeer("alice", env.clock-100); err != nil {
+		t.Fatal(err)
+	}
+	wakesBefore := env.fake.wakeCount()
+	env.svc.MaybeWakeOffline("alice", 100)
+	waitFor(t, func() bool { return env.fake.wakeCount() > wakesBefore })
+	waitAutoWakeIdle(t, env, "alice")
+
+	wakesBefore = env.fake.wakeCount()
+	env.clock += 299
+	env.svc.MaybeWakeOffline("alice", 399)
+	time.Sleep(30 * time.Millisecond)
+	if env.fake.wakeCount() != wakesBefore {
+		t.Fatalf("streak did not reset on new LastSeen: %d -> %d", wakesBefore, env.fake.wakeCount())
+	}
+	env.clock++
+	env.svc.MaybeWakeOffline("alice", 400)
+	waitFor(t, func() bool { return env.fake.wakeCount() > wakesBefore })
+	waitAutoWakeIdle(t, env, "alice")
+}
+
+func TestRenewRetriesSessionOnTransportTimeout(t *testing.T) {
+	oldDelay := sessionRetryDelay
+	sessionRetryDelay = 10 * time.Millisecond
+	t.Cleanup(func() { sessionRetryDelay = oldDelay })
+
+	var slowOnce atomic.Bool
+	var sessionCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/session":
+			sessionCalls.Add(1)
+			if slowOnce.Swap(false) {
+				time.Sleep(250 * time.Millisecond)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "hatch_vml", Value: "vml-1", Path: "/", MaxAge: 172800})
+			http.SetCookie(w, &http.Cookie{Name: "hatch_sess", Value: "sess-1", Path: "/", MaxAge: 2592000})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "assigned", "vm_id": "vm-1", "vm_state": "RUNNING",
+			})
+		case "/api/hatch/vm/wake":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"accepted":true}`))
+		}
+	}))
+	defer srv.Close()
+
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.CreatePeer(&store.Peer{ID: "alice", AgentType: "muse", Status: "active", CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := New(st, Options{
+		BaseURL:     srv.URL,
+		HTTPTimeout: 80 * time.Millisecond,
+		DataDir:     t.TempDir(),
+		AutoWake:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.verifyWake = func(context.Context, *renewResult, *sessionResponse) error { return nil }
+
+	a, err := svc.Authorize(context.Background(), "alice", "", "hatch_sess=old; hatch_vml=old", true, true)
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	sessionCalls.Store(0)
+	slowOnce.Store(true)
+	res, err := svc.Wake(context.Background(), a.ID)
+	if err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+	if !res.OK || !res.WakeOK || res.Error != "" || res.WakeError != "" || res.WakeState != "noise_confirmed" {
+		t.Fatalf("wake did not recover via session retry: %+v", res)
+	}
+	if got := sessionCalls.Load(); got != 3 {
+		t.Fatalf("session calls = %d, want 3 (timeout + retry + post-wake verify)", got)
 	}
 }

@@ -324,6 +324,65 @@ func TestTransportMarksLive(t *testing.T) {
 	}
 }
 
+func TestSweepOnStillOfflineBaselineAndRepeat(t *testing.T) {
+	st := openTest(t)
+	if err := st.CreatePeer(&store.Peer{ID: "offline", Status: "active", CreatedAt: 1000, LastSeen: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreatePeer(&store.Peer{ID: "online", Status: "active", CreatedAt: 1000, LastSeen: 2050}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreatePeer(&store.Peer{ID: "ghost", Status: "pending", CreatedAt: 1000, LastSeen: 0}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(st, 300, "")
+	offCounts := map[string]int{}
+	stillCounts := map[string]int{}
+	lastStillSecs := map[string]int64{}
+	s.OnOffline = func(peerID string, _ int64) {
+		offCounts[peerID]++
+	}
+	s.OnStillOffline = func(peerID string, offlineSecs int64) {
+		stillCounts[peerID]++
+		lastStillSecs[peerID] = offlineSecs
+	}
+
+	// Baseline sweep: already-offline peer triggers OnStillOffline without
+	// emitting OnOffline or a peer.offline audit row. Never-seen ghost stays silent.
+	s.Sweep(2100)
+	if offCounts["offline"] != 0 || stillCounts["offline"] != 1 || lastStillSecs["offline"] != 1100 {
+		t.Fatalf("baseline offline: off=%v still=%v secs=%v", offCounts, stillCounts, lastStillSecs)
+	}
+	if stillCounts["ghost"] != 0 || offCounts["ghost"] != 0 {
+		t.Fatalf("ghost must never trigger offline callbacks: off=%v still=%v", offCounts, stillCounts)
+	}
+	if entries, _ := st.ListAudit("system", "peer.offline", 0, 10); len(entries) != 0 {
+		t.Fatalf("baseline sweep wrote audit: %+v", entries)
+	}
+
+	// Repeat sweep while still offline: OnStillOffline fires again; OnOffline stays 0.
+	s.Sweep(2200)
+	if offCounts["offline"] != 0 || stillCounts["offline"] != 2 || lastStillSecs["offline"] != 1200 {
+		t.Fatalf("repeat offline: off=%v still=%v secs=%v", offCounts, stillCounts, lastStillSecs)
+	}
+
+	// Online peer crosses timeout: fires OnOffline (not OnStillOffline) once.
+	s.Sweep(2400)
+	if offCounts["online"] != 1 || stillCounts["online"] != 0 {
+		t.Fatalf("transition tick: off=%v still=%v", offCounts, stillCounts)
+	}
+	if stillCounts["offline"] != 3 {
+		t.Fatalf("still offline peer missed tick: %v", stillCounts)
+	}
+
+	// Subsequent sweep while online peer remains offline: fires OnStillOffline, not OnOffline.
+	s.Sweep(2500)
+	if offCounts["online"] != 1 || stillCounts["online"] != 1 || lastStillSecs["online"] != 450 {
+		t.Fatalf("post-transition offline: off=%v still=%v secs=%v", offCounts, stillCounts, lastStillSecs)
+	}
+}
+
 func TestClientVersionViaBeat(t *testing.T) {
 	st := openTest(t)
 	if err := st.CreatePeer(&store.Peer{ID: "a", AgentType: "muse", Status: "active", CreatedAt: 1000}); err != nil {

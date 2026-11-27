@@ -8,11 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// sessionRetryDelay is the brief pause before retrying GET /api/session once
+// after a transient transport/timeout error. Overridable in tests.
+var sessionRetryDelay = 2 * time.Second
 
 // sessionResponse is the subset of GET /api/session we rely on. muse2api's
 // probes pin these three fields; everything else is ignored.
@@ -141,7 +146,7 @@ func (s *Service) renew(ctx context.Context, cookies map[string]string, exp map[
 		At:      now,
 	}
 	before := cloneCookies(res.Cookies)
-	sess, setCookies, err := s.getSession(ctx, res.Cookies)
+	sess, setCookies, err := s.getSessionWithRetry(ctx, res.Cookies)
 	if len(setCookies) > 0 {
 		mergeSetCookies(res.Cookies, res.Exp, setCookies, now)
 	}
@@ -197,7 +202,7 @@ func (s *Service) renew(ctx context.Context, cookies map[string]string, exp map[
 				mergeSetCookies(res.Cookies, res.Exp, wakeCookies, now)
 				res.WakeRequested = true
 				beforeVerify := cloneCookies(res.Cookies)
-				verify, verifyCookies, verr := s.getSession(ctx, res.Cookies)
+				verify, verifyCookies, verr := s.getSessionWithRetry(ctx, res.Cookies)
 				if len(verifyCookies) > 0 {
 					mergeSetCookies(res.Cookies, res.Exp, verifyCookies, now)
 				}
@@ -289,6 +294,40 @@ func (s *Service) seal(res *renewResult) error {
 	res.CookiesEnc = enc
 	res.CookiesExpJSON = marshalCookiesExp(res.Exp)
 	return nil
+}
+
+func isSessionTransportError(err error) bool {
+	if err == nil || errors.Is(err, ErrUnauthorized) {
+		return false
+	}
+	var httpErr *MuseHTTPError
+	if errors.As(err, &httpErr) {
+		return false
+	}
+	var unavailable *MuseSessionUnavailable
+	if errors.As(err, &unavailable) {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return true
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+func (s *Service) getSessionWithRetry(ctx context.Context, cookies map[string]string) (*sessionResponse, []*http.Cookie, error) {
+	sess, setCookies, err := s.getSession(ctx, cookies)
+	if err == nil || ctx.Err() != nil || !isSessionTransportError(err) {
+		return sess, setCookies, err
+	}
+	timer := time.NewTimer(sessionRetryDelay)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return nil, nil, err
+	case <-timer.C:
+	}
+	return s.getSession(ctx, cookies)
 }
 
 func (s *Service) getSession(ctx context.Context, cookies map[string]string) (*sessionResponse, []*http.Cookie, error) {
