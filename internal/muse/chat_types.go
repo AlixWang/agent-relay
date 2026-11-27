@@ -75,6 +75,15 @@ type chatSendResult struct {
 	EchoLines   int
 	TimedOut    bool
 	InvalidEcho bool
+
+	// Addr is the address form this send used: "implicit" for the member main
+	// chat (session_id omitted) or "explicit" for a side chat. FailureCode is
+	// the classified send error code, kept so the orchestrator can audit it
+	// without re-parsing the error. ResolvedFingerprint is the first 8 hex
+	// characters of SHA-256(resolved session id); the raw id never leaves Send.
+	Addr                string
+	FailureCode         string
+	ResolvedFingerprint string
 }
 
 type chatCancelResult struct {
