@@ -20,7 +20,7 @@ Add an opt-in, in-process MCP gateway (`internal/mcpgateway/`) alongside the exi
 - **In-process secret resolution & upstream isolation:** Services resolve `secret:<name>` references through the Resource Hub in memory (plaintext credentials are disallowed in config; secret updates/deletes invalidate the gateway cache). Upstream HTTP clients disable redirects (`http.ErrUseLastResponse`) to prevent credential or OAuth form replay. AdSense and GA share a serialized Google OAuth2 ADC token provider (`internal/mcpgateway/google_adc.go`) with SHA-256 secret-change detection and `401`-only single retry.
 - **Initial service catalog:**
   - `adsense`: 9 read tools; 5 write placeholders remain unexposed (`not_implemented`) until AFP approval and full-scope ADC credentials are available.
-  - `bing-webmaster`: 14 read tools + 6 write tools (4 low-risk direct; `add_blocked_url` and `remove_blocked_url` high-risk via second approval).
+  - `bing-webmaster`: 16 read tools + 6 write tools (4 low-risk direct; `add_blocked_url` and `remove_blocked_url` high-risk via second approval).
   - `ga`: 9 read tools reusing the same ADC secret as AdSense; GA writes (`create_property_annotation`) are out of scope.
 - **Persistence & audit:** Adds `mcp_keys`, `mcp_approvals`, and `mcp_audit` to both `internal/store/schema.sql` and `migrations/001_init.sql` (following repo conventions: no foreign keys or `CHECK` constraints, Unix-second integer timestamps). Gateway calls and approval transitions are audited in `mcp_audit` (retained 90 days for reads, 180 days for writes, capped at 2M rows) and mirrored best-effort into `audit_log`; CSV export neutralizes spreadsheet formula prefixes.
 

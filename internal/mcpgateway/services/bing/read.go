@@ -97,6 +97,8 @@ func (s *Service) Handle(ctx context.Context, call mcpgateway.Call) (mcpgateway.
 		ToolCrawlIssues, ToolListFeeds, ToolPageQueries, ToolQueryPages,
 		ToolGetBlockedURLs:
 		return s.siteRead(ctx, call)
+	case ToolGetURLInfo, ToolGetURLTrafficInfo:
+		return s.urlRead(ctx, call)
 	case ToolKeyword, ToolRelatedKeyword, ToolKeywordStats:
 		return s.keywordRead(ctx, call)
 	case ToolSubmitURL:
@@ -275,6 +277,47 @@ func (s *Service) urlSubmissionQuota(ctx context.Context, call mcpgateway.Call) 
 		"daily_quota":   quota.DailyQuota,
 		"monthly_quota": quota.MonthlyQuota,
 	}, RowCount: 1, UpstreamStatus: 200}, nil
+}
+
+// urlRead covers the single-URL index tools. Unlike siteRead (which returns
+// row lists) GetUrlInfo/GetUrlTrafficInfo return one object, so the upstream
+// fields are flattened alongside the request context.
+func (s *Service) urlRead(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
+	var p urlReadArgs
+	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.URL) {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("url must belong to the site")
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
+	}
+	if u, uerr := mcpgateway.NormalizeURL(p.URL); uerr == nil {
+		p.URL = u.String()
+	}
+	method := "GetUrlInfo"
+	if call.Tool == ToolGetURLTrafficInfo {
+		method = "GetUrlTrafficInfo"
+	}
+	params := siteParam(p.Site)
+	params.Set("url", p.URL)
+	var info map[string]any
+	if err := s.call(ctx, http.MethodGet, method, params, nil, &info); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	data := map[string]any{"site": p.Site, "requested_url": p.URL}
+	if info != nil {
+		if normalized, ok := normalizeValue(info).(map[string]any); ok {
+			for k, v := range normalized {
+				data[k] = v
+			}
+		}
+	}
+	return mcpgateway.Result{Data: data, RowCount: 1, UpstreamStatus: 200}, nil
 }
 
 func (s *Service) siteRead(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {

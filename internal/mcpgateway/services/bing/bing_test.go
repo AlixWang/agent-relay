@@ -88,6 +88,19 @@ func (m *mockBing) handler(w http.ResponseWriter, r *http.Request) {
 			map[string]any{"Date": "/Date(1700000000000)/", "EntityType": 0, "RequestType": 1, "Url": "https://x.test/private"},
 			map[string]any{"Date": "/Date(1700000000000)/", "EntityType": 1, "RequestType": 1, "Url": "https://x.test/dir/"},
 		}})
+	case "/webmaster/api.svc/json/GetUrlInfo":
+		_ = json.NewEncoder(w).Encode(map[string]any{"d": map[string]any{
+			"__type": "UrlInfo:#Microsoft.Bing.Webmaster.Api", "AnchorCount": 50,
+			"DiscoveryDate": "/Date(1315349995266-0700)/", "DocumentSize": 0,
+			"HttpStatus": 200, "IsPage": true,
+			"LastCrawledDate":    "/Date(1316213995266-0700)/",
+			"TotalChildUrlCount": 100, "Url": "https://x.test/a",
+		}})
+	case "/webmaster/api.svc/json/GetUrlTrafficInfo":
+		_ = json.NewEncoder(w).Encode(map[string]any{"d": map[string]any{
+			"__type": "UrlTrafficInfo:#Microsoft.Bing.Webmaster.Api",
+			"Clicks": 10, "Impressions": 100, "IsPage": true, "Url": "https://x.test/a",
+		}})
 	case "/webmaster/api.svc/json/GetKeyword":
 		_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
 			map[string]any{"Keyword": "image resizer", "Impressions": 5},
@@ -119,7 +132,7 @@ func newTestService(t *testing.T) (*Service, *mockBing) {
 func TestBingToolSurface(t *testing.T) {
 	svc, _ := newTestService(t)
 	tools := svc.Tools()
-	if len(tools) != 20 {
+	if len(tools) != 22 {
 		t.Fatalf("tools = %d", len(tools))
 	}
 	risk := map[string]string{}
@@ -138,7 +151,7 @@ func TestBingToolSurface(t *testing.T) {
 			t.Fatalf("%s risk = %q", name, risk[name])
 		}
 	}
-	for _, name := range []string{ToolGetURLSubmissionQuota, ToolGetBlockedURLs} {
+	for _, name := range []string{ToolGetURLSubmissionQuota, ToolGetBlockedURLs, ToolGetURLInfo, ToolGetURLTrafficInfo} {
 		if risk[name] != mcpgateway.RiskRead || !readOnly[name] {
 			t.Fatalf("%s read metadata = %q/%v", name, risk[name], readOnly[name])
 		}
@@ -231,6 +244,78 @@ func TestBingP0Reads(t *testing.T) {
 	mock.mu.Unlock()
 	if !strings.HasSuffix(path, "/GetBlockedUrls") || site != "https://x.test/" {
 		t.Fatalf("blocked passthrough path=%q site=%q", path, site)
+	}
+}
+
+func TestBingP1URLReads(t *testing.T) {
+	svc, mock := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.Handle(ctx, mcpgateway.Call{
+		Tool:   ToolGetURLInfo,
+		Params: json.RawMessage(`{"site":"https://x.test/","url":"https://x.test/a"}`),
+	})
+	if err != nil {
+		t.Fatalf("url info: %v", err)
+	}
+	data := res.Data.(map[string]any)
+	if data["site"] != "https://x.test/" || data["requested_url"] != "https://x.test/a" {
+		t.Fatalf("url info context: %+v", data)
+	}
+	if data["Url"] != "https://x.test/a" || data["HttpStatus"].(float64) != 200 || data["IsPage"] != true {
+		t.Fatalf("url info payload: %+v", data)
+	}
+	if data["AnchorCount"].(float64) != 50 || data["TotalChildUrlCount"].(float64) != 100 {
+		t.Fatalf("url info counts: %+v", data)
+	}
+	if data["LastCrawledDate"] != "2011-09-16" || data["DiscoveryDate"] != "2011-09-06" {
+		t.Fatalf("url info dates not normalized: %+v", data)
+	}
+	if res.RowCount != 1 || res.UpstreamStatus != http.StatusOK {
+		t.Fatalf("url info result metadata: %+v", res)
+	}
+	mock.mu.Lock()
+	path, site, target := mock.lastRead, mock.lastQuery.Get("siteUrl"), mock.lastQuery.Get("url")
+	mock.mu.Unlock()
+	if !strings.HasSuffix(path, "/GetUrlInfo") || site != "https://x.test/" || target != "https://x.test/a" {
+		t.Fatalf("url info passthrough path=%q site=%q url=%q", path, site, target)
+	}
+
+	res, err = svc.Handle(ctx, mcpgateway.Call{
+		Tool:   ToolGetURLTrafficInfo,
+		Params: json.RawMessage(`{"site":"https://x.test/","url":"https://x.test/a"}`),
+	})
+	if err != nil {
+		t.Fatalf("url traffic info: %v", err)
+	}
+	data = res.Data.(map[string]any)
+	if data["Url"] != "https://x.test/a" || data["Clicks"].(float64) != 10 || data["Impressions"].(float64) != 100 {
+		t.Fatalf("url traffic payload: %+v", data)
+	}
+	mock.mu.Lock()
+	path, site, target = mock.lastRead, mock.lastQuery.Get("siteUrl"), mock.lastQuery.Get("url")
+	mock.mu.Unlock()
+	if !strings.HasSuffix(path, "/GetUrlTrafficInfo") || site != "https://x.test/" || target != "https://x.test/a" {
+		t.Fatalf("url traffic passthrough path=%q site=%q url=%q", path, site, target)
+	}
+
+	if err := svc.validateURLRead(json.RawMessage(`{"site":"https://x.test/","url":"https://other.test/a"}`)); err == nil {
+		t.Fatal("foreign URL accepted")
+	}
+}
+
+func TestBingP1URLCredentialMissing(t *testing.T) {
+	missing := New(Options{
+		CredentialRef: "secret:NOPE", Credentials: fakeSecrets{err: mcpgateway.ErrCredentialMissing},
+		MaxRows: 10,
+	})
+	for _, tool := range []string{ToolGetURLInfo, ToolGetURLTrafficInfo} {
+		_, err := missing.Handle(context.Background(), mcpgateway.Call{
+			Tool:   tool,
+			Params: json.RawMessage(`{"site":"https://x.test/","url":"https://x.test/a"}`),
+		})
+		if err == nil || !strings.Contains(err.Error(), mcpgateway.CodeCredentialMissing) {
+			t.Fatalf("%s missing credential: %v", tool, err)
+		}
 	}
 }
 
