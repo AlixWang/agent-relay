@@ -222,6 +222,27 @@ func waitChatDone(t *testing.T, svc *Service, id string) {
 	}
 }
 
+// waitChatAudit polls for the expected audit row. The worker publishes a
+// status (waiting or terminal) before appending its audit row, so an
+// immediate query after waitChatStatus may legitimately observe zero rows.
+func waitChatAudit(t *testing.T, st store.Store, action string, want int) []*store.AuditEntry {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rows, err := st.ListAudit("", action, 0, 100)
+		if err != nil {
+			t.Fatalf("list %s audit: %v", action, err)
+		}
+		if len(rows) >= want {
+			return rows
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s audit rows=%d, want at least %d", action, len(rows), want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func chatAdmissionCode(t *testing.T, err error) (*ChatAdmissionError, string) {
 	t.Helper()
 	var ce *ChatAdmissionError
@@ -261,9 +282,9 @@ func TestChatHappyPathPollsReplyAndAuditsMetadataOnly(t *testing.T) {
 		t.Fatalf("timestamps: %+v", got)
 	}
 	for _, action := range []string{"muse.chat.sending", "muse.chat.sent", "muse.chat.replied"} {
-		rows, err := env.st.ListAudit("", action, 0, 20)
-		if err != nil || len(rows) != 1 {
-			t.Fatalf("%s audit rows=%d err=%v", action, len(rows), err)
+		rows := waitChatAudit(t, env.st, action, 1)
+		if len(rows) != 1 {
+			t.Fatalf("%s audit rows=%d", action, len(rows))
 		}
 		if strings.Contains(rows[0].Detail, "hello muse") || strings.Contains(rows[0].Detail, "the answer") {
 			t.Fatalf("%s leaked content: %q", action, rows[0].Detail)
@@ -336,9 +357,9 @@ func TestChatDeliveryUnknownDoesNotResend(t *testing.T) {
 	if sends != 1 {
 		t.Fatalf("automatic resend: sends=%d", sends)
 	}
-	rows, err := env.st.ListAudit("", "muse.chat.delivery_unknown", 0, 20)
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("delivery_unknown rows=%d err=%v", len(rows), err)
+	rows := waitChatAudit(t, env.st, "muse.chat.delivery_unknown", 1)
+	if len(rows) != 1 {
+		t.Fatalf("delivery_unknown rows=%d", len(rows))
 	}
 	// A successful read with no matching event must be distinguishable from a
 	// read failure: zero confirm errors, status 200, no raw id (synthetic
@@ -381,7 +402,7 @@ func TestChatTimeoutAndDraftPartial(t *testing.T) {
 	if got.PartialText != "still writing" || !got.PartialDraft {
 		t.Fatalf("partial: %+v", got)
 	}
-	rows, _ := env.st.ListAudit("", "muse.chat.timeout", 0, 20)
+	rows := waitChatAudit(t, env.st, "muse.chat.timeout", 1)
 	if len(rows) != 1 || !strings.Contains(rows[0].Detail, "partial=yes") ||
 		!strings.Contains(rows[0].Detail, "assistant_events=1") ||
 		!strings.Contains(rows[0].Detail, "draft_events=1") {

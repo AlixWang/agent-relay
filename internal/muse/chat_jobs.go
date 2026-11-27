@@ -1064,9 +1064,16 @@ func (s *Service) pollChatHistory(ctx context.Context, sess chatSession, job *Ch
 }
 
 func (s *Service) auditSending(job *ChatJob) error {
+	// A side chat's explicit id is caller-controlled: audit only its class,
+	// never the raw value (§4.2). The resolved fingerprint on the outcome
+	// audits is the sole id-derived field allowed there.
+	session := "main"
+	if job.SessionID != "" {
+		session = "side"
+	}
 	detail := fmt.Sprintf("chat=%s peer=%s account=%s session=%s baseline=%d text_len=%d text_sha256=%s request_id=%s access=1 send_addr=%s",
 		chatAuditValue(job.ID), chatAuditValue(job.PeerID), chatAuditValue(job.AccountID),
-		chatAuditValue(job.Session), job.BaselineValue(), job.TextLen,
+		session, job.BaselineValue(), job.TextLen,
 		job.TextHash, chatAuditValue(job.RequestID), chatAuditValue(chatSendAddr(job.SessionID)))
 	return s.st.AppendAudit(job.Actor, "muse.chat.sending", truncate(detail, chatAuditDetail), s.now().Unix())
 }

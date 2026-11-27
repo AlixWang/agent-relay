@@ -522,17 +522,36 @@ func TestChatSideChatKeepsExplicitAddress(t *testing.T) {
 			t.Fatalf("/chat/history session_id=%q, want side-1", got)
 		}
 	}
-	sending, err := env.st.ListAudit("", "muse.chat.sending", 0, 20)
-	if err != nil || len(sending) != 1 || !strings.Contains(sending[0].Detail, "send_addr=explicit") {
-		t.Fatalf("sending audit: %+v err=%v", sending, err)
+	sending := waitChatAudit(t, env.st, "muse.chat.sending", 1)
+	if len(sending) != 1 {
+		t.Fatalf("sending audit rows=%d", len(sending))
 	}
-	sent, err := env.st.ListAudit("", "muse.chat.sent", 0, 20)
-	if err != nil || len(sent) != 1 {
-		t.Fatalf("sent audit rows=%d err=%v", len(sent), err)
+	sendingDetail := sending[0].Detail
+	if !strings.Contains(sendingDetail, "send_addr=explicit") {
+		t.Fatalf("sending audit detail: %q", sendingDetail)
+	}
+	if got := chatAuditField(t, sendingDetail, "session"); got != "side" {
+		t.Fatalf("sending audit session=%q, want side", got)
+	}
+	if strings.Contains(sendingDetail, "side-1") {
+		t.Fatalf("sending audit leaked raw side-chat id: %q", sendingDetail)
+	}
+	sent := waitChatAudit(t, env.st, "muse.chat.sent", 1)
+	if len(sent) != 1 {
+		t.Fatalf("sent audit rows=%d", len(sent))
 	}
 	for _, want := range []string{"send_addr=explicit", "send_status=200", "resolved="} {
 		if !strings.Contains(sent[0].Detail, want) {
 			t.Fatalf("sent audit %q missing %q", sent[0].Detail, want)
+		}
+	}
+	all, err := env.st.ListAudit("", "", 0, 100)
+	if err != nil {
+		t.Fatalf("list audits: %v", err)
+	}
+	for _, row := range all {
+		if strings.Contains(row.Detail, "side-1") {
+			t.Fatalf("%s audit leaked raw side-chat id: %q", row.Action, row.Detail)
 		}
 	}
 
@@ -675,16 +694,19 @@ func TestChatEmptySessionReachesWaitingAndAuditsConfirmed(t *testing.T) {
 	if got.Error != nil {
 		t.Fatalf("unexpected error: %+v", got.Error)
 	}
-	sending, err := env.st.ListAudit("", "muse.chat.sending", 0, 20)
-	if err != nil || len(sending) != 1 {
-		t.Fatalf("sending audit rows=%d err=%v", len(sending), err)
+	sending := waitChatAudit(t, env.st, "muse.chat.sending", 1)
+	if len(sending) != 1 {
+		t.Fatalf("sending audit rows=%d", len(sending))
 	}
 	if !strings.Contains(sending[0].Detail, "send_addr=implicit") {
 		t.Fatalf("sending audit detail: %q", sending[0].Detail)
 	}
-	rows, err := env.st.ListAudit("", "muse.chat.sent", 0, 20)
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("sent audit rows=%d err=%v", len(rows), err)
+	if got := chatAuditField(t, sending[0].Detail, "session"); got != "main" {
+		t.Fatalf("sending audit session=%q, want main", got)
+	}
+	rows := waitChatAudit(t, env.st, "muse.chat.sent", 1)
+	if len(rows) != 1 {
+		t.Fatalf("sent audit rows=%d", len(rows))
 	}
 	for _, want := range []string{
 		"delivery=confirmed", "send_status=200", "send_echo=yes",
@@ -756,9 +778,9 @@ func TestChatSessionListEnvelopeResolvesMainChatToWaiting(t *testing.T) {
 			if got.Error != nil {
 				t.Fatalf("unexpected error: %+v", got.Error)
 			}
-			sent, err := env.st.ListAudit("", "muse.chat.sent", 0, 20)
-			if err != nil || len(sent) != 1 {
-				t.Fatalf("sent audit rows=%d err=%v", len(sent), err)
+			sent := waitChatAudit(t, env.st, "muse.chat.sent", 1)
+			if len(sent) != 1 {
+				t.Fatalf("sent audit rows=%d", len(sent))
 			}
 			if !strings.Contains(sent[0].Detail, "delivery=confirmed") {
 				t.Fatalf("sent audit detail: %q", sent[0].Detail)
