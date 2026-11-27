@@ -79,7 +79,8 @@ type KeysConfig struct {
 }
 
 // DefaultConfig returns the documented defaults (#25 reads-only new keys,
-// write master switch off, only the four low-risk Bing writes enabled).
+// write master switch off, only the four low-risk Bing writes plus the
+// approval-gated remove_blocked_url enabled).
 func DefaultConfig() Config {
 	return Config{
 		Enabled:                 false,
@@ -105,8 +106,12 @@ func DefaultConfig() Config {
 				// behind all four write layers.
 				ServiceGA: {AllowedTools: []string{}},
 				// add_blocked_url is implemented but intentionally NOT in the
-				// first-batch allowlist (design v5 decision).
-				ServiceBing: {AllowedTools: []string{"submit_url", "submit_url_batch", "submit_feed", "remove_feed"}},
+				// first-batch allowlist (design v5 decision). remove_blocked_url
+				// is enabled because it is the approval-gated safety valve for
+				// an accidental block.
+				ServiceBing: {AllowedTools: []string{
+					"submit_url", "submit_url_batch", "submit_feed", "remove_feed", "remove_blocked_url",
+				}},
 			},
 			BatchCap:                  100,
 			ApprovalTTLSeconds:        600,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -32,11 +33,13 @@ type recordedRequest struct {
 }
 
 type mockBing struct {
-	t        *testing.T
-	mu       sync.Mutex
-	reads    int
-	writes   []recordedRequest
-	failNext int
+	t         *testing.T
+	mu        sync.Mutex
+	reads     int
+	lastRead  string
+	lastQuery url.Values
+	writes    []recordedRequest
+	failNext  int
 }
 
 func (m *mockBing) handler(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +61,8 @@ func (m *mockBing) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.reads++
+	m.lastRead = r.URL.Path
+	m.lastQuery = r.URL.Query()
 	switch r.URL.Path {
 	case "/webmaster/api.svc/json/GetUserSites":
 		_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
@@ -77,6 +82,11 @@ func (m *mockBing) handler(w http.ResponseWriter, r *http.Request) {
 	case "/webmaster/api.svc/json/GetFeeds":
 		_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
 			map[string]any{"Url": "https://x.test/sitemap.xml"},
+		}})
+	case "/webmaster/api.svc/json/GetBlockedUrls":
+		_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
+			map[string]any{"Date": "/Date(1700000000000)/", "EntityType": 0, "RequestType": 1, "Url": "https://x.test/private"},
+			map[string]any{"Date": "/Date(1700000000000)/", "EntityType": 1, "RequestType": 1, "Url": "https://x.test/dir/"},
 		}})
 	case "/webmaster/api.svc/json/GetKeyword":
 		_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
@@ -109,19 +119,28 @@ func newTestService(t *testing.T) (*Service, *mockBing) {
 func TestBingToolSurface(t *testing.T) {
 	svc, _ := newTestService(t)
 	tools := svc.Tools()
-	if len(tools) != 17 {
+	if len(tools) != 20 {
 		t.Fatalf("tools = %d", len(tools))
 	}
 	risk := map[string]string{}
+	readOnly := map[string]bool{}
 	for _, tool := range tools {
 		risk[tool.Name] = tool.Risk
+		readOnly[tool.Name] = tool.ReadOnly
 	}
-	if risk[ToolAddBlockedURL] != mcpgateway.RiskHigh {
-		t.Fatalf("add_blocked_url risk = %q", risk[ToolAddBlockedURL])
+	for _, name := range []string{ToolAddBlockedURL, ToolRemoveBlockedURL} {
+		if risk[name] != mcpgateway.RiskHigh {
+			t.Fatalf("%s risk = %q", name, risk[name])
+		}
 	}
 	for _, name := range []string{ToolSubmitURL, ToolSubmitURLBatch, ToolSubmitFeed, ToolRemoveFeed} {
 		if risk[name] != mcpgateway.RiskLow {
 			t.Fatalf("%s risk = %q", name, risk[name])
+		}
+	}
+	for _, name := range []string{ToolGetURLSubmissionQuota, ToolGetBlockedURLs} {
+		if risk[name] != mcpgateway.RiskRead || !readOnly[name] {
+			t.Fatalf("%s read metadata = %q/%v", name, risk[name], readOnly[name])
 		}
 	}
 	if svc.Prefix() != "bing" || len(svc.CredentialRefs()) != 1 {
@@ -173,6 +192,102 @@ func TestBingReadsNormalizeAndTruncate(t *testing.T) {
 	}
 	if len(res.Data.(map[string]any)["rows"].([]any)) != 1 {
 		t.Fatalf("keyword rows: %+v", res.Data)
+	}
+}
+
+func TestBingP0Reads(t *testing.T) {
+	svc, mock := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.Handle(ctx, mcpgateway.Call{Tool: ToolGetURLSubmissionQuota, Params: json.RawMessage(`{"site":"https://x.test/"}`)})
+	if err != nil {
+		t.Fatalf("quota: %v", err)
+	}
+	data := res.Data.(map[string]any)
+	if data["daily_quota"].(int) != 5 || data["monthly_quota"].(int) != 100 {
+		t.Fatalf("quota payload: %+v", data)
+	}
+	mock.mu.Lock()
+	path, site := mock.lastRead, mock.lastQuery.Get("siteUrl")
+	mock.mu.Unlock()
+	if !strings.HasSuffix(path, "/GetUrlSubmissionQuota") || site != "https://x.test/" {
+		t.Fatalf("quota passthrough path=%q site=%q", path, site)
+	}
+
+	res, err = svc.Handle(ctx, mcpgateway.Call{Tool: ToolGetBlockedURLs, Params: json.RawMessage(`{"site":"https://x.test/"}`)})
+	if err != nil {
+		t.Fatalf("blocked urls: %v", err)
+	}
+	data = res.Data.(map[string]any)
+	rows := data["rows"].([]map[string]any)
+	blocked := data["blocked_urls"].([]map[string]any)
+	if len(rows) != 2 || len(blocked) != 2 {
+		t.Fatalf("blocked rows: %+v", data)
+	}
+	if rows[0]["Date"] != "2023-11-14" || rows[0]["Url"] != "https://x.test/private" {
+		t.Fatalf("blocked row not normalized: %+v", rows[0])
+	}
+	mock.mu.Lock()
+	path, site = mock.lastRead, mock.lastQuery.Get("siteUrl")
+	mock.mu.Unlock()
+	if !strings.HasSuffix(path, "/GetBlockedUrls") || site != "https://x.test/" {
+		t.Fatalf("blocked passthrough path=%q site=%q", path, site)
+	}
+}
+
+func TestBingRemoveBlockedURL(t *testing.T) {
+	svc, mock := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.Handle(ctx, mcpgateway.Call{Tool: ToolRemoveBlockedURL, Params: json.RawMessage(`{"site":"https://x.test/","blockedUrl":"https://x.test/private"}`)})
+	if err != nil {
+		t.Fatalf("remove blocked: %v", err)
+	}
+	if res.Data.(map[string]any)["removed"] != true {
+		t.Fatalf("remove result: %+v", res.Data)
+	}
+	mock.mu.Lock()
+	last := mock.writes[len(mock.writes)-1]
+	mock.mu.Unlock()
+	if !strings.HasSuffix(last.path, "/RemoveBlockedUrl") {
+		t.Fatalf("upstream method = %q", last.path)
+	}
+	blocked, _ := last.body["blockedUrl"].(map[string]any)
+	if blocked["Url"] != "https://x.test/private" || int(blocked["RequestType"].(float64)) != 0 || int(blocked["EntityType"].(float64)) != 0 {
+		t.Fatalf("remove body: %+v", last.body)
+	}
+
+	if _, err := svc.Handle(ctx, mcpgateway.Call{Tool: ToolRemoveBlockedURL, Params: json.RawMessage(`{"site":"https://x.test/","blockedUrl":"https://x.test/dir/","entity_type":"directory"}`)}); err != nil {
+		t.Fatalf("remove directory: %v", err)
+	}
+	mock.mu.Lock()
+	last = mock.writes[len(mock.writes)-1]
+	mock.mu.Unlock()
+	blocked, _ = last.body["blockedUrl"].(map[string]any)
+	if int(blocked["EntityType"].(float64)) != 1 {
+		t.Fatalf("directory EntityType = %v, want 1", blocked["EntityType"])
+	}
+	if err := svc.validateRemoveBlockedURL(json.RawMessage(`{"site":"https://x.test/","blockedUrl":"https://x.test/"}`)); err == nil {
+		t.Fatal("removing the site root accepted")
+	}
+	if err := svc.validateRemoveBlockedURL(json.RawMessage(`{"site":"https://x.test/","blockedUrl":"https://other.test/x"}`)); err == nil {
+		t.Fatal("removing a foreign URL accepted")
+	}
+}
+
+func TestBingP0CredentialMissing(t *testing.T) {
+	missing := New(Options{
+		CredentialRef: "secret:NOPE", Credentials: fakeSecrets{err: mcpgateway.ErrCredentialMissing},
+		MaxRows: 10,
+	})
+	calls := []mcpgateway.Call{
+		{Tool: ToolGetURLSubmissionQuota, Params: json.RawMessage(`{"site":"https://x.test/"}`)},
+		{Tool: ToolGetBlockedURLs, Params: json.RawMessage(`{"site":"https://x.test/"}`)},
+		{Tool: ToolRemoveBlockedURL, Params: json.RawMessage(`{"site":"https://x.test/","blockedUrl":"https://x.test/private"}`)},
+	}
+	for _, call := range calls {
+		_, err := missing.Handle(context.Background(), call)
+		if err == nil || !strings.Contains(err.Error(), mcpgateway.CodeCredentialMissing) {
+			t.Fatalf("%s missing credential: %v", call.Tool, err)
+		}
 	}
 }
 

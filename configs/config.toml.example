@@ -182,12 +182,13 @@ allowed_tools = []
 [mcp_gateway.write.ga]
 allowed_tools = []
 
-# First batch: four low-risk writes. add_blocked_url is implemented but is
-# intentionally absent until the second wave; high-risk calls need an
+# First batch: four low-risk writes plus remove_blocked_url, the high-risk
+# safety valve for an accidental block. add_blocked_url is implemented but is
+# intentionally absent until the second wave. High-risk calls need an
 # operator approval and are always one-shot. These scalar knobs may live here
 # (v5 §6) or under [mcp_gateway.write]; per-service values win.
 [mcp_gateway.write.bing-webmaster]
-allowed_tools = ["submit_url", "submit_url_batch", "submit_feed", "remove_feed"]
+allowed_tools = ["submit_url", "submit_url_batch", "submit_feed", "remove_feed", "remove_blocked_url"]
 batch_cap = 100
 approval_ttl_secs = 600
 approval_pending_ttl_secs = 86400

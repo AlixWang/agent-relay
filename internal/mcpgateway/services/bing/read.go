@@ -91,8 +91,11 @@ func (s *Service) Handle(ctx context.Context, call mcpgateway.Call) (mcpgateway.
 	switch call.Tool {
 	case ToolListSites:
 		return s.listSites(ctx)
+	case ToolGetURLSubmissionQuota:
+		return s.urlSubmissionQuota(ctx, call)
 	case ToolQueryStats, ToolPageStats, ToolRankTraffic, ToolCrawlStats,
-		ToolCrawlIssues, ToolListFeeds, ToolPageQueries, ToolQueryPages:
+		ToolCrawlIssues, ToolListFeeds, ToolPageQueries, ToolQueryPages,
+		ToolGetBlockedURLs:
 		return s.siteRead(ctx, call)
 	case ToolKeyword, ToolRelatedKeyword, ToolKeywordStats:
 		return s.keywordRead(ctx, call)
@@ -106,6 +109,8 @@ func (s *Service) Handle(ctx context.Context, call mcpgateway.Call) (mcpgateway.
 		return s.removeFeed(ctx, call)
 	case ToolAddBlockedURL:
 		return s.addBlockedURL(ctx, call)
+	case ToolRemoveBlockedURL:
+		return s.removeBlockedURL(ctx, call)
 	default:
 		return mcpgateway.Result{}, mcpgateway.InvalidParams("unknown Bing tool %q", call.Tool)
 	}
@@ -248,6 +253,30 @@ func (s *Service) listSites(ctx context.Context) (mcpgateway.Result, error) {
 	return mcpgateway.Result{Data: map[string]any{"sites": items}, Truncated: truncated, RowCount: len(items), UpstreamStatus: 200}, nil
 }
 
+// urlSubmissionQuota exposes the same quota call the submit tools already use
+// before writing.
+func (s *Service) urlSubmissionQuota(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
+	var p siteArgs
+	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
+	}
+	quota, qerr := s.quota(ctx, p.Site)
+	if qerr != nil {
+		return mcpgateway.Result{}, qerr
+	}
+	return mcpgateway.Result{Data: map[string]any{
+		"site":          p.Site,
+		"daily_quota":   quota.DailyQuota,
+		"monthly_quota": quota.MonthlyQuota,
+	}, RowCount: 1, UpstreamStatus: 200}, nil
+}
+
 func (s *Service) siteRead(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
 	site, limit, page, query, err := decodeSiteRead(call.Tool, call.Params)
 	if err != nil {
@@ -294,6 +323,8 @@ func (s *Service) siteRead(ctx context.Context, call mcpgateway.Call) (mcpgatewa
 		data["totals"] = totalsOf(rows)
 	case ToolListFeeds:
 		data["feeds"] = items
+	case ToolGetBlockedURLs:
+		data["blocked_urls"] = items
 	}
 	if call.Tool == ToolPageQueries || call.Tool == ToolQueryPages {
 		data["note"] = "Bing returns at most its top rows; page-queries is time-ascending and capped near 1000."
@@ -339,6 +370,8 @@ func siteMethod(tool, site, page, query string) (string, url.Values) {
 		return "GetCrawlIssues", params
 	case ToolListFeeds:
 		return "GetFeeds", params
+	case ToolGetBlockedURLs:
+		return "GetBlockedUrls", params
 	case ToolPageQueries:
 		params.Set("page", page)
 		return "GetPageQueryStats", params
