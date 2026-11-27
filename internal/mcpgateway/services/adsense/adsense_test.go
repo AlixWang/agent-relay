@@ -2,11 +2,15 @@ package adsense
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -148,7 +152,7 @@ func TestAdSenseReadsAndReportTruncation(t *testing.T) {
 		t.Fatalf("accounts: %+v", data)
 	}
 	// Account resolution + report query shape.
-	raw := json.RawMessage(`{"account":"pub-111","startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["DATE","COUNTRY_NAME"],"metrics":["ESTIMATED_EARNINGS","IMPRESSIONS"],"limit":100}`)
+	raw := json.RawMessage(`{"account":"pub-111","startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["DATE","COUNTRY_NAME"],"metrics":["ESTIMATED_EARNINGS","IMPRESSIONS"],"limit":2}`)
 	res, err = svc.Handle(ctx, mcpgateway.Call{Tool: ToolGenerateReport, Params: raw})
 	if err != nil {
 		t.Fatalf("report: %v", err)
@@ -157,7 +161,7 @@ func TestAdSenseReadsAndReportTruncation(t *testing.T) {
 		t.Fatalf("truncation: %+v", res)
 	}
 	if mock.report.Get("startDate.year") != "2026" || mock.report.Get("startDate.month") != "11" ||
-		mock.report.Get("startDate.day") != "1" || mock.report.Get("limit") != "100" {
+		mock.report.Get("startDate.day") != "1" || mock.report.Get("limit") != "2" {
 		t.Fatalf("report query: %+v", mock.report)
 	}
 	if len(mock.report["dimensions"]) != 2 || len(mock.report["metrics"]) != 2 {
@@ -195,7 +199,7 @@ func TestAdSensePageURLDimension(t *testing.T) {
 		t.Fatal("PAGE_URL missing from allowedDimensions")
 	}
 	svc, mock := newTestService(t, nil)
-	raw := json.RawMessage(`{"account":"pub-111","startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["PAGE_URL"],"metrics":["ESTIMATED_EARNINGS"],"limit":10}`)
+	raw := json.RawMessage(`{"account":"pub-111","startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["PAGE_URL"],"metrics":["ESTIMATED_EARNINGS"],"limit":2}`)
 	if err := validateReportArg(raw); err != nil {
 		t.Fatalf("PAGE_URL rejected: %v", err)
 	}
@@ -331,6 +335,335 @@ func TestAdSenseFixesEnumsDatesPagingAndToken(t *testing.T) {
 	} {
 		if err := validateReportArg(json.RawMessage(bad)); err == nil {
 			t.Fatalf("accepted invalid report arg: %s", bad)
+		}
+	}
+}
+
+type pagedAdSense struct {
+	t *testing.T
+
+	mu            sync.Mutex
+	generateCalls int
+	csvCalls      int
+	omitTotal     bool
+	lastReport    url.Values
+	lastCSV       url.Values
+}
+
+func (m *pagedAdSense) handler(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/v2/accounts":
+		_ = json.NewEncoder(w).Encode(map[string]any{"accounts": []any{
+			map[string]any{"name": "accounts/pub-111", "displayName": "Main"},
+		}})
+	case strings.HasSuffix(r.URL.Path, "/reports:generateCsv"):
+		m.mu.Lock()
+		m.csvCalls++
+		m.lastCSV = r.URL.Query()
+		m.mu.Unlock()
+		text := "Date,Clicks\n2026-11-01,5\n2026-11-02,6\n2026-11-03,7\n"
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"contentType": "text/csv; charset=utf-8",
+			"data":        base64.StdEncoding.EncodeToString([]byte(text)),
+		})
+	case strings.HasSuffix(r.URL.Path, "/reports:generate"):
+		q := r.URL.Query()
+		m.mu.Lock()
+		m.generateCalls++
+		m.lastReport = q
+		m.mu.Unlock()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		rows := []any{}
+		for i := 0; i < 5 && (limit <= 0 || i < limit); i++ {
+			rows = append(rows, map[string]any{"cells": []any{
+				map[string]any{"value": fmt.Sprintf("r%d", i)},
+				map[string]any{"value": strconv.Itoa(i)},
+			}})
+		}
+		out := map[string]any{
+			"headers": []any{
+				map[string]any{"name": "PAGE_URL"}, map[string]any{"name": "CLICKS"},
+			},
+			"rows": rows,
+		}
+		if !m.omitTotal {
+			out["totalMatchedRows"] = "5"
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	default:
+		m.t.Errorf("unexpected path %s", r.URL.Path)
+		http.NotFound(w, r)
+	}
+}
+
+func newPagedAdSense(t *testing.T) (*Service, *pagedAdSense) {
+	t.Helper()
+	mock := &pagedAdSense{t: t}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "paged-token", "expires_in": 3600})
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer paged-token" {
+			t.Errorf("bad auth header: %q", r.Header.Get("Authorization"))
+		}
+		mock.handler(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	svc := New(Options{
+		CredentialRef: "secret:TEST_ADC", Credentials: fakeSecrets{value: testADC},
+		Upstream: mcpgateway.NewUpstream(5 * time.Second),
+		BaseURL:  srv.URL + "/v2", TokenURL: srv.URL + "/token",
+		MaxRows: 2, Now: func() time.Time { return time.Unix(1_800_000_000, 0) },
+	})
+	return svc, mock
+}
+
+func reportCells(t *testing.T, res mcpgateway.Result) []string {
+	t.Helper()
+	data := res.Data.(map[string]any)
+	rows := data["rows"].([]any)
+	out := make([]string, 0, len(rows))
+	for _, raw := range rows {
+		row := raw.(map[string]any)
+		cells := row["cells"].([]any)
+		out = append(out, cells[0].(map[string]any)["value"].(string))
+	}
+	return out
+}
+
+func TestAdSenseReportOffsetPagingNeverLosesRows(t *testing.T) {
+	svc, mock := newPagedAdSense(t)
+	ctx := context.Background()
+	call := func(offset int) mcpgateway.Result {
+		t.Helper()
+		raw := json.RawMessage(fmt.Sprintf(
+			`{"account":"pub-111","startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["PAGE_URL"],"metrics":["CLICKS"],"orderBy":"PAGE_URL","limit":2,"offset":%d}`, offset))
+		res, err := svc.Handle(ctx, mcpgateway.Call{Tool: ToolGenerateReport, Params: raw})
+		if err != nil {
+			t.Fatalf("offset %d: %v", offset, err)
+		}
+		return res
+	}
+
+	first := call(0)
+	if cells := reportCells(t, first); len(cells) != 2 || cells[0] != "r0" || cells[1] != "r1" {
+		t.Fatalf("page 1 rows = %v", cells)
+	}
+	firstData := first.Data.(map[string]any)
+	if !first.Truncated || firstData["has_more"] != true || firstData["next_offset"].(int) != 2 ||
+		firstData["total_matched_rows"].(int) != 5 {
+		t.Fatalf("page 1 paging metadata: %+v truncated=%v", firstData, first.Truncated)
+	}
+
+	second := call(2)
+	if cells := reportCells(t, second); len(cells) != 2 || cells[0] != "r2" || cells[1] != "r3" {
+		t.Fatalf("page 2 rows = %v", cells)
+	}
+	secondData := second.Data.(map[string]any)
+	if !second.Truncated || secondData["has_more"] != true || secondData["next_offset"].(int) != 4 {
+		t.Fatalf("page 2 paging metadata: %+v", secondData)
+	}
+
+	third := call(4)
+	if cells := reportCells(t, third); len(cells) != 1 || cells[0] != "r4" {
+		t.Fatalf("page 3 rows = %v", cells)
+	}
+	thirdData := third.Data.(map[string]any)
+	if third.Truncated || thirdData["has_more"] != false {
+		t.Fatalf("page 3 paging metadata: %+v truncated=%v", thirdData, third.Truncated)
+	}
+	if _, ok := thirdData["next_offset"]; ok {
+		t.Fatalf("last page must not have next_offset: %+v", thirdData)
+	}
+
+	// The three pages together are exactly the five upstream rows: no rows
+	// were dropped and no row was returned twice.
+	got := append(append(reportCells(t, first), reportCells(t, second)...), reportCells(t, third)...)
+	want := []string{"r0", "r1", "r2", "r3", "r4"}
+	if len(got) != len(want) {
+		t.Fatalf("combined pages = %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("combined pages = %v, want %v", got, want)
+		}
+	}
+
+	// upstream limit is offset+pageSize: 2, 4 and 6.
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if mock.generateCalls != 3 {
+		t.Fatalf("generate calls = %d", mock.generateCalls)
+	}
+	if mock.lastReport.Get("limit") != "6" {
+		t.Fatalf("last upstream limit = %q, want 6", mock.lastReport.Get("limit"))
+	}
+	if mock.lastReport.Get("offset") != "" {
+		t.Fatalf("gateway must not invent an upstream offset param: %+v", mock.lastReport)
+	}
+}
+
+func TestAdSensePagingWithoutTotalIsConservative(t *testing.T) {
+	svc, mock := newPagedAdSense(t)
+	mock.mu.Lock()
+	mock.omitTotal = true
+	mock.mu.Unlock()
+	ctx := context.Background()
+	call := func(offset int) mcpgateway.Result {
+		t.Helper()
+		raw := json.RawMessage(fmt.Sprintf(
+			`{"account":"pub-111","startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["PAGE_URL"],"metrics":["CLICKS"],"limit":2,"offset":%d}`, offset))
+		res, err := svc.Handle(ctx, mcpgateway.Call{Tool: ToolGenerateReport, Params: raw})
+		if err != nil {
+			t.Fatalf("offset %d: %v", offset, err)
+		}
+		return res
+	}
+	// Without totalMatchedRows, a full window must set has_more rather than
+	// silently claiming the report ended.
+	first := call(0)
+	if data := first.Data.(map[string]any); data["has_more"] != true || data["next_offset"].(int) != 2 {
+		t.Fatalf("full window without total must be conservative: %+v", data)
+	}
+	second := call(2)
+	if data := second.Data.(map[string]any); data["has_more"] != true || data["next_offset"].(int) != 4 {
+		t.Fatalf("second full window without total must be conservative: %+v", data)
+	}
+	third := call(4)
+	if data := third.Data.(map[string]any); data["has_more"] != false || third.Truncated {
+		t.Fatalf("short final window must end: %+v truncated=%v", data, third.Truncated)
+	}
+}
+
+func TestAdSenseCSVExportAndOffset(t *testing.T) {
+	svc, mock := newPagedAdSense(t)
+	ctx := context.Background()
+
+	raw := json.RawMessage(`{"account":"pub-111","startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["DATE"],"metrics":["CLICKS"],"limit":2,"format":"csv"}`)
+	res, err := svc.Handle(ctx, mcpgateway.Call{Tool: ToolGenerateReport, Params: raw})
+	if err != nil {
+		t.Fatalf("csv: %v", err)
+	}
+	data := res.Data.(map[string]any)
+	if data["format"] != "csv" || data["content_type"] != "text/csv; charset=utf-8" {
+		t.Fatalf("csv metadata: %+v", data)
+	}
+	text := data["csv"].(string)
+	if !strings.Contains(text, "Date,Clicks") || !strings.Contains(text, "2026-11-01,5") ||
+		!strings.Contains(text, "2026-11-02,6") || strings.Contains(text, "2026-11-03") {
+		t.Fatalf("csv page 1: %q", text)
+	}
+	if data["row_count"].(int) != 2 || data["has_more"] != true || data["next_offset"].(int) != 2 {
+		t.Fatalf("csv paging metadata: %+v", data)
+	}
+	mock.mu.Lock()
+	csvCalls, generateCalls := mock.csvCalls, mock.generateCalls
+	csvLimit := mock.lastCSV.Get("limit")
+	mock.mu.Unlock()
+	if csvCalls != 1 || generateCalls != 0 {
+		t.Fatalf("csv calls=%d generate calls=%d", csvCalls, generateCalls)
+	}
+	if csvLimit != "2" {
+		t.Fatalf("csv upstream limit = %q", csvLimit)
+	}
+
+	raw = json.RawMessage(`{"account":"pub-111","startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["DATE"],"metrics":["CLICKS"],"limit":2,"offset":2,"format":"csv"}`)
+	res, err = svc.Handle(ctx, mcpgateway.Call{Tool: ToolGenerateReport, Params: raw})
+	if err != nil {
+		t.Fatalf("csv offset: %v", err)
+	}
+	data = res.Data.(map[string]any)
+	text = data["csv"].(string)
+	if !strings.Contains(text, "2026-11-03,7") || strings.Contains(text, "2026-11-01") {
+		t.Fatalf("csv page 2: %q", text)
+	}
+	if data["row_count"].(int) != 1 || data["has_more"] != false || res.Truncated {
+		t.Fatalf("csv page 2 metadata: %+v", data)
+	}
+	mock.mu.Lock()
+	csvLimit = mock.lastCSV.Get("limit")
+	mock.mu.Unlock()
+	if csvLimit != "4" {
+		t.Fatalf("csv page 2 upstream limit = %q, want 4", csvLimit)
+	}
+}
+
+func TestAdSenseDeviceAndSourceDimensions(t *testing.T) {
+	allowed := []string{
+		"OS_TYPE_NAME", "OS_TYPE_CODE",
+		"BROWSER_TYPE_NAME", "BROWSER_TYPE_CODE",
+		"WEBVIEW_TYPE_NAME", "WEBVIEW_TYPE_CODE",
+		"TRAFFIC_SOURCE_NAME", "TRAFFIC_SOURCE_CODE",
+	}
+	for _, dim := range allowed {
+		if !allowedDimensions[dim] {
+			t.Fatalf("%s missing from allowedDimensions", dim)
+		}
+		raw := json.RawMessage(fmt.Sprintf(
+			`{"startDate":"2026-11-01","endDate":"2026-11-02","dimensions":[%q],"metrics":["ESTIMATED_EARNINGS"]}`, dim))
+		if err := validateReportArg(raw); err != nil {
+			t.Fatalf("%s rejected: %v", dim, err)
+		}
+	}
+	// WEBSEARCH_RESULT_TYPE_* is not part of the official v2 Dimension enum
+	// (the official search dimension is WEBSEARCH_QUERY_STRING, which is not
+	// in our whitelist), so both stale names must now be rejected. OS_PLATFORM
+	// is not an official AdSense dimension either; the official OS dimensions
+	// are OS_TYPE_NAME/OS_TYPE_CODE.
+	for _, dim := range []string{"WEBSEARCH_RESULT_TYPE_NAME", "WEBSEARCH_RESULT_TYPE_CODE", "OS_PLATFORM"} {
+		if allowedDimensions[dim] {
+			t.Fatalf("%s must not be whitelisted", dim)
+		}
+		raw := json.RawMessage(fmt.Sprintf(
+			`{"startDate":"2026-11-01","endDate":"2026-11-02","dimensions":[%q],"metrics":["ESTIMATED_EARNINGS"]}`, dim))
+		if err := validateReportArg(raw); err == nil {
+			t.Fatalf("%s accepted", dim)
+		}
+	}
+
+	// PAGE_URL + OS_TYPE_CODE end-to-end passthrough.
+	svc, mock := newTestService(t, nil)
+	raw := json.RawMessage(`{"account":"pub-111","startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["PAGE_URL","OS_TYPE_CODE"],"metrics":["ESTIMATED_EARNINGS"],"limit":2}`)
+	if _, err := svc.Handle(context.Background(), mcpgateway.Call{Tool: ToolGenerateReport, Params: raw}); err != nil {
+		t.Fatalf("PAGE_URL+OS_TYPE_CODE report: %v", err)
+	}
+	dims := mock.report["dimensions"]
+	if len(dims) != 2 || dims[0] != "PAGE_URL" || dims[1] != "OS_TYPE_CODE" {
+		t.Fatalf("dimensions not passed upstream: %+v", dims)
+	}
+}
+
+func TestAdSenseReportFormatOffsetValidationAndCredentialMissing(t *testing.T) {
+	svc, mock := newTestService(t, nil)
+	ctx := context.Background()
+	bad := []string{
+		`{"startDate":"2026-11-01","endDate":"2026-11-02","format":"xml"}`,
+		`{"startDate":"2026-11-01","endDate":"2026-11-02","offset":-1}`,
+		`{"startDate":"2026-11-01","endDate":"2026-11-02","offset":99999,"limit":2}`,
+		`{"startDate":"2026-11-01","endDate":"2026-11-02","limit":3}`,
+	}
+	for _, raw := range bad {
+		before := atomic.LoadInt32(&mock.calls)
+		if _, err := svc.Handle(ctx, mcpgateway.Call{Tool: ToolGenerateReport, Params: json.RawMessage(raw)}); err == nil {
+			t.Fatalf("accepted invalid report args: %s", raw)
+		}
+		if atomic.LoadInt32(&mock.calls) != before {
+			t.Fatalf("invalid report args reached upstream: %s", raw)
+		}
+	}
+
+	missing := New(Options{
+		CredentialRef: "secret:NOPE", Credentials: fakeSecrets{err: mcpgateway.ErrCredentialMissing},
+		MaxRows: 10,
+	})
+	for _, raw := range []string{
+		`{"startDate":"2026-11-01","endDate":"2026-11-02","format":"csv"}`,
+		`{"startDate":"2026-11-01","endDate":"2026-11-02","offset":2,"limit":2}`,
+	} {
+		_, err := missing.Handle(ctx, mcpgateway.Call{Tool: ToolGenerateReport, Params: json.RawMessage(raw)})
+		if err == nil || !strings.Contains(err.Error(), mcpgateway.CodeCredentialMissing) {
+			t.Fatalf("missing credential for %s: %v", raw, err)
 		}
 	}
 }

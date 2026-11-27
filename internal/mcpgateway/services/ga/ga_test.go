@@ -138,6 +138,32 @@ func (m *mockGA) api(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		})
+	case r.Method == http.MethodGet && r.URL.Path == "/v1beta/properties/470553943/keyEvents":
+		switch r.URL.Query().Get("pageToken") {
+		case "":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"keyEvents": []any{
+					map[string]any{
+						"name": "properties/470553943/keyEvents/1", "eventName": "purchase",
+						"countingMethod": "ONCE_PER_EVENT", "custom": true, "deletable": true,
+						"createTime":   "2026-11-01T00:00:00Z",
+						"defaultValue": map[string]any{"numericValue": 10, "currencyCode": "USD"},
+					},
+				},
+				"nextPageToken": "ke-2",
+			})
+		case "ke-2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"keyEvents": []any{
+					map[string]any{
+						"name": "properties/470553943/keyEvents/2", "eventName": "sign_up",
+						"countingMethod": "ONCE_PER_SESSION", "custom": false, "deletable": false,
+					},
+				},
+			})
+		default:
+			m.t.Errorf("unexpected keyEvents pageToken %q", r.URL.Query().Get("pageToken"))
+		}
 	case r.Method == http.MethodGet && r.URL.Path == "/v1alpha/properties/470553943/reportingDataAnnotations":
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"reportingDataAnnotations": []any{
@@ -218,7 +244,8 @@ func newTestGA(t *testing.T) (*Service, *mockGA, *testClock) {
 	svc := New(Options{
 		CredentialRef: "secret:GA_ADSENSE_ADC", Credentials: fakeSecrets{value: testADC},
 		Upstream:     mcpgateway.NewUpstream(5 * time.Second),
-		AdminBaseURL: srv.URL + "/v1alpha", DataBaseURL: srv.URL + "/v1beta",
+		AdminBaseURL: srv.URL + "/v1alpha", AdminBetaBaseURL: srv.URL + "/v1beta",
+		DataBaseURL:      srv.URL + "/v1beta",
 		DataAlphaBaseURL: srv.URL + "/v1alpha", TokenURL: srv.URL + "/token",
 		MaxRows: 2, Now: clock.Now,
 	})
@@ -228,7 +255,7 @@ func newTestGA(t *testing.T) (*Service, *mockGA, *testClock) {
 func TestGAToolSurfaceIsReadOnly(t *testing.T) {
 	svc, _, _ := newTestGA(t)
 	tools := svc.Tools()
-	if len(tools) != 9 {
+	if len(tools) != 10 {
 		t.Fatalf("tools = %d", len(tools))
 	}
 	want := ReadToolNames()
@@ -363,6 +390,35 @@ func TestGAAdminAndMetadataReads(t *testing.T) {
 	}
 	if mock.tokenCalls != 1 {
 		t.Fatalf("token calls = %d, want 1 cached token", mock.tokenCalls)
+	}
+}
+
+func TestGAListKeyEvents(t *testing.T) {
+	svc, _, _ := newTestGA(t)
+	res, err := svc.Handle(context.Background(), mcpgateway.Call{
+		Tool:   ToolListKeyEvents,
+		Params: json.RawMessage(`{"property_id":"properties/470553943"}`),
+	})
+	if err != nil {
+		t.Fatalf("list key events: %v", err)
+	}
+	data := res.Data.([]any)
+	if len(data) != 2 || res.RowCount != 2 || res.Truncated {
+		t.Fatalf("key events: %+v rows=%d truncated=%v", data, res.RowCount, res.Truncated)
+	}
+	first := data[0].(map[string]any)
+	if first["event_name"] != "purchase" || first["counting_method"] != "ONCE_PER_EVENT" ||
+		first["custom"] != true || first["deletable"] != true {
+		t.Fatalf("first key event: %+v", first)
+	}
+	defaultValue, _ := first["default_value"].(map[string]any)
+	if defaultValue == nil || defaultValue["numeric_value"].(float64) != 10 ||
+		defaultValue["currency_code"] != "USD" {
+		t.Fatalf("default value not snake_case: %+v", first)
+	}
+	second := data[1].(map[string]any)
+	if second["event_name"] != "sign_up" || second["counting_method"] != "ONCE_PER_SESSION" {
+		t.Fatalf("second key event: %+v", second)
 	}
 }
 
@@ -615,7 +671,8 @@ func TestGACredentialMissingDoesNotCallUpstream(t *testing.T) {
 	svc := New(Options{
 		CredentialRef: "secret:GA_ADSENSE_ADC",
 		Credentials:   fakeSecrets{err: mcpgateway.ErrCredentialMissing},
-		AdminBaseURL:  srv.URL + "/v1alpha", DataBaseURL: srv.URL + "/v1beta",
+		AdminBaseURL:  srv.URL + "/v1alpha", AdminBetaBaseURL: srv.URL + "/v1beta",
+		DataBaseURL:      srv.URL + "/v1beta",
 		DataAlphaBaseURL: srv.URL + "/v1alpha", TokenURL: srv.URL + "/token",
 		MaxRows: 10,
 	})
@@ -627,6 +684,15 @@ func TestGACredentialMissingDoesNotCallUpstream(t *testing.T) {
 	var ge *mcpgateway.Error
 	if !errors.As(err, &ge) || ge.Code != mcpgateway.CodeCredentialMissing {
 		t.Fatalf("missing credential code: %v", err)
+	}
+	_, err = svc.Handle(context.Background(), mcpgateway.Call{
+		Tool: ToolListKeyEvents, Params: json.RawMessage(`{"property_id":"470553943"}`),
+	})
+	if err == nil {
+		t.Fatal("missing credential accepted for list_key_events")
+	}
+	if !errors.As(err, &ge) || ge.Code != mcpgateway.CodeCredentialMissing {
+		t.Fatalf("list_key_events missing credential code: %v", err)
 	}
 	if mock.apiCalls != 0 || mock.tokenCalls != 0 {
 		t.Fatalf("missing credential reached upstream: token=%d api=%d", mock.tokenCalls, mock.apiCalls)

@@ -1,4 +1,4 @@
-// Package bing implements the Bing Webmaster Tools MCP service: 16 read tools
+// Package bing implements the Bing Webmaster Tools MCP service: 23 read tools
 // and six write tools (four low-risk direct; add_blocked_url and
 // remove_blocked_url high-risk via the gateway approval state machine).
 // Upstream is the JSON/HTTP API at
@@ -40,6 +40,14 @@ const (
 	ToolGetURLInfo            = "get_url_info"
 	ToolGetURLTrafficInfo     = "get_url_traffic_info"
 
+	ToolQueryPageDetailStats   = "get_query_page_detail_stats"
+	ToolQueryTrafficStats      = "get_query_traffic_stats"
+	ToolChildrenURLInfo        = "get_children_url_info"
+	ToolChildrenURLTrafficInfo = "get_children_url_traffic_info"
+	ToolLinkCounts             = "get_link_counts"
+	ToolURLLinks               = "get_url_links"
+	ToolFeedDetails            = "get_feed_details"
+
 	ToolSubmitURL        = "submit_url"
 	ToolSubmitURLBatch   = "submit_url_batch"
 	ToolSubmitFeed       = "submit_feed"
@@ -54,7 +62,7 @@ var (
 	dateRe    = regexp.MustCompile(`^/Date\((-?\d+)([+-]\d{4})?\)/$`)
 )
 
-// Tools returns all twenty-two registered tools. Whether a write tool is
+// Tools returns all twenty-nine registered tools. Whether a write tool is
 // callable still depends on [mcp_gateway.write.*] and key scope.
 func (s *Service) Tools() []mcpgateway.Tool {
 	siteSchema := func(extra map[string]any, required ...string) json.RawMessage {
@@ -108,6 +116,51 @@ func (s *Service) Tools() []mcpgateway.Tool {
 			urlSchema(), s.validateURLRead),
 		readTool(ToolGetURLTrafficInfo, "Index traffic (clicks and impressions) for one URL under a verified site.",
 			urlSchema(), s.validateURLRead),
+		readTool(ToolQueryPageDetailStats,
+			"Query × page detail for one query/page pair (upstream GetQueryPageDetailStats): daily clicks, impressions and position. Bing refreshes this data weekly.",
+			siteSchema(map[string]any{
+				"query": mcpgateway.Prop("string", "Search query, max 200 bytes."),
+				"page":  mcpgateway.Prop("string", "Full page URL belonging to the site."),
+				"limit": limitProp,
+			}, "site", "query", "page"), s.validateQueryPageDetail),
+		readTool(ToolQueryTrafficStats,
+			"Daily traffic for one query (upstream GetQueryTrafficStats). Bing keeps only its top queries; the series can be empty for long-tail terms.",
+			siteSchema(map[string]any{
+				"query": mcpgateway.Prop("string", "Search query, max 200 bytes."),
+				"limit": limitProp,
+			}, "site", "query"), s.validateQueryTraffic),
+		readTool(ToolChildrenURLInfo,
+			"Index details for the child URLs of a directory (upstream GetChildrenUrlInfo). One 0-based upstream page per call; each row is a UrlInfo object.",
+			siteSchema(map[string]any{
+				"url":   mcpgateway.Prop("string", "Directory URL belonging to the site, e.g. https://example.com/blog/."),
+				"page":  mcpgateway.Prop("integer", "Zero-based upstream page index (0-65535); an empty list means no more children."),
+				"limit": limitProp,
+			}, "site", "url"), s.validateChildrenURLInfo),
+		readTool(ToolChildrenURLTrafficInfo,
+			"Index traffic for the child URLs of a directory (upstream GetChildrenUrlTrafficInfo). One 0-based upstream page per call.",
+			siteSchema(map[string]any{
+				"url":   mcpgateway.Prop("string", "Directory URL belonging to the site, e.g. https://example.com/blog/."),
+				"page":  mcpgateway.Prop("integer", "Zero-based upstream page index (0-65535); an empty list means no more children."),
+				"limit": limitProp,
+			}, "site", "url"), s.validateChildrenURLTrafficInfo),
+		readTool(ToolLinkCounts,
+			"Pages on the site with inbound links, one upstream page at a time (upstream GetLinkCounts). Returns Links plus TotalPages so callers can walk every page.",
+			siteSchema(map[string]any{
+				"page":  mcpgateway.Prop("integer", "Zero-based upstream page index (0-32767)."),
+				"limit": limitProp,
+			}, "site"), s.validateLinkCounts),
+		readTool(ToolURLLinks,
+			"Inbound links for one URL, one upstream page at a time (upstream GetUrlLinks). Returns Details plus TotalPages so callers can walk every page.",
+			siteSchema(map[string]any{
+				"url":   mcpgateway.Prop("string", "Full URL belonging to the site."),
+				"page":  mcpgateway.Prop("integer", "Zero-based upstream page index (0-32767)."),
+				"limit": limitProp,
+			}, "site", "url"), s.validateURLLinks),
+		readTool(ToolFeedDetails,
+			"Details for the child feeds of a sitemap index (upstream GetFeedDetails): status, type, file size, URL count and crawl/submit dates.",
+			siteSchema(map[string]any{
+				"feedUrl": mcpgateway.Prop("string", "Sitemap index URL belonging to the site."),
+			}, "site", "feedUrl"), s.validateFeedDetails),
 
 		writeTool(ToolSubmitURL, "Submit one URL for indexing. Low risk; direct execution with a write scope.",
 			writeSchema(map[string]any{"url": mcpgateway.Prop("string", "URL belonging to the site.")}, "site", "url"),
@@ -216,6 +269,158 @@ func (s *Service) validateURLRead(raw json.RawMessage) error {
 	}
 	if !mcpgateway.URLBelongsToSite(p.Site, p.URL) {
 		return mcpgateway.InvalidParams("url must belong to the site")
+	}
+	return nil
+}
+
+// ---- query x page / directory / link / feed validators (P2+P3 reads) ----
+
+type queryPageDetailArgs struct {
+	Site  string `json:"site"`
+	Query string `json:"query"`
+	Page  string `json:"page"`
+	Limit int    `json:"limit"`
+}
+
+func (s *Service) validateQueryPageDetail(raw json.RawMessage) error {
+	var p queryPageDetailArgs
+	if err := mcpgateway.DecodeStrict(raw, &p); err != nil {
+		return err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.InvalidParams("%s", err.Error())
+	}
+	p.Query = strings.TrimSpace(p.Query)
+	if p.Query == "" || len(p.Query) > 200 {
+		return mcpgateway.InvalidParams("query is required (max 200 bytes)")
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.Page) {
+		return mcpgateway.InvalidParams("page must belong to the site")
+	}
+	return validateReadLimit(p.Limit)
+}
+
+type queryTrafficArgs struct {
+	Site  string `json:"site"`
+	Query string `json:"query"`
+	Limit int    `json:"limit"`
+}
+
+func (s *Service) validateQueryTraffic(raw json.RawMessage) error {
+	var p queryTrafficArgs
+	if err := mcpgateway.DecodeStrict(raw, &p); err != nil {
+		return err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.InvalidParams("%s", err.Error())
+	}
+	p.Query = strings.TrimSpace(p.Query)
+	if p.Query == "" || len(p.Query) > 200 {
+		return mcpgateway.InvalidParams("query is required (max 200 bytes)")
+	}
+	return validateReadLimit(p.Limit)
+}
+
+type childrenURLArgs struct {
+	Site  string `json:"site"`
+	URL   string `json:"url"`
+	Page  int    `json:"page"`
+	Limit int    `json:"limit"`
+}
+
+func (s *Service) validateChildrenURLInfo(raw json.RawMessage) error {
+	return s.validateChildrenURL(raw)
+}
+
+func (s *Service) validateChildrenURLTrafficInfo(raw json.RawMessage) error {
+	return s.validateChildrenURL(raw)
+}
+
+func (s *Service) validateChildrenURL(raw json.RawMessage) error {
+	var p childrenURLArgs
+	if err := mcpgateway.DecodeStrict(raw, &p); err != nil {
+		return err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.URL) {
+		return mcpgateway.InvalidParams("url must belong to the site")
+	}
+	// Upstream page is UInt16.
+	if p.Page < 0 || p.Page > 65535 {
+		return mcpgateway.InvalidParams("page must be 0-65535")
+	}
+	return validateReadLimit(p.Limit)
+}
+
+type linkCountsArgs struct {
+	Site  string `json:"site"`
+	Page  int    `json:"page"`
+	Limit int    `json:"limit"`
+}
+
+func (s *Service) validateLinkCounts(raw json.RawMessage) error {
+	var p linkCountsArgs
+	if err := mcpgateway.DecodeStrict(raw, &p); err != nil {
+		return err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.InvalidParams("%s", err.Error())
+	}
+	// Upstream page is Int16.
+	if p.Page < 0 || p.Page > 32767 {
+		return mcpgateway.InvalidParams("page must be 0-32767")
+	}
+	return validateReadLimit(p.Limit)
+}
+
+type urlLinksArgs struct {
+	Site  string `json:"site"`
+	URL   string `json:"url"`
+	Page  int    `json:"page"`
+	Limit int    `json:"limit"`
+}
+
+func (s *Service) validateURLLinks(raw json.RawMessage) error {
+	var p urlLinksArgs
+	if err := mcpgateway.DecodeStrict(raw, &p); err != nil {
+		return err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.URL) {
+		return mcpgateway.InvalidParams("url must belong to the site")
+	}
+	if p.Page < 0 || p.Page > 32767 {
+		return mcpgateway.InvalidParams("page must be 0-32767")
+	}
+	return validateReadLimit(p.Limit)
+}
+
+type feedDetailsArgs struct {
+	Site    string `json:"site"`
+	FeedURL string `json:"feedUrl"`
+}
+
+func (s *Service) validateFeedDetails(raw json.RawMessage) error {
+	var p feedDetailsArgs
+	if err := mcpgateway.DecodeStrict(raw, &p); err != nil {
+		return err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.FeedURL) {
+		return mcpgateway.InvalidParams("feedUrl must belong to the site")
+	}
+	return nil
+}
+
+func validateReadLimit(limit int) error {
+	if limit < 0 || limit > 1000 {
+		return mcpgateway.InvalidParams("limit must be 1-1000")
 	}
 	return nil
 }

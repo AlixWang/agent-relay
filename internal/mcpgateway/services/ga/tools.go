@@ -1,4 +1,4 @@
-// Package ga exposes the nine read-only Google Analytics tools. The upstream
+// Package ga exposes the ten read-only Google Analytics tools. The upstream
 // analytics-mcp server also ships create_property_annotation, but GA writes are
 // out of scope here: it is deliberately not implemented, not exposed, and not
 // reachable through this package. All upstream calls are read-only Admin API
@@ -28,6 +28,7 @@ const (
 	ToolGetPropertyDetails         = "get_property_details"
 	ToolListGoogleAdsLinks         = "list_google_ads_links"
 	ToolListPropertyAnnotations    = "list_property_annotations"
+	ToolListKeyEvents              = "list_key_events"
 	ToolRunReport                  = "run_report"
 	ToolRunFunnelReport            = "run_funnel_report"
 	ToolRunConversionsReport       = "run_conversions_report"
@@ -35,13 +36,14 @@ const (
 	ToolRunRealtimeReport          = "run_realtime_report"
 )
 
-// ReadToolNames returns the nine exposed read tools in stable order.
+// ReadToolNames returns the ten exposed read tools in stable order.
 func ReadToolNames() []string {
 	return []string{
 		ToolGetAccountSummaries,
 		ToolGetPropertyDetails,
 		ToolListGoogleAdsLinks,
 		ToolListPropertyAnnotations,
+		ToolListKeyEvents,
 		ToolRunReport,
 		ToolRunFunnelReport,
 		ToolRunConversionsReport,
@@ -65,6 +67,9 @@ func (s *Service) Tools() []mcpgateway.Tool {
 			propertySchema(), validatePropertyArgs),
 		readTool(ToolListPropertyAnnotations,
 			"List reporting data annotations for one property (Admin API v1alpha reportingDataAnnotations).",
+			propertySchema(), validatePropertyArgs),
+		readTool(ToolListKeyEvents,
+			"List the key events (formerly conversions) defined on one property (Admin API v1beta keyEvents.list, all pages).",
 			propertySchema(), validatePropertyArgs),
 		readTool(ToolRunReport,
 			"Run a Data API v1beta report. Field names are snake_case as in the upstream analytics-mcp tool; the service translates them to the REST request.",
@@ -259,6 +264,12 @@ type runReportArgs struct {
 	ReturnPropertyQuota bool             `json:"return_property_quota"`
 }
 
+// run_realtime_report deliberately has no offset field: the Data API v1beta
+// RunRealtimeReportRequest (REST discovery and googleapis proto) does not
+// define one. The upstream analytics-mcp 1.1.0 signature advertises offset,
+// but its pinned google-analytics-data 0.23.3 client has no such proto field,
+// so sending it would produce an invalid request. Do not re-add it without an
+// upstream API change.
 type runRealtimeArgs struct {
 	PropertyID          propertyID       `json:"property_id"`
 	Dimensions          []string         `json:"dimensions"`

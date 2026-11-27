@@ -1,7 +1,10 @@
 package adsense
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -251,7 +254,11 @@ func (s *Service) generateReport(ctx context.Context, raw json.RawMessage) (mcpg
 	if err := mcpgateway.DecodeStrict(raw, &p); err != nil {
 		return mcpgateway.Result{}, err
 	}
-	params, perr := reportParams(p, s.maxRows)
+	format, ferr := normalizeReportFormat(p.Format)
+	if ferr != nil {
+		return mcpgateway.Result{}, ferr
+	}
+	params, pageSize, perr := reportParams(p, s.maxRows)
 	if perr != nil {
 		return mcpgateway.Result{}, perr
 	}
@@ -259,47 +266,103 @@ func (s *Service) generateReport(ctx context.Context, raw json.RawMessage) (mcpg
 	if aerr != nil {
 		return mcpgateway.Result{}, aerr
 	}
-	rep, truncated, rows, err := s.report(ctx, account, params)
+	if format == reportFormatCSV {
+		return s.generateReportCSV(ctx, account, params, p, pageSize)
+	}
+	rep, rows, err := s.report(ctx, account, params)
 	if err != nil {
 		return mcpgateway.Result{}, err
 	}
-	return mcpgateway.Result{Data: rep, Truncated: truncated, RowCount: rows}, nil
+	page, hasMore := sliceReportRows(rows, p.Offset, pageSize)
+	total := totalMatchedRows(rep)
+	if total >= 0 {
+		if total > p.Offset+len(page) {
+			hasMore = true
+		}
+	} else if len(rows) >= p.Offset+pageSize {
+		// The upstream returned exactly the requested window and did not
+		// report a total. There may be another page, so never claim the
+		// report is complete in that case.
+		hasMore = true
+	}
+	rep["rows"] = page
+	rep["offset"] = p.Offset
+	rep["limit"] = pageSize
+	rep["returned"] = len(page)
+	rep["has_more"] = hasMore
+	if total >= 0 {
+		rep["total_matched_rows"] = total
+	}
+	if hasMore {
+		if len(page) > 0 {
+			rep["next_offset"] = p.Offset + len(page)
+			rep["note"] = "More rows matched this report. Call again with next_offset (and the same orderBy) to fetch the next page; offset+limit is bounded by the upstream row ceiling."
+		} else {
+			rep["note"] = "This offset is beyond the rows the upstream API returned for the requested window; narrow the report or lower the offset."
+		}
+	}
+	return mcpgateway.Result{Data: rep, Truncated: hasMore, RowCount: len(page)}, nil
 }
 
-func reportParams(p reportArgs, maxRows int) (url.Values, *mcpgateway.Error) {
+// reportParams validates report arguments and builds the upstream query. It
+// returns the effective page size as well as the query: upstream receives
+// limit=offset+pageSize (AdSense v2 has no offset/pageToken), and the caller
+// slices the returned rows. It never silently lowers a requested limit: a
+// request above mcp_gateway.max_rows_per_call or the 100,000-row upstream
+// ceiling is rejected with invalid_params.
+func reportParams(p reportArgs, maxRows int) (url.Values, int, *mcpgateway.Error) {
+	if maxRows <= 0 {
+		maxRows = 1000
+	}
 	if err := checkNames(p.Dimensions, allowedDimensions, "dimension"); err != nil {
-		return nil, mcpgateway.AsError(err)
+		return nil, 0, mcpgateway.AsError(err)
 	}
 	if err := checkNames(p.Metrics, allowedMetrics, "metric"); err != nil {
-		return nil, mcpgateway.AsError(err)
+		return nil, 0, mcpgateway.AsError(err)
 	}
-	if p.Limit < 0 || p.Limit > 1000 {
-		return nil, mcpgateway.InvalidParams("limit must be 1-1000")
+	if p.Limit < 0 || p.Limit > maxReportPage {
+		return nil, 0, mcpgateway.InvalidParams("limit must be 1-%d", maxReportPage)
+	}
+	pageSize := p.Limit
+	if pageSize <= 0 {
+		pageSize = maxRows
+	}
+	if pageSize > maxRows {
+		return nil, 0, mcpgateway.InvalidParams("limit must be 1-%d (mcp_gateway.max_rows_per_call)", maxRows)
+	}
+	if p.Offset < 0 || p.Offset >= maxReportWindow {
+		return nil, 0, mcpgateway.InvalidParams("offset must be 0-%d", maxReportWindow-1)
+	}
+	if p.Offset+pageSize > maxReportWindow {
+		return nil, 0, mcpgateway.InvalidParams("offset+limit must be <= %d (gateway report-window ceiling; AdSense generate itself allows 100,000 rows and CSV more, but the gateway's upstream response size cap still applies); use a smaller page or narrow the report", maxReportWindow)
+	}
+	if _, err := normalizeReportFormat(p.Format); err != nil {
+		return nil, 0, mcpgateway.AsError(err)
 	}
 	for i, f := range p.Filters {
 		if !validFilter(f) {
-			return nil, mcpgateway.InvalidParams("filters[%d] must be WHITELISTED_DIMENSION<==|=@>value", i)
+			return nil, 0, mcpgateway.InvalidParams("filters[%d] must be WHITELISTED_DIMENSION<==|=@>value", i)
 		}
 	}
 	if p.OrderBy != "" {
 		name := strings.TrimPrefix(p.OrderBy, "-")
 		if !allowedDimensions[name] && !allowedMetrics[name] {
-			return nil, mcpgateway.InvalidParams("orderBy %q is not a whitelisted dimension/metric", p.OrderBy)
+			return nil, 0, mcpgateway.InvalidParams("orderBy %q is not a whitelisted dimension/metric", p.OrderBy)
 		}
 	}
 	v := url.Values{}
 	if p.DateRange != "" {
 		if p.StartDate != "" || p.EndDate != "" {
-			return nil, mcpgateway.InvalidParams("supply either dateRange or startDate+endDate, not both")
+			return nil, 0, mcpgateway.InvalidParams("supply either dateRange or startDate+endDate, not both")
 		}
 		if !contains(dateRanges, p.DateRange) {
-			return nil, mcpgateway.InvalidParams("unsupported dateRange %q", p.DateRange)
+			return nil, 0, mcpgateway.InvalidParams("unsupported dateRange %q", p.DateRange)
 		}
 		v.Set("dateRange", p.DateRange)
 	} else {
 		sd, ed, err := mcpgateway.ValidateDateRange(p.StartDate, p.EndDate)
 		if err != nil {
-			return nil, mcpgateway.InvalidParams("%s", err.Error())
+			return nil, 0, mcpgateway.InvalidParams("%s", err.Error())
 		}
 		addDate(v, "startDate", sd)
 		addDate(v, "endDate", ed)
@@ -316,15 +379,171 @@ func reportParams(p reportArgs, maxRows int) (url.Values, *mcpgateway.Error) {
 	if p.OrderBy != "" {
 		v.Set("orderBy", p.OrderBy)
 	}
-	limit := p.Limit
-	if limit <= 0 {
-		limit = maxRows
-		if limit <= 0 || limit > 1000 {
-			limit = 1000
+	// AdSense reports.generate has no pageToken/offset. Ask for the whole
+	// window in one call; generateReport slices it for the caller.
+	v.Set("limit", strconv.Itoa(p.Offset+pageSize))
+	return v, pageSize, nil
+}
+
+// report returns the raw upstream report and its rows without trimming, so
+// the caller can apply the offset/page window itself.
+func (s *Service) report(ctx context.Context, account string, params url.Values) (map[string]any, []any, *mcpgateway.Error) {
+	var rep map[string]any
+	path := account + "/reports:generate"
+	if err := s.apiGet(ctx, path, params, &rep); err != nil {
+		return nil, nil, err
+	}
+	if rep == nil {
+		rep = map[string]any{}
+	}
+	rows, _ := rep["rows"].([]any)
+	return rep, rows, nil
+}
+
+// generateReportCSV calls the separate reports:generateCsv method. The
+// response is a Google HttpBody: {"contentType":"text/csv","data":"<base64>"}.
+func (s *Service) generateReportCSV(ctx context.Context, account string, params url.Values, p reportArgs, pageSize int) (mcpgateway.Result, error) {
+	var body struct {
+		ContentType string `json:"contentType"`
+		Data        string `json:"data"`
+	}
+	if err := s.apiGet(ctx, account+"/reports:generateCsv", params, &body); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	decoded, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(body.Data))
+	if derr != nil {
+		return mcpgateway.Result{}, &mcpgateway.Error{
+			Code: mcpgateway.CodeUpstreamError, Message: "AdSense returned invalid CSV data", HTTPStatus: 200,
 		}
 	}
-	v.Set("limit", strconv.Itoa(limit))
-	return v, nil
+	records, rerr := readCSV(string(decoded))
+	if rerr != nil {
+		return mcpgateway.Result{}, rerr
+	}
+	var header []string
+	var dataRows [][]string
+	if len(records) > 0 {
+		header = records[0]
+		dataRows = records[1:]
+	}
+	page, hasMore := sliceCSV(dataRows, p.Offset, pageSize)
+	if !hasMore && len(dataRows) >= p.Offset+pageSize {
+		// generateCsv has no totalMatchedRows: a full window is ambiguous,
+		// so report has_more conservatively instead of silently claiming the
+		// export is complete.
+		hasMore = true
+	}
+	text := string(decoded)
+	if p.Offset > 0 || hasMore || len(page) != len(dataRows) {
+		text = encodeCSV(header, page)
+	}
+	data := map[string]any{
+		"account":      account,
+		"format":       reportFormatCSV,
+		"content_type": body.ContentType,
+		"csv":          text,
+		"offset":       p.Offset,
+		"limit":        pageSize,
+		"returned":     len(page),
+		"row_count":    len(page),
+		"has_more":     hasMore,
+	}
+	if hasMore {
+		data["next_offset"] = p.Offset + len(page)
+		data["note"] = "More CSV rows were fetched than returned; call again with next_offset."
+	} else {
+		data["note"] = "AdSense generateCsv does not report total matched rows; if the CSV ends exactly at the requested limit there may be more rows (page with offset to confirm)."
+	}
+	return mcpgateway.Result{Data: data, Truncated: hasMore, RowCount: len(page)}, nil
+}
+
+// sliceReportRows applies a gateway-side offset/page window. hasMore is true
+// when the upstream fetch returned rows beyond this page.
+func sliceReportRows(rows []any, offset, pageSize int) ([]any, bool) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(rows) {
+		return []any{}, false
+	}
+	page := rows[offset:]
+	hasMore := len(page) > pageSize
+	if hasMore {
+		page = page[:pageSize]
+	}
+	out := make([]any, len(page))
+	copy(out, page)
+	return out, hasMore
+}
+
+func sliceCSV(rows [][]string, offset, pageSize int) ([][]string, bool) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(rows) {
+		return nil, false
+	}
+	page := rows[offset:]
+	hasMore := len(page) > pageSize
+	if hasMore {
+		page = page[:pageSize]
+	}
+	return page, hasMore
+}
+
+// totalMatchedRows parses the upstream ReportResult.totalMatchedRows count
+// (a string in the discovery document) and returns -1 when it is absent.
+func totalMatchedRows(rep map[string]any) int {
+	v, ok := rep["totalMatchedRows"]
+	if !ok {
+		return -1
+	}
+	switch n := v.(type) {
+	case string:
+		i, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
+		if err != nil {
+			return -1
+		}
+		return int(i)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return -1
+		}
+		return int(i)
+	default:
+		return -1
+	}
+}
+
+func readCSV(text string) ([][]string, *mcpgateway.Error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, nil
+	}
+	r := csv.NewReader(strings.NewReader(text))
+	r.FieldsPerRecord = -1
+	records, err := r.ReadAll()
+	if err != nil {
+		return nil, &mcpgateway.Error{
+			Code: mcpgateway.CodeUpstreamError, Message: "AdSense returned malformed CSV", HTTPStatus: 200,
+		}
+	}
+	return records, nil
+}
+
+func encodeCSV(header []string, rows [][]string) string {
+	var buf bytes.Buffer
+	w := csv.NewWriter(&buf)
+	if header != nil {
+		if err := w.Write(header); err != nil {
+			return ""
+		}
+	}
+	_ = w.WriteAll(rows)
+	w.Flush()
+	return buf.String()
 }
 
 func addDate(v url.Values, prefix, date string) {
@@ -337,20 +556,6 @@ func addDate(v url.Values, prefix, date string) {
 func dateParts(date string) (int, int, int) {
 	t, _ := time.Parse("2006-01-02", date)
 	return t.Year(), int(t.Month()), t.Day()
-}
-
-func (s *Service) report(ctx context.Context, account string, params url.Values) (map[string]any, bool, int, *mcpgateway.Error) {
-	var rep map[string]any
-	path := account + "/reports:generate"
-	if err := s.apiGet(ctx, path, params, &rep); err != nil {
-		return nil, false, 0, err
-	}
-	if rep == nil {
-		rep = map[string]any{}
-	}
-	rows, truncated := trimAnyRows(rep["rows"], s.maxRows)
-	rep["rows"] = rows
-	return rep, truncated, len(rows), nil
 }
 
 func (s *Service) earningsSummary(ctx context.Context, raw json.RawMessage) (mcpgateway.Result, error) {
@@ -387,14 +592,14 @@ func (s *Service) earningsSummary(ctx context.Context, raw json.RawMessage) (mcp
 	for _, period := range periods {
 		period := period
 		args := reportArgs{DateRange: period.dateRange, StartDate: period.start, EndDate: period.end}
-		params, perr := reportParams(args, s.maxRows)
+		params, _, perr := reportParams(args, s.maxRows)
 		if perr != nil {
 			return mcpgateway.Result{}, perr
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rep, _, _, err := s.report(ctx, account, params)
+			rep, _, err := s.report(ctx, account, params)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -488,7 +693,7 @@ func (s *Service) comparePeriods(ctx context.Context, raw json.RawMessage) (mcpg
 			v.Add("metrics", m)
 		}
 		v.Set("limit", strconv.Itoa(s.maxRows))
-		rep, _, _, err := s.report(ctx, account, v)
+		rep, _, err := s.report(ctx, account, v)
 		if err != nil {
 			return nil, err
 		}

@@ -84,7 +84,7 @@ reassign + lease 到期回收 + `waiting|ready|failed|dropped`（dropped 终态�
 **状态：** 已实现（默认关闭，需显式开启 `[mcp_gateway].enabled` 与 `[mcp_gateway.write].enabled`）：
 
 - [x] **网关内核（`internal/mcpgateway`）**：Streamable HTTP（`2025-06-18` / `2025-03-26`，无状态 JSON-only）、聚合端点 `/mcp` 与分服务端点 `/mcp/{service}`、`Origin` 校验、双认证（relay token peer 授权 + 一次性明文 `rmk_` 外部 Key 与宽限轮换）、`mcp:<service>:<read|write>:<tool|*>` 权限模型、分服务速率限制与未鉴权审计防洪、四层写开关与高风险二次审批状态机（24h 待批 / 10m 一次性执行窗口 / 严格冻结参数）、共享 Google OAuth2 ADC Token 提供器与 `mcp_audit` + `audit_log` 镜像保留（读 90d / 写 180d / 上限 200 万行）。
-- [x] **首批服务**：AdSense（9 个只读工具）、Bing Webmaster（16 个只读 + 6 个写工具，其中 4 个低风险直连，`add_blocked_url` / `remove_blocked_url` 高风险走二次批准）、Google Analytics（9 个只读工具，复用同一 ADC secret）。
+- [x] **首批服务**：AdSense（9 个只读工具，`generate_report` 支持 `format=csv`、`offset` 翻页与设备/来源维度）、Bing Webmaster（23 个只读 + 6 个写工具，其中 4 个低风险直连，`add_blocked_url` / `remove_blocked_url` 高风险走二次批准）、Google Analytics（10 个只读工具，含 `list_key_events`，复用同一 ADC secret）。网关工具总数 40 → 48。
 - [x] **控制台**：MCP 网关页签（服务状态、外部 Key 签发/轮换/吊销、Peer 授权、高风险审批、审计筛选与 CSV 导出、Dry-run 参数校验）。
 - [ ] **后续扩展**：AdSense 写工具占位（5 个）待项目取得 AFP 资格与全权限 ADC 后开放。
 
