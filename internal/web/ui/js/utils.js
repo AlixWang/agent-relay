@@ -126,6 +126,10 @@ export function confirmAction({ title = '确认操作', body = '此操作不可�
   const use = ic.querySelector('use');
   if (use) use.setAttribute('href', '#i-' + (danger ? 'trash' : 'alert'));
 
+  // <dialog> does not reset returnValue on showModal(): without this, an
+  // Esc/backdrop close after a previous OK would still read as 'ok'.
+  if (dlg.open) return Promise.resolve(false);
+  dlg.returnValue = '';
   return new Promise((resolve) => {
     const handler = () => {
       dlg.removeEventListener('close', handler);
@@ -133,6 +137,33 @@ export function confirmAction({ title = '确认操作', body = '此操作不可�
     };
     dlg.addEventListener('close', handler);
     dlg.showModal();
+  });
+}
+
+export function promptInput({ title = '输入', hint = '', value = '', placeholder = '', okText = '确定' }) {
+  const dlg = $('promptDlg');
+  if (!dlg) return Promise.resolve(window.prompt(title + (hint ? '\n' + hint : ''), value));
+  $('prTitle').textContent = title;
+  $('prHint').textContent = hint;
+  const input = $('prInput');
+  input.value = value;
+  input.placeholder = placeholder;
+  input.setAttribute('aria-label', title);
+  $('prOk').textContent = okText;
+
+  // See confirmAction: returnValue survives across opens, so an Esc close
+  // after a previous OK would otherwise resolve as a save.
+  if (dlg.open) return Promise.resolve(null);
+  dlg.returnValue = '';
+  return new Promise((resolve) => {
+    const handler = () => {
+      dlg.removeEventListener('close', handler);
+      resolve(dlg.returnValue === 'ok' ? input.value : null);
+    };
+    dlg.addEventListener('close', handler);
+    dlg.showModal();
+    input.focus();
+    input.select();
   });
 }
 

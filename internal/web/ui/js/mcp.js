@@ -1,6 +1,6 @@
 // MCP gateway console tab (relay MCP v5).
 import { api } from './api.js';
-import { $, esc, icon, fmtTime, ago, renderPager, toast, confirmAction, setupDialog } from './utils.js';
+import { $, esc, icon, fmtTime, ago, renderPager, toast, confirmAction, promptInput, setupDialog } from './utils.js';
 
 const state = {
   view: 'services',
@@ -377,12 +377,14 @@ async function renderPeers(table, seq) {
   </tr>`).join('');
   table.querySelectorAll('button[data-grant]').forEach((b) => {
     b.onclick = async () => {
-      const scopes = window.prompt(
-        '填写 scope，逗号分隔（例如 mcp:adsense:read:*,mcp:bing-webmaster:read:*,mcp:ga:read:*）',
-        b.dataset.scopes || 'mcp:adsense:read:*,mcp:bing-webmaster:read:*,mcp:ga:read:*',
-      );
+      const scopes = await promptInput({
+        title: `给 ${b.dataset.grant} 授权`,
+        hint: '填写 scope，半角逗号或换行分隔（例如 mcp:adsense:read:*,mcp:bing-webmaster:read:*,mcp:ga:read:*）',
+        value: b.dataset.scopes || 'mcp:adsense:read:*,mcp:bing-webmaster:read:*,mcp:ga:read:*',
+        okText: '保存',
+      });
       if (scopes === null) return;
-      const list = scopes.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+      const list = scopes.split(/[,\n，；;]+/).map((s) => s.trim()).filter(Boolean);
       if (!list.length) { toast('至少一个 scope', 'warn'); return; }
       try {
         await api(`/admin/mcp/peers/${encodeURIComponent(b.dataset.grant)}`, {

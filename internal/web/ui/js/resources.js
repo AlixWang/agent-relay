@@ -270,7 +270,7 @@ function renderResources() {
   tbody.innerHTML = list.map((r) => {
     const g = grantSummary(r.grants);
     return `<tr>
-      <td><code>${esc(r.name)}</code>${(r.requires_secrets || []).length ? `<br><small class="muted">依赖密钥：${r.requires_secrets.map(esc).join(', ')}</small>` : ''}${r.kind === 'skill' && r.size ? `<br><small class="muted">${esc(humanSize(r.size))}</small>` : ''}</td>
+      <td><code class="res-name" title="${esc(r.name)}">${esc(r.name)}</code>${(r.requires_secrets || []).length ? `<br><small class="muted">依赖密钥：${r.requires_secrets.map(esc).join(', ')}</small>` : ''}${r.kind === 'skill' && r.size ? `<br><small class="muted">${esc(humanSize(r.size))}</small>` : ''}</td>
       <td class="muted">${esc(r.description || '—')}</td>
       <td><span class="badge ${g.tone === 'muted' ? '' : g.tone}">${esc(g.text)}</span></td>
       <td>${esc(ownerLabel(r))}</td>
@@ -305,7 +305,7 @@ function renderSubmissions() {
     const bulk = canBulkReview(sub);
     return `<tr>
       <td class="col-check">${bulk ? `<input type="checkbox" data-id="${esc(sub.id)}" ${resState.selected.has(sub.id) ? 'checked' : ''} aria-label="选择 ${esc(sub.name)}">` : ''}</td>
-      <td><code>${esc(sub.name)}</code><br><small class="muted">${esc(sub.kind)} · ${esc(shortHash(sub.hash))}</small></td>
+      <td><code class="res-name" title="${esc(sub.name)}">${esc(sub.name)}</code><br><small class="muted">${esc(sub.kind)} · ${esc(shortHash(sub.hash))}</small></td>
       <td class="muted">${esc(sub.description || '—')}</td>
       <td>${esc(sub.submitted_by)}</td>
       <td>${statusBadgeFor(sub.status)}</td>
@@ -345,7 +345,7 @@ function renderTakedowns(r) {
     return;
   }
   tbody.innerHTML = list.map((t) => `<tr>
-    <td><code>${esc(t.name)}</code><br><small class="muted">${esc(t.kind)}</small></td>
+    <td><code class="res-name" title="${esc(t.name)}">${esc(t.name)}</code><br><small class="muted">${esc(t.kind)}</small></td>
     <td class="muted">${esc(t.reason || '—')}</td>
     <td>${esc(t.requested_by)}</td>
     <td>${statusBadgeFor(t.status)}</td>

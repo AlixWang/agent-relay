@@ -1360,6 +1360,20 @@
   </form>
 </dialog>
 
+<!-- ============ Input dialog ============ -->
+<dialog id="promptDlg" class="modal sm" aria-labelledby="prTitle">
+  <form method="dialog">
+    <div class="modal-head">
+      <div><h2 id="prTitle">输入</h2><p id="prHint" class="muted small pre-line"></p></div>
+    </div>
+    <textarea id="prInput" class="mono" rows="3" spellcheck="false" aria-describedby="prHint"></textarea>
+    <div class="modal-foot">
+      <button value="cancel" class="btn btn-ghost">取消</button>
+      <button value="ok" class="btn btn-primary" id="prOk">确定</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- ============ Create Room Dialog ============ -->
 
 <!-- ============ Room Members Management Dialog ============ -->
