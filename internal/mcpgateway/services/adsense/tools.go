@@ -120,6 +120,7 @@ var allowedDimensions = map[string]bool{
 	"CUSTOM_CHANNEL_NAME": true, "CUSTOM_CHANNEL_ID": true,
 	"OWNED_SITE_DOMAIN_NAME": true, "OWNED_SITE_ID": true,
 	"URL_CHANNEL_NAME": true, "URL_CHANNEL_ID": true,
+	"PAGE_URL":           true,
 	"BUYER_NETWORK_NAME": true, "BUYER_NETWORK_ID": true,
 	"BID_TYPE_NAME": true, "BID_TYPE_CODE": true,
 	"CREATIVE_SIZE_NAME": true, "CREATIVE_SIZE_CODE": true,

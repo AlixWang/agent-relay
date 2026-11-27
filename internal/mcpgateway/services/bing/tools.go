@@ -1,4 +1,4 @@
-// Package bing implements the Bing Webmaster Tools MCP service: 14 read tools
+// Package bing implements the Bing Webmaster Tools MCP service: 16 read tools
 // and six write tools (four low-risk direct; add_blocked_url and
 // remove_blocked_url high-risk via the gateway approval state machine).
 // Upstream is the JSON/HTTP API at
@@ -37,6 +37,8 @@ const (
 
 	ToolGetURLSubmissionQuota = "get_url_submission_quota"
 	ToolGetBlockedURLs        = "get_blocked_urls"
+	ToolGetURLInfo            = "get_url_info"
+	ToolGetURLTrafficInfo     = "get_url_traffic_info"
 
 	ToolSubmitURL        = "submit_url"
 	ToolSubmitURLBatch   = "submit_url_batch"
@@ -52,7 +54,7 @@ var (
 	dateRe    = regexp.MustCompile(`^/Date\((-?\d+)([+-]\d{4})?\)/$`)
 )
 
-// Tools returns all twenty registered tools. Whether a write tool is
+// Tools returns all twenty-two registered tools. Whether a write tool is
 // callable still depends on [mcp_gateway.write.*] and key scope.
 func (s *Service) Tools() []mcpgateway.Tool {
 	siteSchema := func(extra map[string]any, required ...string) json.RawMessage {
@@ -102,6 +104,10 @@ func (s *Service) Tools() []mcpgateway.Tool {
 			siteSchema(map[string]any{}, "site"), s.validateSiteRead),
 		readTool(ToolGetBlockedURLs, "List pages/directories currently blocked from Bing results.",
 			siteSchema(map[string]any{"limit": limitProp}, "site"), s.validateSiteRead),
+		readTool(ToolGetURLInfo, "Index details for one URL under a verified site: whether Bing has it, crawl status, and the normalized Url.",
+			urlSchema(), s.validateURLRead),
+		readTool(ToolGetURLTrafficInfo, "Index traffic (clicks and impressions) for one URL under a verified site.",
+			urlSchema(), s.validateURLRead),
 
 		writeTool(ToolSubmitURL, "Submit one URL for indexing. Low risk; direct execution with a write scope.",
 			writeSchema(map[string]any{"url": mcpgateway.Prop("string", "URL belonging to the site.")}, "site", "url"),
@@ -149,6 +155,13 @@ func writeTool(name, desc string, schema json.RawMessage, destructive, highRisk,
 	}
 }
 
+func urlSchema() json.RawMessage {
+	return mcpgateway.Schema(map[string]any{
+		"site": mcpgateway.Prop("string", "Verified site URL exactly as returned by list_sites, e.g. https://example.com/."),
+		"url":  mcpgateway.Prop("string", "Full URL belonging to the site, e.g. https://example.com/page."),
+	}, "site", "url")
+}
+
 func keywordSchema(withDates bool) json.RawMessage {
 	props := map[string]any{
 		"q":        mcpgateway.Prop("string", "Search query."),
@@ -184,6 +197,25 @@ func (s *Service) validateSiteRead(raw json.RawMessage) error {
 	}
 	if p.Limit < 0 || p.Limit > 1000 {
 		return mcpgateway.InvalidParams("limit must be 1-1000")
+	}
+	return nil
+}
+
+type urlReadArgs struct {
+	Site string `json:"site"`
+	URL  string `json:"url"`
+}
+
+func (s *Service) validateURLRead(raw json.RawMessage) error {
+	var p urlReadArgs
+	if err := mcpgateway.DecodeStrict(raw, &p); err != nil {
+		return err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.URL) {
+		return mcpgateway.InvalidParams("url must belong to the site")
 	}
 	return nil
 }

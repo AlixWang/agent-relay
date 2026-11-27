@@ -188,6 +188,33 @@ func TestAdSenseReadsAndReportTruncation(t *testing.T) {
 	}
 }
 
+func TestAdSensePageURLDimension(t *testing.T) {
+	// Anti-drift guard: PAGE_URL exists in the official v2 enum; it must stay
+	// in our whitelist so page-level earnings reports keep working.
+	if !allowedDimensions["PAGE_URL"] {
+		t.Fatal("PAGE_URL missing from allowedDimensions")
+	}
+	svc, mock := newTestService(t, nil)
+	raw := json.RawMessage(`{"account":"pub-111","startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["PAGE_URL"],"metrics":["ESTIMATED_EARNINGS"],"limit":10}`)
+	if err := validateReportArg(raw); err != nil {
+		t.Fatalf("PAGE_URL rejected: %v", err)
+	}
+	if _, err := svc.Handle(context.Background(), mcpgateway.Call{Tool: ToolGenerateReport, Params: raw}); err != nil {
+		t.Fatalf("PAGE_URL report: %v", err)
+	}
+	dims := mock.report["dimensions"]
+	if len(dims) != 1 || dims[0] != "PAGE_URL" {
+		t.Fatalf("PAGE_URL not passed upstream: %+v", mock.report)
+	}
+	// Validation still precedes credential resolution; a valid PAGE_URL report
+	// with no credential fails as credential_missing.
+	missing := New(Options{CredentialRef: "secret:NOPE", Credentials: fakeSecrets{err: mcpgateway.ErrCredentialMissing}, MaxRows: 10})
+	_, err := missing.Handle(context.Background(), mcpgateway.Call{Tool: ToolGenerateReport, Params: raw})
+	if err == nil || !strings.Contains(err.Error(), mcpgateway.CodeCredentialMissing) {
+		t.Fatalf("PAGE_URL missing credential: %v", err)
+	}
+}
+
 func TestAdSenseValidationAndCredentialFailure(t *testing.T) {
 	svc, mock := newTestService(t, nil)
 	bad := json.RawMessage(`{"startDate":"2026-11-01","endDate":"2026-11-02","dimensions":["DROP_TABLE"]}`)

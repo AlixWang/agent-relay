@@ -21,8 +21,8 @@ func TestExplicitServiceRegistrationAndDefaultPolicy(t *testing.T) {
 		t.Fatalf("register ga: %v", err)
 	}
 	tools := reg.AggregateTools()
-	if len(tools) != 38 {
-		t.Fatalf("registered tool count = %d, want 38", len(tools))
+	if len(tools) != 40 {
+		t.Fatalf("registered tool count = %d, want 40", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tool := range tools {
@@ -33,6 +33,7 @@ func TestExplicitServiceRegistrationAndDefaultPolicy(t *testing.T) {
 		"bing_list_sites", "bing_submit_url", "bing_submit_url_batch",
 		"bing_submit_feed", "bing_remove_feed", "bing_add_blocked_url",
 		"bing_get_url_submission_quota", "bing_get_blocked_urls", "bing_remove_blocked_url",
+		"bing_get_url_info", "bing_get_url_traffic_info",
 		"ga_get_account_summaries", "ga_run_report", "ga_run_realtime_report",
 		"ga_run_funnel_report", "ga_run_conversions_report",
 	} {
