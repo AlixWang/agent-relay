@@ -23,6 +23,24 @@ const (
 
 var accountRe = regexp.MustCompile(`^accounts/pub-[A-Za-z0-9]+$`)
 
+const (
+	// AdSense reports.generate documents limit up to 100,000 rows (1,000,000
+	// for reports.generateCsv) and has NO pageSize/pageToken/offset
+	// parameters. The gateway therefore implements offset as a bounded
+	// slice: it asks upstream for offset+limit rows and drops the first
+	// offset. maxReportWindow matches the upstream generate ceiling; the
+	// gateway's 4 MiB upstream response cap still applies, so very large
+	// windows can fail explicitly instead of silently truncating.
+	maxReportWindow = 100000
+	// maxReportPage is the maximum value accepted by the stateless
+	// validation layer; reportParams additionally enforces the runtime
+	// mcp_gateway.max_rows_per_call ceiling.
+	maxReportPage = 10000
+
+	reportFormatJSON = "json"
+	reportFormatCSV  = "csv"
+)
+
 // Tool names (read, exposed).
 const (
 	ToolListAccounts    = "list_accounts"
@@ -66,17 +84,20 @@ func (s *Service) Tools() []mcpgateway.Tool {
 			mcpgateway.Schema(map[string]any{
 				"account": mcpgateway.Prop("string", "Optional account name (accounts/pub-...); defaults to the first account."),
 			}), validateAccountArg),
-		readTool(ToolGenerateReport, "Generate an AdSense report with whitelisted dimensions/metrics, dates or dateRange, filters, orderBy and limit (<=1000).",
+		readTool(ToolGenerateReport,
+			"Generate an AdSense report with whitelisted dimensions/metrics, dates or dateRange, filters and orderBy. Use format=csv for reports:generateCsv (CSV text in data.csv) and offset to page through rows; AdSense has no pageToken, so offset is a gateway-side slice over a bounded upstream fetch.",
 			mcpgateway.Schema(map[string]any{
 				"account":    mcpgateway.Prop("string", "Optional account name; defaults to the first account."),
 				"startDate":  mcpgateway.Prop("string", "Start date YYYY-MM-DD (with endDate)."),
 				"endDate":    mcpgateway.Prop("string", "End date YYYY-MM-DD (with startDate)."),
 				"dateRange":  mcpgateway.EnumProp("Predefined range when startDate/endDate are omitted.", dateRanges...),
-				"dimensions": mcpgateway.ArrayProp("string", "Whitelisted dimension names, e.g. DATE, COUNTRY_NAME, AD_UNIT_NAME."),
+				"dimensions": mcpgateway.ArrayProp("string", "Whitelisted dimension names, e.g. DATE, COUNTRY_NAME, AD_UNIT_NAME, PAGE_URL, OS_TYPE_CODE, BROWSER_TYPE_CODE, TRAFFIC_SOURCE_CODE."),
 				"metrics":    mcpgateway.ArrayProp("string", "Whitelisted metric names; defaults to the standard six."),
 				"filters":    mcpgateway.ArrayProp("string", "Filters like COUNTRY_NAME==US (comma-free)."),
-				"orderBy":    mcpgateway.Prop("string", "Whitelisted dimension/metric, optionally prefixed with '-'."),
-				"limit":      mcpgateway.Prop("integer", "Row limit 1-1000 (default max_rows_per_call)."),
+				"orderBy":    mcpgateway.Prop("string", "Whitelisted dimension/metric, optionally prefixed with '-'. Supply a stable orderBy when paging with offset."),
+				"limit":      mcpgateway.Prop("integer", "Rows per page (default and ceiling: mcp_gateway.max_rows_per_call, <=10000)."),
+				"offset":     mcpgateway.Prop("integer", "Zero-based row offset for paging. AdSense v2 has no pageToken/offset, so the gateway fetches offset+limit rows upstream and returns the requested slice; offset+limit must be <=100000, and large windows can hit the gateway's 4 MiB upstream response cap. The response reports has_more/next_offset and never silently drops rows."),
+				"format":     mcpgateway.EnumProp("Output format: json (default) or csv (upstream reports:generateCsv, CSV text in data.csv).", "json", "csv"),
 			}), validateReportArg),
 		readTool(ToolComparePeriods, "Compare two explicit date ranges: absolute totals for both periods plus the delta and base.",
 			mcpgateway.Schema(map[string]any{
@@ -134,8 +155,14 @@ var allowedDimensions = map[string]bool{
 	"SERVED_AD_TYPE_NAME": true, "SERVED_AD_TYPE_CODE": true,
 	"AD_FORMAT_NAME": true, "AD_FORMAT_CODE": true,
 	"CUSTOM_SEARCH_STYLE_NAME": true, "CUSTOM_SEARCH_STYLE_ID": true,
-	"DOMAIN_REGISTRANT":          true,
-	"WEBSEARCH_RESULT_TYPE_NAME": true, "WEBSEARCH_RESULT_TYPE_CODE": true,
+	"DOMAIN_REGISTRANT": true,
+	// Device/source dimensions from the official v2 Dimension enum. These
+	// are the official names: there is no OS_PLATFORM dimension in AdSense v2
+	// (the OS dimension is OS_TYPE_NAME/OS_TYPE_CODE).
+	"OS_TYPE_NAME": true, "OS_TYPE_CODE": true,
+	"BROWSER_TYPE_NAME": true, "BROWSER_TYPE_CODE": true,
+	"WEBVIEW_TYPE_NAME": true, "WEBVIEW_TYPE_CODE": true,
+	"TRAFFIC_SOURCE_NAME": true, "TRAFFIC_SOURCE_CODE": true,
 }
 
 var allowedMetrics = map[string]bool{
@@ -190,6 +217,20 @@ type reportArgs struct {
 	Filters    []string `json:"filters"`
 	OrderBy    string   `json:"orderBy"`
 	Limit      int      `json:"limit"`
+	Offset     int      `json:"offset"`
+	Format     string   `json:"format"`
+}
+
+func normalizeReportFormat(format string) (string, error) {
+	f := strings.ToLower(strings.TrimSpace(format))
+	switch f {
+	case "", reportFormatJSON:
+		return reportFormatJSON, nil
+	case reportFormatCSV:
+		return reportFormatCSV, nil
+	default:
+		return "", mcpgateway.InvalidParams(`format must be "json" or "csv"`)
+	}
 }
 
 func validateReportArg(raw json.RawMessage) error {
@@ -221,8 +262,14 @@ func validateReportArg(raw json.RawMessage) error {
 	if err := checkNames(p.Metrics, allowedMetrics, "metric"); err != nil {
 		return err
 	}
-	if p.Limit < 0 || p.Limit > 1000 {
-		return mcpgateway.InvalidParams("limit must be 1-1000")
+	if p.Limit < 0 || p.Limit > maxReportPage {
+		return mcpgateway.InvalidParams("limit must be 1-%d", maxReportPage)
+	}
+	if p.Offset < 0 || p.Offset >= maxReportWindow {
+		return mcpgateway.InvalidParams("offset must be 0-%d", maxReportWindow-1)
+	}
+	if _, err := normalizeReportFormat(p.Format); err != nil {
+		return err
 	}
 	for i, f := range p.Filters {
 		if !validFilter(f) {

@@ -21,8 +21,10 @@ func TestExplicitServiceRegistrationAndDefaultPolicy(t *testing.T) {
 		t.Fatalf("register ga: %v", err)
 	}
 	tools := reg.AggregateTools()
-	if len(tools) != 40 {
-		t.Fatalf("registered tool count = %d, want 40", len(tools))
+	// 9 AdSense reads + 23 Bing reads + 6 Bing writes + 10 GA reads = 48.
+	// CSV, offset paging and the AdSense dimensions are parameters, not tools.
+	if len(tools) != 48 {
+		t.Fatalf("registered tool count = %d, want 48", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tool := range tools {
@@ -34,7 +36,10 @@ func TestExplicitServiceRegistrationAndDefaultPolicy(t *testing.T) {
 		"bing_submit_feed", "bing_remove_feed", "bing_add_blocked_url",
 		"bing_get_url_submission_quota", "bing_get_blocked_urls", "bing_remove_blocked_url",
 		"bing_get_url_info", "bing_get_url_traffic_info",
-		"ga_get_account_summaries", "ga_run_report", "ga_run_realtime_report",
+		"bing_get_query_page_detail_stats", "bing_get_query_traffic_stats",
+		"bing_get_children_url_info", "bing_get_children_url_traffic_info",
+		"bing_get_link_counts", "bing_get_url_links", "bing_get_feed_details",
+		"ga_get_account_summaries", "ga_list_key_events", "ga_run_report", "ga_run_realtime_report",
 		"ga_run_funnel_report", "ga_run_conversions_report",
 	} {
 		if !names[want] {

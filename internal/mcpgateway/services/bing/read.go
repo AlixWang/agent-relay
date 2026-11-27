@@ -99,6 +99,18 @@ func (s *Service) Handle(ctx context.Context, call mcpgateway.Call) (mcpgateway.
 		return s.siteRead(ctx, call)
 	case ToolGetURLInfo, ToolGetURLTrafficInfo:
 		return s.urlRead(ctx, call)
+	case ToolQueryPageDetailStats:
+		return s.queryPageDetailStats(ctx, call)
+	case ToolQueryTrafficStats:
+		return s.queryTrafficStats(ctx, call)
+	case ToolChildrenURLInfo, ToolChildrenURLTrafficInfo:
+		return s.childrenURLRead(ctx, call)
+	case ToolLinkCounts:
+		return s.linkCounts(ctx, call)
+	case ToolURLLinks:
+		return s.urlLinks(ctx, call)
+	case ToolFeedDetails:
+		return s.feedDetails(ctx, call)
 	case ToolKeyword, ToolRelatedKeyword, ToolKeywordStats:
 		return s.keywordRead(ctx, call)
 	case ToolSubmitURL:
@@ -318,6 +330,255 @@ func (s *Service) urlRead(ctx context.Context, call mcpgateway.Call) (mcpgateway
 		}
 	}
 	return mcpgateway.Result{Data: data, RowCount: 1, UpstreamStatus: 200}, nil
+}
+
+// queryPageDetailStats exposes GetQueryPageDetailStats(siteUrl, query, page):
+// the query x page cross-section that the query-level and page-level tools
+// cannot answer. Bing refreshes it weekly.
+func (s *Service) queryPageDetailStats(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
+	var p queryPageDetailArgs
+	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	p.Query = strings.TrimSpace(p.Query)
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if p.Query == "" || len(p.Query) > 200 {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("query is required (max 200 bytes)")
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.Page) {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("page must belong to the site")
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
+	}
+	page := p.Page
+	if u, uerr := mcpgateway.NormalizeURL(page); uerr == nil {
+		page = u.String()
+	}
+	params := siteParam(p.Site)
+	params.Set("query", p.Query)
+	params.Set("page", page)
+	var rows []map[string]any
+	if err := s.call(ctx, http.MethodGet, "GetQueryPageDetailStats", params, nil, &rows); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	rows = normalizeRows(rows)
+	items, truncated := trimRows(rows, s.rowLimit(p.Limit))
+	return mcpgateway.Result{Data: map[string]any{
+		"site": p.Site, "query": p.Query, "page": page,
+		"rows": items, "totals": totalsOf(rows),
+		"note": "Bing refreshes query/page detail weekly; Position is the average position for that day.",
+	}, Truncated: truncated, RowCount: len(items), UpstreamStatus: 200}, nil
+}
+
+// queryTrafficStats exposes GetQueryTrafficStats(siteUrl, query): the daily
+// series for one query. Upstream only retains top queries.
+func (s *Service) queryTrafficStats(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
+	var p queryTrafficArgs
+	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	p.Query = strings.TrimSpace(p.Query)
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if p.Query == "" || len(p.Query) > 200 {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("query is required (max 200 bytes)")
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
+	}
+	params := siteParam(p.Site)
+	params.Set("query", p.Query)
+	var rows []map[string]any
+	if err := s.call(ctx, http.MethodGet, "GetQueryTrafficStats", params, nil, &rows); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	rows = normalizeRows(rows)
+	items, truncated := trimRows(rows, s.rowLimit(p.Limit))
+	return mcpgateway.Result{Data: map[string]any{
+		"site": p.Site, "query": p.Query,
+		"rows": items, "totals": totalsOf(rows),
+		"note": "Bing updates this series daily and only keeps its top queries.",
+	}, Truncated: truncated, RowCount: len(items), UpstreamStatus: 200}, nil
+}
+
+// childrenURLRead covers GetChildrenUrlInfo and GetChildrenUrlTrafficInfo.
+// Both walk one directory's children with a 0-based upstream page. Note that
+// GetChildrenUrlInfo is a POST upstream (WebInvoke Method="POST"), unlike the
+// other read methods.
+func (s *Service) childrenURLRead(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
+	var p childrenURLArgs
+	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.URL) {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("url must belong to the site")
+	}
+	if p.Page < 0 || p.Page > 65535 {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("page must be 0-65535")
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
+	}
+	url := p.URL
+	if u, uerr := mcpgateway.NormalizeURL(url); uerr == nil {
+		url = u.String()
+	}
+	var rows []map[string]any
+	switch call.Tool {
+	case ToolChildrenURLInfo:
+		// Mirrors the documented JSON request: siteUrl/url/page plus the
+		// default FilterProperties object (CrawlDateFilter=LastWeek and
+		// Any for the other three filters).
+		body := map[string]any{
+			"siteUrl": p.Site,
+			"url":     url,
+			"page":    p.Page,
+			"filterProperties": map[string]any{
+				"__type":               "FilterProperties:#Microsoft.Bing.Webmaster.Api",
+				"CrawlDateFilter":      1,
+				"DiscoveredDateFilter": 0,
+				"DocFlagsFilters":      0,
+				"HttpCodeFilters":      0,
+			},
+		}
+		if err := s.call(ctx, http.MethodPost, "GetChildrenUrlInfo", nil, body, &rows); err != nil {
+			return mcpgateway.Result{}, err
+		}
+	case ToolChildrenURLTrafficInfo:
+		params := siteParam(p.Site)
+		params.Set("url", url)
+		params.Set("page", strconv.Itoa(p.Page))
+		if err := s.call(ctx, http.MethodGet, "GetChildrenUrlTrafficInfo", params, nil, &rows); err != nil {
+			return mcpgateway.Result{}, err
+		}
+	default:
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("unknown children URL tool %q", call.Tool)
+	}
+	rows = normalizeRows(rows)
+	items, truncated := trimRows(rows, s.rowLimit(p.Limit))
+	data := map[string]any{
+		"site": p.Site, "url": url, "page": p.Page,
+		"rows": items, "totals": totalsOf(rows),
+		"note": "One upstream page per call; an empty rows list means there are no more children.",
+	}
+	return mcpgateway.Result{Data: data, Truncated: truncated, RowCount: len(items), UpstreamStatus: 200}, nil
+}
+
+// linkCounts exposes GetLinkCounts(siteUrl, page). Upstream returns a single
+// object with Links and TotalPages, not a list.
+func (s *Service) linkCounts(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
+	var p linkCountsArgs
+	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if p.Page < 0 || p.Page > 32767 {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("page must be 0-32767")
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
+	}
+	params := siteParam(p.Site)
+	params.Set("page", strconv.Itoa(p.Page))
+	var out struct {
+		Links      []map[string]any `json:"Links"`
+		TotalPages int              `json:"TotalPages"`
+	}
+	if err := s.call(ctx, http.MethodGet, "GetLinkCounts", params, nil, &out); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	links := normalizeRows(out.Links)
+	items, truncated := trimRows(links, s.rowLimit(p.Limit))
+	hasMore := p.Page+1 < out.TotalPages
+	return mcpgateway.Result{Data: map[string]any{
+		"site": p.Site, "page": p.Page, "total_pages": out.TotalPages,
+		"links": items, "has_more": hasMore,
+		"note": "Walk pages while has_more is true (or page+1 < total_pages).",
+	}, Truncated: truncated, RowCount: len(items), UpstreamStatus: 200}, nil
+}
+
+// urlLinks exposes GetUrlLinks(siteUrl, link, page). Upstream returns a single
+// object with Details and TotalPages.
+func (s *Service) urlLinks(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
+	var p urlLinksArgs
+	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.URL) {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("url must belong to the site")
+	}
+	if p.Page < 0 || p.Page > 32767 {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("page must be 0-32767")
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
+	}
+	link := p.URL
+	if u, uerr := mcpgateway.NormalizeURL(link); uerr == nil {
+		link = u.String()
+	}
+	params := siteParam(p.Site)
+	params.Set("link", link)
+	params.Set("page", strconv.Itoa(p.Page))
+	var out struct {
+		Details    []map[string]any `json:"Details"`
+		TotalPages int              `json:"TotalPages"`
+	}
+	if err := s.call(ctx, http.MethodGet, "GetUrlLinks", params, nil, &out); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	links := normalizeRows(out.Details)
+	items, truncated := trimRows(links, s.rowLimit(p.Limit))
+	hasMore := p.Page+1 < out.TotalPages
+	return mcpgateway.Result{Data: map[string]any{
+		"site": p.Site, "url": link, "page": p.Page, "total_pages": out.TotalPages,
+		"links": items, "has_more": hasMore,
+		"note": "Upstream returns the inbound link source URL plus its anchor text.",
+	}, Truncated: truncated, RowCount: len(items), UpstreamStatus: 200}, nil
+}
+
+// feedDetails exposes GetFeedDetails(siteUrl, feedUrl) for sitemap indices.
+func (s *Service) feedDetails(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
+	var p feedDetailsArgs
+	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	if _, err := mcpgateway.ValidateSiteURL(p.Site); err != nil {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("%s", err.Error())
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.FeedURL) {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("feedUrl must belong to the site")
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
+	}
+	feedURL := p.FeedURL
+	if u, uerr := mcpgateway.NormalizeURL(feedURL); uerr == nil {
+		feedURL = u.String()
+	}
+	params := siteParam(p.Site)
+	params.Set("feedUrl", feedURL)
+	var rows []map[string]any
+	if err := s.call(ctx, http.MethodGet, "GetFeedDetails", params, nil, &rows); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	rows = normalizeRows(rows)
+	items, truncated := trimRows(rows, s.maxRows)
+	return mcpgateway.Result{Data: map[string]any{
+		"site": p.Site, "feed_url": feedURL, "feeds": items,
+	}, Truncated: truncated, RowCount: len(items), UpstreamStatus: 200}, nil
 }
 
 func (s *Service) siteRead(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {

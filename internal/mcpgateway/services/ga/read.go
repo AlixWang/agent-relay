@@ -18,7 +18,7 @@ type CredentialSource interface {
 	Resolve(ref string) (string, error)
 }
 
-// Options wires the Google Analytics service. The three base URLs and the
+// Options wires the Google Analytics service. The four base URLs and the
 // token URL are overridable so tests can point at httptest servers; production
 // uses the official endpoints.
 type Options struct {
@@ -28,6 +28,7 @@ type Options struct {
 	UpstreamTimeout  time.Duration
 	HTTPClient       *http.Client
 	AdminBaseURL     string
+	AdminBetaBaseURL string
 	DataBaseURL      string
 	DataAlphaBaseURL string
 	TokenURL         string
@@ -35,13 +36,14 @@ type Options struct {
 	Now              func() time.Time
 }
 
-// Service implements mcpgateway.MCPService for the nine GA read tools.
+// Service implements mcpgateway.MCPService for the ten GA read tools.
 type Service struct {
 	credRef  string
 	upstream *mcpgateway.Upstream
 	adc      *mcpgateway.GoogleADC
 
 	adminBase     string
+	adminBetaBase string
 	dataBase      string
 	dataAlphaBase string
 	maxRows       int
@@ -49,6 +51,7 @@ type Service struct {
 
 const (
 	defaultAdminBaseURL     = "https://analyticsadmin.googleapis.com/v1alpha"
+	defaultAdminBetaBaseURL = "https://analyticsadmin.googleapis.com/v1beta"
 	defaultDataBaseURL      = "https://analyticsdata.googleapis.com/v1beta"
 	defaultDataAlphaBaseURL = "https://analyticsdata.googleapis.com/v1alpha"
 )
@@ -65,6 +68,10 @@ func New(opts Options) *Service {
 	adminBase := strings.TrimSuffix(opts.AdminBaseURL, "/")
 	if adminBase == "" {
 		adminBase = defaultAdminBaseURL
+	}
+	adminBetaBase := strings.TrimSuffix(opts.AdminBetaBaseURL, "/")
+	if adminBetaBase == "" {
+		adminBetaBase = defaultAdminBetaBaseURL
 	}
 	dataBase := strings.TrimSuffix(opts.DataBaseURL, "/")
 	if dataBase == "" {
@@ -94,7 +101,8 @@ func New(opts Options) *Service {
 			TokenURL:      opts.TokenURL,
 			Now:           now,
 		}),
-		adminBase: adminBase, dataBase: dataBase, dataAlphaBase: dataAlphaBase,
+		adminBase: adminBase, adminBetaBase: adminBetaBase,
+		dataBase: dataBase, dataAlphaBase: dataAlphaBase,
 		maxRows: maxRows,
 	}
 }
@@ -110,7 +118,7 @@ func (s *Service) CredentialRefs() []string {
 	return []string{s.credRef}
 }
 
-// Handle dispatches only the nine read tools. There are no write tools in this
+// Handle dispatches only the ten read tools. There are no write tools in this
 // service; create_property_annotation is intentionally absent.
 func (s *Service) Handle(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
 	res, err := s.handle(ctx, call)
@@ -130,6 +138,8 @@ func (s *Service) handle(ctx context.Context, call mcpgateway.Call) (mcpgateway.
 		return s.listGoogleAdsLinks(ctx, call.Params)
 	case ToolListPropertyAnnotations:
 		return s.listPropertyAnnotations(ctx, call.Params)
+	case ToolListKeyEvents:
+		return s.listKeyEvents(ctx, call.Params)
 	case ToolGetCustomDimensionsMetrics:
 		return s.getCustomDimensionsAndMetrics(ctx, call.Params)
 	case ToolRunReport:
@@ -247,6 +257,23 @@ func (s *Service) listPropertyAnnotations(ctx context.Context, raw json.RawMessa
 	}
 	items, truncated, err := s.listPaged(ctx, s.adminBase,
 		"/properties/"+num+"/reportingDataAnnotations", "reportingDataAnnotations")
+	if err != nil {
+		return mcpgateway.Result{}, err
+	}
+	data, _ := snakeValue(items).([]any)
+	return mcpgateway.Result{Data: data, Truncated: truncated, RowCount: len(data)}, nil
+}
+
+func (s *Service) listKeyEvents(ctx context.Context, raw json.RawMessage) (mcpgateway.Result, error) {
+	num, perr := decodeProperty(raw)
+	if perr != nil {
+		return mcpgateway.Result{}, perr
+	}
+	// keyEvents.list is v1beta (the upstream analytics-mcp 1.1.0 tool also
+	// uses admin_v1beta). The other Admin reads in this service stay on
+	// v1alpha; the read-only analytics.readonly scope covers both.
+	items, truncated, err := s.listPaged(ctx, s.adminBetaBase,
+		"/properties/"+num+"/keyEvents", "keyEvents")
 	if err != nil {
 		return mcpgateway.Result{}, err
 	}

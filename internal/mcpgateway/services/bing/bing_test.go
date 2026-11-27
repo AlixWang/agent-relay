@@ -57,6 +57,19 @@ func (m *mockBing) handler(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		m.writes = append(m.writes, recordedRequest{method: r.Method, path: r.URL.Path, body: body})
+		if strings.HasSuffix(r.URL.Path, "/GetChildrenUrlInfo") {
+			// GetChildrenUrlInfo is the one read method documented as POST.
+			_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
+				map[string]any{
+					"__type": "UrlInfo:#Microsoft.Bing.Webmaster.Api", "AnchorCount": 50,
+					"DiscoveryDate": "/Date(1315349995284-0700)/", "DocumentSize": 0,
+					"HttpStatus": 0, "IsPage": false,
+					"LastCrawledDate":    "/Date(1316213995284-0700)/",
+					"TotalChildUrlCount": 100, "Url": "https://x.test/blog/",
+				},
+			}})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"d": nil})
 		return
 	}
@@ -101,6 +114,53 @@ func (m *mockBing) handler(w http.ResponseWriter, r *http.Request) {
 			"__type": "UrlTrafficInfo:#Microsoft.Bing.Webmaster.Api",
 			"Clicks": 10, "Impressions": 100, "IsPage": true, "Url": "https://x.test/a",
 		}})
+	case "/webmaster/api.svc/json/GetQueryPageDetailStats":
+		_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
+			map[string]any{
+				"__type": "DetailedQueryStats:#Microsoft.Bing.Webmaster.Api",
+				"Clicks": 15, "Date": "/Date(1316156400000-0700)/",
+				"Impressions": 100, "Position": 5,
+			},
+		}})
+	case "/webmaster/api.svc/json/GetQueryTrafficStats":
+		_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
+			map[string]any{
+				"__type": "RankAndTrafficStats:#Microsoft.Bing.Webmaster.Api",
+				"Clicks": 15, "Date": "/Date(1316156400000-0700)/", "Impressions": 100,
+			},
+		}})
+	case "/webmaster/api.svc/json/GetChildrenUrlTrafficInfo":
+		_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
+			map[string]any{
+				"__type": "UrlTrafficInfo:#Microsoft.Bing.Webmaster.Api",
+				"Clicks": 10, "Impressions": 100, "IsPage": false, "Url": "https://x.test/blog/",
+			},
+		}})
+	case "/webmaster/api.svc/json/GetLinkCounts":
+		_ = json.NewEncoder(w).Encode(map[string]any{"d": map[string]any{
+			"__type": "LinkCounts:#Microsoft.Bing.Webmaster.Api",
+			"Links": []any{
+				map[string]any{"__type": "LinkCount:#Microsoft.Bing.Webmaster.Api", "Count": 14, "Url": "https://x.test/page1"},
+			},
+			"TotalPages": 3,
+		}})
+	case "/webmaster/api.svc/json/GetUrlLinks":
+		_ = json.NewEncoder(w).Encode(map[string]any{"d": map[string]any{
+			"__type": "LinkDetails:#Microsoft.Bing.Webmaster.Api",
+			"Details": []any{
+				map[string]any{"__type": "LinkDetail:#Microsoft.Bing.Webmaster.Api", "AnchorText": "link", "Url": "https://x.test/page1"},
+			},
+			"TotalPages": 3,
+		}})
+	case "/webmaster/api.svc/json/GetFeedDetails":
+		_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
+			map[string]any{
+				"__type": "Feed:#Microsoft.Bing.Webmaster.Api", "Compressed": false,
+				"FileSize": 1024, "LastCrawled": "/Date(1315781995063-0700)/",
+				"Status": "Success", "Submitted": "/Date(1316213995063-0700)/",
+				"Type": "Sitemap", "Url": "https://x.test/sitemap.xml", "UrlCount": 1023,
+			},
+		}})
 	case "/webmaster/api.svc/json/GetKeyword":
 		_ = json.NewEncoder(w).Encode(map[string]any{"d": []any{
 			map[string]any{"Keyword": "image resizer", "Impressions": 5},
@@ -132,7 +192,7 @@ func newTestService(t *testing.T) (*Service, *mockBing) {
 func TestBingToolSurface(t *testing.T) {
 	svc, _ := newTestService(t)
 	tools := svc.Tools()
-	if len(tools) != 22 {
+	if len(tools) != 29 {
 		t.Fatalf("tools = %d", len(tools))
 	}
 	risk := map[string]string{}
@@ -152,6 +212,14 @@ func TestBingToolSurface(t *testing.T) {
 		}
 	}
 	for _, name := range []string{ToolGetURLSubmissionQuota, ToolGetBlockedURLs, ToolGetURLInfo, ToolGetURLTrafficInfo} {
+		if risk[name] != mcpgateway.RiskRead || !readOnly[name] {
+			t.Fatalf("%s read metadata = %q/%v", name, risk[name], readOnly[name])
+		}
+	}
+	for _, name := range []string{
+		ToolQueryPageDetailStats, ToolQueryTrafficStats, ToolChildrenURLInfo,
+		ToolChildrenURLTrafficInfo, ToolLinkCounts, ToolURLLinks, ToolFeedDetails,
+	} {
 		if risk[name] != mcpgateway.RiskRead || !readOnly[name] {
 			t.Fatalf("%s read metadata = %q/%v", name, risk[name], readOnly[name])
 		}
@@ -300,6 +368,217 @@ func TestBingP1URLReads(t *testing.T) {
 
 	if err := svc.validateURLRead(json.RawMessage(`{"site":"https://x.test/","url":"https://other.test/a"}`)); err == nil {
 		t.Fatal("foreign URL accepted")
+	}
+}
+
+func TestBingP2P3Reads(t *testing.T) {
+	svc, mock := newTestService(t)
+	ctx := context.Background()
+
+	// GetQueryPageDetailStats: query x page cross-section.
+	res, err := svc.Handle(ctx, mcpgateway.Call{
+		Tool:   ToolQueryPageDetailStats,
+		Params: json.RawMessage(`{"site":"https://x.test/","query":"像素画","page":"https://x.test/a"}`),
+	})
+	if err != nil {
+		t.Fatalf("query page detail: %v", err)
+	}
+	data := res.Data.(map[string]any)
+	rows := data["rows"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["Clicks"].(float64) != 15 || rows[0]["Impressions"].(float64) != 100 ||
+		rows[0]["Position"].(float64) != 5 || rows[0]["Date"] != "2011-09-16" {
+		t.Fatalf("query page detail rows: %+v", rows)
+	}
+	if data["query"] != "像素画" || data["page"] != "https://x.test/a" {
+		t.Fatalf("query page detail context: %+v", data)
+	}
+	mock.mu.Lock()
+	path, site, query, page := mock.lastRead, mock.lastQuery.Get("siteUrl"), mock.lastQuery.Get("query"), mock.lastQuery.Get("page")
+	mock.mu.Unlock()
+	if !strings.HasSuffix(path, "/GetQueryPageDetailStats") || site != "https://x.test/" ||
+		query != "像素画" || page != "https://x.test/a" {
+		t.Fatalf("query page detail passthrough path=%q site=%q query=%q page=%q", path, site, query, page)
+	}
+
+	// GetQueryTrafficStats: one query's daily series.
+	res, err = svc.Handle(ctx, mcpgateway.Call{
+		Tool:   ToolQueryTrafficStats,
+		Params: json.RawMessage(`{"site":"https://x.test/","query":"image resizer"}`),
+	})
+	if err != nil {
+		t.Fatalf("query traffic: %v", err)
+	}
+	rows = res.Data.(map[string]any)["rows"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["Clicks"].(float64) != 15 || rows[0]["Date"] != "2011-09-16" {
+		t.Fatalf("query traffic rows: %+v", rows)
+	}
+	mock.mu.Lock()
+	path, site, query = mock.lastRead, mock.lastQuery.Get("siteUrl"), mock.lastQuery.Get("query")
+	mock.mu.Unlock()
+	if !strings.HasSuffix(path, "/GetQueryTrafficStats") || site != "https://x.test/" || query != "image resizer" {
+		t.Fatalf("query traffic passthrough path=%q site=%q query=%q", path, site, query)
+	}
+
+	// GetChildrenUrlInfo: POST with the documented siteUrl/url/page/
+	// filterProperties body, returning UrlInfo rows.
+	res, err = svc.Handle(ctx, mcpgateway.Call{
+		Tool:   ToolChildrenURLInfo,
+		Params: json.RawMessage(`{"site":"https://x.test/","url":"https://x.test/blog/","page":2}`),
+	})
+	if err != nil {
+		t.Fatalf("children url info: %v", err)
+	}
+	rows = res.Data.(map[string]any)["rows"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["AnchorCount"].(float64) != 50 || rows[0]["IsPage"] != false ||
+		rows[0]["TotalChildUrlCount"].(float64) != 100 || rows[0]["LastCrawledDate"] != "2011-09-16" {
+		t.Fatalf("children url info rows: %+v", rows)
+	}
+	mock.mu.Lock()
+	var posted recordedRequest
+	for _, req := range mock.writes {
+		if strings.HasSuffix(req.path, "/GetChildrenUrlInfo") {
+			posted = req
+		}
+	}
+	mock.mu.Unlock()
+	if posted.method != http.MethodPost {
+		t.Fatalf("children url info method = %q, want POST", posted.method)
+	}
+	if posted.body["siteUrl"] != "https://x.test/" || posted.body["url"] != "https://x.test/blog/" ||
+		posted.body["page"].(float64) != 2 {
+		t.Fatalf("children url info body: %+v", posted.body)
+	}
+	filters, _ := posted.body["filterProperties"].(map[string]any)
+	if filters == nil || filters["CrawlDateFilter"].(float64) != 1 || filters["HttpCodeFilters"].(float64) != 0 {
+		t.Fatalf("children url info filters: %+v", posted.body)
+	}
+
+	// GetChildrenUrlTrafficInfo: GET siteUrl/url/page.
+	res, err = svc.Handle(ctx, mcpgateway.Call{
+		Tool:   ToolChildrenURLTrafficInfo,
+		Params: json.RawMessage(`{"site":"https://x.test/","url":"https://x.test/blog/","page":1}`),
+	})
+	if err != nil {
+		t.Fatalf("children url traffic info: %v", err)
+	}
+	rows = res.Data.(map[string]any)["rows"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["Clicks"].(float64) != 10 || rows[0]["IsPage"] != false {
+		t.Fatalf("children url traffic rows: %+v", rows)
+	}
+	mock.mu.Lock()
+	path, site, page = mock.lastRead, mock.lastQuery.Get("siteUrl"), mock.lastQuery.Get("page")
+	mock.mu.Unlock()
+	if !strings.HasSuffix(path, "/GetChildrenUrlTrafficInfo") || site != "https://x.test/" || page != "1" {
+		t.Fatalf("children url traffic passthrough path=%q site=%q page=%q", path, site, page)
+	}
+
+	// GetLinkCounts: object with Links + TotalPages.
+	res, err = svc.Handle(ctx, mcpgateway.Call{
+		Tool:   ToolLinkCounts,
+		Params: json.RawMessage(`{"site":"https://x.test/","page":1}`),
+	})
+	if err != nil {
+		t.Fatalf("link counts: %v", err)
+	}
+	data = res.Data.(map[string]any)
+	links := data["links"].([]map[string]any)
+	if data["total_pages"].(int) != 3 || data["has_more"] != true || len(links) != 1 ||
+		links[0]["Count"].(float64) != 14 || links[0]["Url"] != "https://x.test/page1" {
+		t.Fatalf("link counts: %+v", data)
+	}
+	mock.mu.Lock()
+	path, page = mock.lastRead, mock.lastQuery.Get("page")
+	mock.mu.Unlock()
+	if !strings.HasSuffix(path, "/GetLinkCounts") || page != "1" {
+		t.Fatalf("link counts passthrough path=%q page=%q", path, page)
+	}
+
+	// GetUrlLinks: object with Details + TotalPages; the upstream parameter
+	// is named `link`, not `url`.
+	res, err = svc.Handle(ctx, mcpgateway.Call{
+		Tool:   ToolURLLinks,
+		Params: json.RawMessage(`{"site":"https://x.test/","url":"https://x.test/a","page":2}`),
+	})
+	if err != nil {
+		t.Fatalf("url links: %v", err)
+	}
+	data = res.Data.(map[string]any)
+	links = data["links"].([]map[string]any)
+	if data["total_pages"].(int) != 3 || data["has_more"] != false || len(links) != 1 ||
+		links[0]["AnchorText"] != "link" {
+		t.Fatalf("url links: %+v", data)
+	}
+	mock.mu.Lock()
+	path, link, page := mock.lastRead, mock.lastQuery.Get("link"), mock.lastQuery.Get("page")
+	mock.mu.Unlock()
+	if !strings.HasSuffix(path, "/GetUrlLinks") || link != "https://x.test/a" || page != "2" {
+		t.Fatalf("url links passthrough path=%q link=%q page=%q", path, link, page)
+	}
+
+	// GetFeedDetails: sitemap index children.
+	res, err = svc.Handle(ctx, mcpgateway.Call{
+		Tool:   ToolFeedDetails,
+		Params: json.RawMessage(`{"site":"https://x.test/","feedUrl":"https://x.test/sitemap.xml"}`),
+	})
+	if err != nil {
+		t.Fatalf("feed details: %v", err)
+	}
+	feeds := res.Data.(map[string]any)["feeds"].([]map[string]any)
+	if len(feeds) != 1 || feeds[0]["Compressed"] != false || feeds[0]["FileSize"].(float64) != 1024 ||
+		feeds[0]["Status"] != "Success" || feeds[0]["Type"] != "Sitemap" ||
+		feeds[0]["UrlCount"].(float64) != 1023 || feeds[0]["LastCrawled"] != "2011-09-11" {
+		t.Fatalf("feed details: %+v", feeds)
+	}
+	mock.mu.Lock()
+	path, feedURL := mock.lastRead, mock.lastQuery.Get("feedUrl")
+	mock.mu.Unlock()
+	if !strings.HasSuffix(path, "/GetFeedDetails") || feedURL != "https://x.test/sitemap.xml" {
+		t.Fatalf("feed details passthrough path=%q feedUrl=%q", path, feedURL)
+	}
+}
+
+func TestBingP2P3Validation(t *testing.T) {
+	svc, _ := newTestService(t)
+	cases := []struct {
+		tool   string
+		params string
+	}{
+		{ToolQueryPageDetailStats, `{"site":"https://x.test/","query":"","page":"https://x.test/a"}`},
+		{ToolQueryPageDetailStats, `{"site":"https://x.test/","query":"q","page":"https://other.test/a"}`},
+		{ToolQueryTrafficStats, `{"site":"https://x.test/","query":"  "}`},
+		{ToolChildrenURLInfo, `{"site":"https://x.test/","url":"https://other.test/blog/"}`},
+		{ToolChildrenURLInfo, `{"site":"https://x.test/","url":"https://x.test/blog/","page":70000}`},
+		{ToolChildrenURLTrafficInfo, `{"site":"https://x.test/","url":"https://x.test/blog/","page":-1}`},
+		{ToolLinkCounts, `{"site":"https://x.test/","page":-1}`},
+		{ToolURLLinks, `{"site":"https://x.test/","url":"https://other.test/a"}`},
+		{ToolFeedDetails, `{"site":"https://x.test/","feedUrl":"https://other.test/sitemap.xml"}`},
+	}
+	for _, tc := range cases {
+		if _, err := svc.Handle(context.Background(), mcpgateway.Call{Tool: tc.tool, Params: json.RawMessage(tc.params)}); err == nil {
+			t.Fatalf("%s accepted invalid params %s", tc.tool, tc.params)
+		}
+	}
+}
+
+func TestBingP2P3CredentialMissing(t *testing.T) {
+	missing := New(Options{
+		CredentialRef: "secret:NOPE", Credentials: fakeSecrets{err: mcpgateway.ErrCredentialMissing},
+		MaxRows: 10,
+	})
+	calls := []mcpgateway.Call{
+		{Tool: ToolQueryPageDetailStats, Params: json.RawMessage(`{"site":"https://x.test/","query":"q","page":"https://x.test/a"}`)},
+		{Tool: ToolQueryTrafficStats, Params: json.RawMessage(`{"site":"https://x.test/","query":"q"}`)},
+		{Tool: ToolChildrenURLInfo, Params: json.RawMessage(`{"site":"https://x.test/","url":"https://x.test/blog/"}`)},
+		{Tool: ToolChildrenURLTrafficInfo, Params: json.RawMessage(`{"site":"https://x.test/","url":"https://x.test/blog/"}`)},
+		{Tool: ToolLinkCounts, Params: json.RawMessage(`{"site":"https://x.test/"}`)},
+		{Tool: ToolURLLinks, Params: json.RawMessage(`{"site":"https://x.test/","url":"https://x.test/a"}`)},
+		{Tool: ToolFeedDetails, Params: json.RawMessage(`{"site":"https://x.test/","feedUrl":"https://x.test/sitemap.xml"}`)},
+	}
+	for _, call := range calls {
+		_, err := missing.Handle(context.Background(), call)
+		if err == nil || !strings.Contains(err.Error(), mcpgateway.CodeCredentialMissing) {
+			t.Fatalf("%s missing credential: %v", call.Tool, err)
+		}
 	}
 }
 
