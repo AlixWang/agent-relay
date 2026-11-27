@@ -336,6 +336,21 @@ func TestChatDeliveryUnknownDoesNotResend(t *testing.T) {
 	if sends != 1 {
 		t.Fatalf("automatic resend: sends=%d", sends)
 	}
+	rows, err := env.st.ListAudit("", "muse.chat.delivery_unknown", 0, 20)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("delivery_unknown rows=%d err=%v", len(rows), err)
+	}
+	// A successful read with no matching event must be distinguishable from a
+	// read failure: zero confirm errors, status 200, no raw id (synthetic
+	// session -> unknown fingerprint).
+	for _, want := range []string{
+		"send_status=200", "send_echo=yes", "send_addr=implicit",
+		"confirm_errors=0", "last_confirm_err=none", "resolved=unknown",
+	} {
+		if !strings.Contains(rows[0].Detail, want) {
+			t.Fatalf("delivery_unknown audit %q missing %q", rows[0].Detail, want)
+		}
+	}
 }
 
 func TestChatTimeoutAndDraftPartial(t *testing.T) {

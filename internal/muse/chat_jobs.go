@@ -787,18 +787,55 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 	if job.cancelRequested() {
 		return cancelledOutcome(job)
 	}
+	sendAddr := sendRes.Addr
+	if sendAddr == "" {
+		sendAddr = chatSendAddr(job.SessionID)
+	}
+	sendErr := sendRes.FailureCode
+	if sendErr == "" && serr != nil {
+		sendErr = chatFailureCode(serr)
+	}
 	if sendRes.Evidence != chatSendMayHaveArrived {
-		cf := chatErrorFromFailure(serr)
-		return chatOutcome{Status: ChatStatusFailed, Error: cf, Stage: cf.Class}
+		// A definite rejection (or a failure before any write) must fail the
+		// job instead of running the 5s confirmation window. Keep the
+		// classified reason and HTTP status for the failed audit.
+		cf := chatFailureAs(serr)
+		if cf == nil {
+			cf = &chatFailure{Code: "muse_upstream_error", Stage: "send"}
+		}
+		stage := cf.Stage
+		if stage == "" {
+			stage = "send"
+		}
+		status := sendRes.Status
+		if status == 0 {
+			status = cf.Status
+		}
+		reason := sendErr
+		if reason == "" {
+			reason = cf.Code
+		}
+		return chatOutcome{
+			Status: ChatStatusFailed, Error: chatErrorFromFailure(serr), Stage: stage,
+			FailureReason: reason, FailureStatus: status,
+			SendStatus: sendRes.Status, SendEcho: sendRes.Echo, SendErr: sendErr,
+			SendAddr: sendAddr, ResolvedFingerprint: sendRes.ResolvedFingerprint,
+		}
 	}
 	job.advance(ChatStatusConfirming, s.now().Unix())
-	seq, duplicate := s.confirmChat(ctx, sess, job)
+	seq, duplicate, confirm := s.confirmChat(ctx, sess, job)
 	if job.cancelRequested() {
 		return cancelledOutcome(job)
 	}
 	if seq <= 0 {
-		return chatOutcome{Status: ChatStatusDeliveryUnknown, Stage: "confirm",
-			Error: &ChatError{Code: "muse_delivery_unknown", Class: "confirm"}}
+		return chatOutcome{
+			Status: ChatStatusDeliveryUnknown, Stage: "confirm",
+			Error:      &ChatError{Code: "muse_delivery_unknown", Class: "confirm"},
+			SendStatus: sendRes.Status, SendEcho: sendRes.Echo, SendErr: sendErr,
+			SendAddr: sendAddr, ConfirmReads: confirm.Reads,
+			ConfirmErrors: confirm.Errors, LastConfirmErr: confirm.LastErr,
+			ResolvedFingerprint: sendRes.ResolvedFingerprint,
+		}
 	}
 	job.setConfirmed(seq, s.now().Unix(), duplicate)
 
@@ -809,8 +846,13 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 	if sendRes.Echo {
 		echo = "yes"
 	}
-	detail := fmt.Sprintf("chat=%s echo=%s user_seq=%d delivery=confirmed elapsed_ms=%d",
-		job.ID, echo, seq, elapsedMS(job, now))
+	sendEcho := "no"
+	if sendRes.Echo {
+		sendEcho = "yes"
+	}
+	detail := fmt.Sprintf("chat=%s echo=%s user_seq=%d delivery=confirmed elapsed_ms=%d send_status=%d send_echo=%s send_addr=%s resolved=%s",
+		job.ID, echo, seq, elapsedMS(job, now), sendRes.Status, sendEcho,
+		chatAuditValue(sendAddr), chatAuditValue(resolvedFingerprintOrUnknown(sendRes.ResolvedFingerprint)))
 	if err := s.st.AppendAudit("system", "muse.chat.sent", truncate(detail, chatAuditDetail), now); err != nil {
 		log.Printf("muse chat: audit sent failed for %s: %v", job.ID, err)
 	}
@@ -819,28 +861,36 @@ func (s *Service) driveChat(ctx context.Context, job *ChatJob) chatOutcome {
 }
 
 // confirmChat waits up to 5s for our message.user to appear in history. The
-// reply budget starts only once delivery is confirmed (D7/D12).
-func (s *Service) confirmChat(ctx context.Context, sess chatSession, job *ChatJob) (int64, bool) {
+// reply budget starts only once delivery is confirmed (D7/D12). Reads counts
+// every confirmation read attempt; Errors and LastErr classify failures so the
+// delivery_unknown audit can distinguish "no event" from "could not read".
+func (s *Service) confirmChat(ctx context.Context, sess chatSession, job *ChatJob) (int64, bool, chatConfirmStats) {
+	var stats chatConfirmStats
 	cctx, cancel := context.WithTimeout(ctx, chatConfirmBudget)
 	defer cancel()
 	for {
 		if job.cancelRequested() || cctx.Err() != nil {
-			return 0, false
+			return 0, false, stats
 		}
+		stats.Reads++
 		hist, err := sess.History(cctx, job.SessionID, 20, 0)
 		if err == nil {
 			if seq, dup, found := findChatUser(hist.ChatEvents, job.BaselineValue(), job.Text); found {
-				return seq, dup
+				return seq, dup, stats
 			}
 			job.bumpLastSeq(maxChatSeq(hist.ChatEvents))
-		} else if errors.Is(err, context.Canceled) {
-			return 0, false
+		} else {
+			stats.Errors++
+			stats.LastErr = chatFailureCode(err)
+			if errors.Is(err, context.Canceled) {
+				return 0, false, stats
+			}
 		}
 		timer := time.NewTimer(chatConfirmEvery)
 		select {
 		case <-cctx.Done():
 			timer.Stop()
-			return 0, false
+			return 0, false, stats
 		case <-timer.C:
 		}
 	}
@@ -1014,10 +1064,10 @@ func (s *Service) pollChatHistory(ctx context.Context, sess chatSession, job *Ch
 }
 
 func (s *Service) auditSending(job *ChatJob) error {
-	detail := fmt.Sprintf("chat=%s peer=%s account=%s session=%s baseline=%d text_len=%d text_sha256=%s request_id=%s access=1",
+	detail := fmt.Sprintf("chat=%s peer=%s account=%s session=%s baseline=%d text_len=%d text_sha256=%s request_id=%s access=1 send_addr=%s",
 		chatAuditValue(job.ID), chatAuditValue(job.PeerID), chatAuditValue(job.AccountID),
 		chatAuditValue(job.Session), job.BaselineValue(), job.TextLen,
-		job.TextHash, chatAuditValue(job.RequestID))
+		job.TextHash, chatAuditValue(job.RequestID), chatAuditValue(chatSendAddr(job.SessionID)))
 	return s.st.AppendAudit(job.Actor, "muse.chat.sending", truncate(detail, chatAuditDetail), s.now().Unix())
 }
 
@@ -1054,8 +1104,27 @@ func (s *Service) auditOutcome(job *ChatJob, o chatOutcome, now int64) {
 			advanced, o.PollStats.AssistantEvents, o.PollStats.DraftEvents)
 	case ChatStatusDeliveryUnknown:
 		action = "muse.chat.delivery_unknown"
-		detail = fmt.Sprintf("chat=%s reason=no_user_event last_seq=%d",
-			chatAuditValue(job.ID), job.LastSeqValue())
+		echo := "no"
+		if o.SendEcho {
+			echo = "yes"
+		}
+		sendErr := o.SendErr
+		if sendErr == "" {
+			sendErr = "none"
+		}
+		lastConfirmErr := o.LastConfirmErr
+		if lastConfirmErr == "" {
+			lastConfirmErr = "none"
+		}
+		addr := o.SendAddr
+		if addr == "" {
+			addr = chatSendAddr(job.SessionID)
+		}
+		detail = fmt.Sprintf("chat=%s reason=no_user_event last_seq=%d send_status=%d send_echo=%s send_err=%s send_addr=%s confirm_reads=%d confirm_errors=%d last_confirm_err=%s resolved=%s",
+			chatAuditValue(job.ID), job.LastSeqValue(), o.SendStatus, echo,
+			chatAuditValue(sendErr), chatAuditValue(addr), o.ConfirmReads, o.ConfirmErrors,
+			chatAuditValue(lastConfirmErr),
+			chatAuditValue(resolvedFingerprintOrUnknown(o.ResolvedFingerprint)))
 	case ChatStatusCancelled:
 		action = "muse.chat.cancelled"
 		detail = fmt.Sprintf("chat=%s cancel=%s", chatAuditValue(job.ID), o.Cancel)
@@ -1281,11 +1350,31 @@ type chatOutcome struct {
 	Actor      string
 	PollStats  chatPollStats
 
+	// Send/confirm diagnostics are audit-only. SendStatus/SendEcho/SendErr/
+	// SendAddr describe the write attempt; ConfirmReads/ConfirmErrors/
+	// LastConfirmErr describe the delivery confirmation window;
+	// ResolvedFingerprint is the 8-hex fingerprint of the resolved session id
+	// (never the raw id).
+	SendStatus          int
+	SendEcho            bool
+	SendErr             string
+	SendAddr            string
+	ConfirmReads        int
+	ConfirmErrors       int
+	LastConfirmErr      string
+	ResolvedFingerprint string
+
 	// FailureReason/FailureStatus preserve the underlying chatFailure for
 	// audit only. They are never copied into ChatError (the public error code
 	// stays muse_history_unavailable).
 	FailureReason string
 	FailureStatus int
+}
+
+type chatConfirmStats struct {
+	Reads   int
+	Errors  int
+	LastErr string
 }
 
 type chatPollStats struct {
@@ -1340,6 +1429,15 @@ func chatAuditValue(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// resolvedFingerprintOrUnknown keeps the audit field present for synthetic
+// sessions that do not carry a fingerprint, without ever accepting a raw id.
+func resolvedFingerprintOrUnknown(fingerprint string) string {
+	if fingerprint == "" {
+		return "unknown"
+	}
+	return fingerprint
 }
 
 func elapsedMS(job *ChatJob, now int64) int64 {

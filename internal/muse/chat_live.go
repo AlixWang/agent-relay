@@ -634,17 +634,31 @@ func chatStatusFailure(stage string, status int, sessionScoped bool) *chatFailur
 	return cf
 }
 
-func (l *liveChatSession) Send(ctx context.Context, sessionID, text, nodeID string) (chatSendResult, error) {
-	var res chatSendResult
+// Send writes one text message. The main chat (empty input sessionID) omits
+// session_id: that is the form production proved writes the member main chat,
+// and it matches muse-cli. History still reads the explicit resolved id, so the
+// input id decides addressing, not the resolved one. Side chats keep their
+// explicit id. resolveSession still runs first, preserving the fail-before-write
+// behavior for an unresolvable main chat.
+func (l *liveChatSession) Send(ctx context.Context, sessionID, text, nodeID string) (res chatSendResult, err error) {
+	res.Addr = chatSendAddr(sessionID)
+	defer func() {
+		if err != nil && res.FailureCode == "" {
+			res.FailureCode = chatFailureCode(err)
+		}
+	}()
 	sid, serr := l.resolveSession(ctx, sessionID)
 	if serr != nil {
 		return res, serr
 	}
+	res.ResolvedFingerprint = chatSessionFingerprint(sid)
 	payload := map[string]any{
 		"items":        []map[string]string{{"type": "text", "text": text}},
 		"node_id":      nodeID,
 		"capabilities": map[string]any{},
-		"session_id":   sid,
+	}
+	if sessionID != "" {
+		payload["session_id"] = sid
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -680,8 +694,7 @@ func (l *liveChatSession) Send(ctx context.Context, sessionID, text, nodeID stri
 				res.Echo = true
 				res.Status = f.Response.Status
 				if res.Status >= 400 {
-					switch res.Status {
-					case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusTooManyRequests:
+					if chatSendRejectStatus(res.Status) {
 						res.Evidence = chatSendRejected
 					}
 					return res, chatStatusFailure("send", res.Status, true)
@@ -723,6 +736,44 @@ func (l *liveChatSession) Send(ctx context.Context, sessionID, text, nodeID stri
 			return res, nil
 		}
 	}
+}
+
+// chatSendAddr classifies the caller's addressing intent. It deliberately uses
+// the input sessionID, not the resolved id: the main chat passes "" and a side
+// chat passes its explicit id.
+func chatSendAddr(sessionID string) string {
+	if sessionID == "" {
+		return "implicit"
+	}
+	return "explicit"
+}
+
+// chatSendRejectStatus reports whether a 4xx is a definite rejection (the
+// request did not reach the chat). 408 is excluded on purpose: a request
+// timeout may have been processed, so it stays in the may-have-arrived path.
+func chatSendRejectStatus(status int) bool {
+	return status >= 400 && status < 500 && status != http.StatusRequestTimeout
+}
+
+// chatSessionFingerprint returns the first 8 hex characters of
+// SHA-256(sessionID). It is the only form of the resolved id allowed in audit.
+func chatSessionFingerprint(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:4])
+}
+
+func chatFailureCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	cf := chatFailureAs(err)
+	if cf == nil || cf.Code == "" {
+		return "muse_upstream_error"
+	}
+	return cf.Code
 }
 
 // countFullLines consumes complete NDJSON lines. trailing controls whether a

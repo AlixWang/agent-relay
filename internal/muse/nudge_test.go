@@ -2,10 +2,12 @@ package muse
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/AlixWang/agent-relay/internal/muse/musetest"
 	"github.com/AlixWang/agent-relay/internal/store"
 )
 
@@ -64,6 +66,49 @@ func TestNudgeForTasksSuccessConfirmAndReleaseLease(t *testing.T) {
 	audits, err := env.st.ListAudit("system", "muse.nudge.sent", 0, 10)
 	if err != nil || len(audits) != 1 || !strings.Contains(audits[0].Detail, "op-task-1") {
 		t.Fatalf("muse.nudge.sent audit missing: %+v err=%v", audits, err)
+	}
+}
+
+// TestNudgeUsesImplicitMainChatSend pins the nudge reuse of Send(""): the
+// write omits session_id, the confirmation read uses the resolved explicit id,
+// and muse.nudge.sent still appears.
+func TestNudgeUsesImplicitMainChatSend(t *testing.T) {
+	m := newMainChatUpstream()
+	ws := musetest.New(t)
+	ws.SetStreamHandler(m.handle)
+	env := newNudgeTestEnv(t)
+	env.svc.chatOpen = &liveChatGateway{sess: newLiveChatSessionForTest(t, ws.URL)}
+
+	res, err := env.svc.NudgeForTasks(context.Background(), "alice", []string{"op-nudge-1"})
+	if err != nil {
+		t.Fatalf("NudgeForTasks: %v", err)
+	}
+	if res.Status != "sent" || res.UserSeq != 1 {
+		t.Fatalf("unexpected nudge result: %+v", res)
+	}
+	_, mainExplicit, implicit, side, lastSID := m.counts()
+	if mainExplicit != 0 || implicit != 1 || side != 0 || lastSID != "" {
+		t.Fatalf("nudge address: explicit-main=%d implicit=%d side=%d last=%q",
+			mainExplicit, implicit, side, lastSID)
+	}
+	if hadSessionID, _ := m.lastSendAddress(); hadSessionID {
+		t.Fatal("nudge /chat/stream must omit session_id for the main chat")
+	}
+	for _, req := range ws.Requests() {
+		if !strings.HasPrefix(req.Path, "/chat/history?") {
+			continue
+		}
+		u, err := url.Parse(req.Path)
+		if err != nil {
+			t.Fatalf("history path: %v", err)
+		}
+		if got := u.Query().Get("session_id"); got != m.mainID {
+			t.Fatalf("nudge /chat/history session_id=%q, want explicit %q", got, m.mainID)
+		}
+	}
+	audits, err := env.st.ListAudit("system", "muse.nudge.sent", 0, 10)
+	if err != nil || len(audits) != 1 {
+		t.Fatalf("muse.nudge.sent audit rows=%d err=%v", len(audits), err)
 	}
 }
 
