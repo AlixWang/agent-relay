@@ -21,8 +21,8 @@ func TestExplicitServiceRegistrationAndDefaultPolicy(t *testing.T) {
 		t.Fatalf("register ga: %v", err)
 	}
 	tools := reg.AggregateTools()
-	if len(tools) != 35 {
-		t.Fatalf("registered tool count = %d, want 35", len(tools))
+	if len(tools) != 38 {
+		t.Fatalf("registered tool count = %d, want 38", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tool := range tools {
@@ -32,6 +32,7 @@ func TestExplicitServiceRegistrationAndDefaultPolicy(t *testing.T) {
 		"adsense_list_accounts", "adsense_list_ad_units",
 		"bing_list_sites", "bing_submit_url", "bing_submit_url_batch",
 		"bing_submit_feed", "bing_remove_feed", "bing_add_blocked_url",
+		"bing_get_url_submission_quota", "bing_get_blocked_urls", "bing_remove_blocked_url",
 		"ga_get_account_summaries", "ga_run_report", "ga_run_realtime_report",
 		"ga_run_funnel_report", "ga_run_conversions_report",
 	} {
@@ -69,19 +70,25 @@ func TestExplicitServiceRegistrationAndDefaultPolicy(t *testing.T) {
 		t.Fatal("ga read scope granted a write")
 	}
 
-	// add_blocked_url is implemented but deliberately not in the first batch.
+	// add_blocked_url is implemented but deliberately not in the first batch;
+	// remove_blocked_url is the approval-gated safety valve and is enabled.
 	write := cfg.Write.Services["bing-webmaster"]
-	if len(write.AllowedTools) != 4 {
+	if len(write.AllowedTools) != 5 {
 		t.Fatalf("default bing write allowlist: %+v", write.AllowedTools)
 	}
+	allowed := map[string]bool{}
 	for _, name := range write.AllowedTools {
-		if name == bing.ToolAddBlockedURL {
-			t.Fatal("add_blocked_url must be off in the first batch")
-		}
+		allowed[name] = true
+	}
+	if allowed[bing.ToolAddBlockedURL] {
+		t.Fatal("add_blocked_url must be off in the first batch")
+	}
+	if !allowed[bing.ToolRemoveBlockedURL] {
+		t.Fatal("remove_blocked_url must be in the default bing write allowlist")
 	}
 	// The second wave is a config-only change and validates.
 	cfg.Write.Services["bing-webmaster"] = mcpgateway.WriteServiceConfig{
-		AllowedTools: []string{"submit_url", "submit_url_batch", "submit_feed", "remove_feed", "add_blocked_url"},
+		AllowedTools: []string{"submit_url", "submit_url_batch", "submit_feed", "remove_feed", "add_blocked_url", "remove_blocked_url"},
 	}
 	if err := cfg.ValidateAgainst(reg); err != nil {
 		t.Fatalf("second-wave config must validate: %v", err)

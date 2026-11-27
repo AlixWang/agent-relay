@@ -140,14 +140,9 @@ func (s *Service) addBlockedURL(ctx context.Context, call mcpgateway.Call) (mcpg
 	if isSiteRoot(p.Site, p.BlockedURL) {
 		return mcpgateway.Result{}, mcpgateway.InvalidParams("blockedUrl cannot be the site root")
 	}
-	entityType := 0
-	switch p.EntityType {
-	case "", "page":
-		entityType = 0
-	case "directory":
-		entityType = 1
-	default:
-		return mcpgateway.Result{}, mcpgateway.InvalidParams("entity_type must be page or directory")
+	entityType, eerr := blockedEntityType(p.EntityType)
+	if eerr != nil {
+		return mcpgateway.Result{}, eerr
 	}
 	if call.DryRun {
 		return dryRunResult(call.Tool, true), nil
@@ -156,22 +151,71 @@ func (s *Service) addBlockedURL(ctx context.Context, call mcpgateway.Call) (mcpg
 		return mcpgateway.Result{}, verr
 	}
 	p.BlockedURL = canonicalURL(p.BlockedURL)
-	body := map[string]any{
-		"siteUrl": p.Site,
-		"blockedUrl": map[string]any{
-			"__type":      "BlockedUrl:#Microsoft.Bing.Webmaster.Api",
-			"Date":        "/Date(-62135568000000-0800)/",
-			"EntityType":  entityType,
-			"RequestType": 1,
-			"Url":         p.BlockedURL,
-		},
-	}
+	body := blockedURLBody(p.Site, p.BlockedURL, entityType, 1)
 	if err := s.call(ctx, http.MethodPost, "AddBlockedUrl", nil, body, nil); err != nil {
 		return mcpgateway.Result{}, err
 	}
 	return mcpgateway.Result{Data: map[string]any{
 		"blocked": true, "site": p.Site, "blocked_url": p.BlockedURL, "entity_type": p.EntityType,
 	}, RowCount: 1, UpstreamStatus: 200}, nil
+}
+
+func (s *Service) removeBlockedURL(ctx context.Context, call mcpgateway.Call) (mcpgateway.Result, error) {
+	var p blockedArgs
+	if err := mcpgateway.DecodeStrict(call.Params, &p); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	if !mcpgateway.URLBelongsToSite(p.Site, p.BlockedURL) {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("blockedUrl must belong to the site")
+	}
+	if isSiteRoot(p.Site, p.BlockedURL) {
+		return mcpgateway.Result{}, mcpgateway.InvalidParams("blockedUrl cannot be the site root")
+	}
+	entityType, eerr := blockedEntityType(p.EntityType)
+	if eerr != nil {
+		return mcpgateway.Result{}, eerr
+	}
+	if call.DryRun {
+		return dryRunResult(call.Tool, true), nil
+	}
+	if verr := s.verifiedSite(ctx, p.Site); verr != nil {
+		return mcpgateway.Result{}, verr
+	}
+	p.BlockedURL = canonicalURL(p.BlockedURL)
+	body := blockedURLBody(p.Site, p.BlockedURL, entityType, 0)
+	if err := s.call(ctx, http.MethodPost, "RemoveBlockedUrl", nil, body, nil); err != nil {
+		return mcpgateway.Result{}, err
+	}
+	return mcpgateway.Result{Data: map[string]any{
+		"removed": true, "site": p.Site, "blocked_url": p.BlockedURL, "entity_type": p.EntityType,
+	}, RowCount: 1, UpstreamStatus: 200}, nil
+}
+
+// blockedEntityType maps the public scope name to Bing's BlockedUrl.EntityType.
+func blockedEntityType(raw string) (int, *mcpgateway.Error) {
+	switch raw {
+	case "", "page":
+		return 0, nil
+	case "directory":
+		return 1, nil
+	default:
+		return 0, mcpgateway.InvalidParams("entity_type must be page or directory")
+	}
+}
+
+// blockedURLBody builds the wrapped BlockedUrl payload shared by AddBlockedUrl
+// (RequestType 1) and RemoveBlockedUrl (RequestType 0).
+func blockedURLBody(site, blockedURL string, entityType, requestType int) map[string]any {
+	return map[string]any{
+		"siteUrl": site,
+		"blockedUrl": map[string]any{
+			"__type":      "BlockedUrl:#Microsoft.Bing.Webmaster.Api",
+			"Date":        "/Date(-62135568000000-0800)/",
+			"EntityType":  entityType,
+			"RequestType": requestType,
+			"Url":         blockedURL,
+		},
+	}
 }
 
 type submissionQuota struct {

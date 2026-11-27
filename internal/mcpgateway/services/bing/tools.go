@@ -1,7 +1,8 @@
-// Package bing implements the Bing Webmaster Tools MCP service: 12 read tools
-// and the first-batch five write tools (four low-risk direct, add_blocked_url
-// high-risk via the gateway approval state machine). Upstream is the JSON/HTTP
-// API at https://ssl.bing.com/webmaster/api.svc/json/<Method>.
+// Package bing implements the Bing Webmaster Tools MCP service: 14 read tools
+// and six write tools (four low-risk direct; add_blocked_url and
+// remove_blocked_url high-risk via the gateway approval state machine).
+// Upstream is the JSON/HTTP API at
+// https://ssl.bing.com/webmaster/api.svc/json/<Method>.
 package bing
 
 import (
@@ -34,11 +35,15 @@ const (
 	ToolRelatedKeyword = "related_keywords"
 	ToolKeywordStats   = "keyword_stats"
 
-	ToolSubmitURL      = "submit_url"
-	ToolSubmitURLBatch = "submit_url_batch"
-	ToolSubmitFeed     = "submit_feed"
-	ToolRemoveFeed     = "remove_feed"
-	ToolAddBlockedURL  = "add_blocked_url"
+	ToolGetURLSubmissionQuota = "get_url_submission_quota"
+	ToolGetBlockedURLs        = "get_blocked_urls"
+
+	ToolSubmitURL        = "submit_url"
+	ToolSubmitURLBatch   = "submit_url_batch"
+	ToolSubmitFeed       = "submit_feed"
+	ToolRemoveFeed       = "remove_feed"
+	ToolAddBlockedURL    = "add_blocked_url"
+	ToolRemoveBlockedURL = "remove_blocked_url"
 )
 
 var (
@@ -47,7 +52,7 @@ var (
 	dateRe    = regexp.MustCompile(`^/Date\((-?\d+)([+-]\d{4})?\)/$`)
 )
 
-// Tools returns all seventeen registered tools. Whether a write tool is
+// Tools returns all twenty registered tools. Whether a write tool is
 // callable still depends on [mcp_gateway.write.*] and key scope.
 func (s *Service) Tools() []mcpgateway.Tool {
 	siteSchema := func(extra map[string]any, required ...string) json.RawMessage {
@@ -93,6 +98,10 @@ func (s *Service) Tools() []mcpgateway.Tool {
 			keywordSchema(true), s.validateKeyword),
 		readTool(ToolKeywordStats, "Keyword traffic stats for a query.",
 			keywordSchema(false), s.validateKeywordStats),
+		readTool(ToolGetURLSubmissionQuota, "Daily and monthly URL submission quota remaining for a verified site.",
+			siteSchema(map[string]any{}, "site"), s.validateSiteRead),
+		readTool(ToolGetBlockedURLs, "List pages/directories currently blocked from Bing results.",
+			siteSchema(map[string]any{"limit": limitProp}, "site"), s.validateSiteRead),
 
 		writeTool(ToolSubmitURL, "Submit one URL for indexing. Low risk; direct execution with a write scope.",
 			writeSchema(map[string]any{"url": mcpgateway.Prop("string", "URL belonging to the site.")}, "site", "url"),
@@ -112,6 +121,12 @@ func (s *Service) Tools() []mcpgateway.Tool {
 				"entity_type": mcpgateway.EnumProp("Block scope: page (default) or directory.", "page", "directory"),
 			}, "site", "blockedUrl"),
 			true, true, true, s.validateAddBlockedURL),
+		writeTool(ToolRemoveBlockedURL, "Unblock a page or directory from Bing results. High risk: requires an approval_id after operator approval.",
+			writeSchema(map[string]any{
+				"blockedUrl":  mcpgateway.Prop("string", "Blocked page or directory URL belonging to the site (cannot be the site root)."),
+				"entity_type": mcpgateway.EnumProp("Block scope: page (default) or directory.", "page", "directory"),
+			}, "site", "blockedUrl"),
+			true, true, true, s.validateRemoveBlockedURL),
 	}
 }
 
@@ -370,6 +385,12 @@ func (s *Service) validateAddBlockedURL(raw json.RawMessage) error {
 		return mcpgateway.InvalidParams("entity_type must be page or directory")
 	}
 	return nil
+}
+
+// validateRemoveBlockedURL reuses the add_blocked_url contract: same params,
+// same site-ownership and entity-type checks.
+func (s *Service) validateRemoveBlockedURL(raw json.RawMessage) error {
+	return s.validateAddBlockedURL(raw)
 }
 
 func isSiteRoot(site, target string) bool {

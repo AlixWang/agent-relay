@@ -22,8 +22,8 @@ func TestMCPGatewayConfigDefaultsAndSegments(t *testing.T) {
 		t.Fatal("mcp gateway and write must default off")
 	}
 	bing := cfg.MCPGateway.Write.Services["bing-webmaster"]
-	if strings.Join(bing.AllowedTools, ",") != "submit_url,submit_url_batch,submit_feed,remove_feed" {
-		t.Fatalf("default low-risk write set: %+v", bing.AllowedTools)
+	if strings.Join(bing.AllowedTools, ",") != "submit_url,submit_url_batch,submit_feed,remove_feed,remove_blocked_url" {
+		t.Fatalf("default write set: %+v", bing.AllowedTools)
 	}
 	if cfg.MCPGateway.Service("adsense").CredentialRef != "secret:GA_ADSENSE_ADC" {
 		t.Fatalf("adsense credential ref: %+v", cfg.MCPGateway.Service("adsense"))
